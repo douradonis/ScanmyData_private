@@ -6329,7 +6329,7 @@ document.getElementById('markSearchForm')?.addEventListener('submit', async func
       } catch(_) {}
       try {
         const vatFromHidden = String(document.querySelector('input[name="active_vat"]')?.value || '').trim();
-        const vatResolved = String(vatFromHidden || VAT || '').trim();
+        const vatResolved = String(vatFromHidden || VAT || (parsedSummary && (parsedSummary.AFM_issuer || parsedSummary.AFM || parsedSummary.issuer_vat)) || '').trim();
         if (!vatResolved) return false;
         const r = await fetch('/api/check_mark', {
           method: 'POST',
@@ -6384,7 +6384,7 @@ document.getElementById('markSearchForm')?.addEventListener('submit', async func
 
     if (hasSummary) {
       try {
-        const markToCheck = String((parsedSummary && (parsedSummary.mark || parsedSummary.MARK)) || markVal || '').trim();
+        const markToCheck = String((parsedSummary && (parsedSummary.mark || parsedSummary.MARK || parsedSummary.invoice_id)) || markVal || '').trim();
         const blocked = await shouldBlockForReclassification(markToCheck);
         if (blocked) return;
         const liveSummaryInput = document.getElementById('summaryJsonInput');
@@ -6447,11 +6447,8 @@ document.getElementById('markSearchForm')?.addEventListener('submit', async func
     }
   } catch(err) {
     try { hideLoadingOverlay(); } catch(_) {}
-    console.warn('invoiceAjaxSearch failed; fallback to normal submit', err);
-    try {
-      const form = evt.currentTarget;
-      if (form && typeof form.submit === 'function') form.submit();
-    } catch(_) {}
+    console.warn('invoiceAjaxSearch failed; preventing full submit fallback', err);
+    try { if (typeof showFlash === 'function') showFlash('Σφάλμα αναζήτησης. Παρακαλώ δοκίμασε ξανά.', 'error', 3200); } catch(_) {}
   }
 }, true);
 
@@ -11510,10 +11507,14 @@ document.addEventListener('click', function(e){
   if (afmOk) {
     afmOk.addEventListener('click', function(){
       try { document.getElementById('afmWarningModal').style.display = 'none'; } catch(_){}
-      const target = resetSearchAndReload();
+      resetSearchAndReload();
+      try { if (typeof clearReclassificationSearchState === 'function') clearReclassificationSearchState(); } catch(_) {}
       setTimeout(() => {
-        if (target){ window.location.replace(target); }
-        else { window.location.reload(); }
+        try {
+          const u = new URL(window.location.href);
+          ['mark','url','payload','scrape_url','mark_id','force_edit'].forEach(param => u.searchParams.delete(param));
+          history.replaceState(null, '', u.pathname + (u.search ? ('?' + u.searchParams.toString()) : '') + u.hash);
+        } catch(_) {}
       }, 40);
     });
   }
@@ -11600,7 +11601,7 @@ document.addEventListener('click', function(e){
   function doReload() {
     // καθάρισε flags ώστε να μην ξανανοίξει modal
     clearUrlFlags();
-    window.location.reload();
+    try { if (typeof clearReclassificationSearchState === 'function') clearReclassificationSearchState(); } catch(_) {}
   }
 
   // ---- 3) Bootstrap-aware reload: αφού κλείσει το modal ----
