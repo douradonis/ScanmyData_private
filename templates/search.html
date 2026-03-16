@@ -6221,6 +6221,8 @@ document.getElementById('markSearchForm')?.addEventListener('submit', async func
     evt.stopPropagation();
     if (typeof evt.stopImmediatePropagation === 'function') evt.stopImmediatePropagation();
 
+    try { showLoadingOverlay('Αναζήτηση', 'Παρακαλώ περιμένετε - ανάκτηση στοιχείων τιμολογίου...'); } catch(_) {}
+
     const payload = new FormData(form);
     const resp = await fetch(form.action || window.location.pathname, {
       method: (form.method || 'POST').toUpperCase(),
@@ -6235,6 +6237,7 @@ document.getElementById('markSearchForm')?.addEventListener('submit', async func
 
     const html = await resp.text();
     const parsed = new DOMParser().parseFromString(html, 'text/html');
+    try { hideLoadingOverlay(); } catch(_) {}
 
     // Sync returned MARK field
     try {
@@ -6290,15 +6293,41 @@ document.getElementById('markSearchForm')?.addEventListener('submit', async func
         const liveSummaryInput = document.getElementById('summaryJsonInput');
         if (liveSummaryInput) liveSummaryInput.value = JSON.stringify(parsedSummary);
         window.__RC_SERVER_MODAL_SUMMARY = parsedSummary;
+
+        // Prefer server-rendered modal body from response so invoice category dropdowns/buttons
+        // stay identical to current non-AJAX behavior.
+        const idsToCopyText = [
+          'summaryModalMark','summary_AA','summary_AFM','summary_Name','summary_issueDate',
+          'summary_type_name','summary_paymentMethodLabel','summary_totalNetValue','summary_totalVatAmount','summary_totalValue'
+        ];
+        idsToCopyText.forEach(id => {
+          const src = parsed.getElementById(id);
+          const dst = document.getElementById(id);
+          if (src && dst) dst.textContent = src.textContent || '';
+        });
+
+        const srcLines = parsed.getElementById('summaryLinesContainer');
+        const dstLines = document.getElementById('summaryLinesContainer');
+        if (srcLines && dstLines) dstLines.innerHTML = srcLines.innerHTML;
+
+        const srcDataInput = parsed.getElementById('summaryDataInput');
+        const dstDataInput = document.getElementById('summaryDataInput');
+        if (srcDataInput && dstDataInput) dstDataInput.value = srcDataInput.value || dstDataInput.value || '{}';
+
         if (typeof window.prefillSummaryModal === 'function') window.prefillSummaryModal();
         if (window.RC_forcePopulateSummaryModal) {
           try { window.RC_forcePopulateSummaryModal(); } catch(_) {}
         }
+        if (typeof window.ensureCategoryButtonsBound === 'function') {
+          try { window.ensureCategoryButtonsBound(); } catch(_) {}
+        }
+
         const modal = document.getElementById('summaryModal');
         if (modal) modal.style.display = 'flex';
       } catch(_) {}
     }
   } catch(err) {
+    try { hideLoadingOverlay(); } catch(_) {}
     console.warn('invoiceAjaxSearch failed; fallback to normal submit', err);
     try {
       const form = evt.currentTarget;
