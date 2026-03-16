@@ -350,9 +350,7 @@
   </div>
 </div>
 
-<div id="summary-container">
 {% include 'list_inner.html' %}
-</div>
 
 
 {% endblock %}
@@ -6389,6 +6387,31 @@ document.getElementById('markSearchForm')?.addEventListener('submit', async func
 // ===== Helper function for partial table reload (after save) =====
 async function partiallyReloadInvoiceTable() {
   try {
+    // Prefer full list fragment extraction (keeps controls + scripts structure)
+    const listUrl = window.location.pathname.indexOf('/list') === 0 ? window.location.href : '/list';
+    const pageRes = await fetch(listUrl, { method: 'GET', credentials: 'same-origin' });
+    if (pageRes.ok) {
+      const html = await pageRes.text();
+      const parsed = new DOMParser().parseFromString(html, 'text/html');
+      const next = parsed.getElementById('summary-container');
+      const live = document.getElementById('summary-container');
+      if (next && live) {
+        live.innerHTML = next.innerHTML;
+        setTimeout(() => {
+          try {
+            if (typeof window.FBP_INIT_TABULATOR === 'function') {
+              window.FBP_INIT_TABULATOR();
+            } else if (typeof window.FBP_INIT_TABLE === 'function') {
+              window.FBP_INIT_TABLE();
+              initializeSelectAllCheckbox();
+            }
+          } catch(e) { console.warn('Table reinitialization failed:', e); }
+        }, 50);
+        return true;
+      }
+    }
+
+    // Fallback to old fragment endpoint
     const tableRes = await fetch('/list/fragment', { method: 'GET', credentials: 'same-origin' });
     if (tableRes.ok) {
       const data = await tableRes.json();
@@ -6396,14 +6419,11 @@ async function partiallyReloadInvoiceTable() {
         const container = document.getElementById('summary-container');
         if (container) {
           container.innerHTML = data.table_html;
-          // Reinitialize table event listeners 
           setTimeout(() => {
-            try { 
-              // If Tabulator is in use, reinitialize it (this is the correct approach)
+            try {
               if (typeof window.FBP_INIT_TABULATOR === 'function') {
                 window.FBP_INIT_TABULATOR();
               } else if (typeof window.FBP_INIT_TABLE === 'function') {
-                // Otherwise fallback to legacy init
                 window.FBP_INIT_TABLE();
                 initializeSelectAllCheckbox();
               }
@@ -6971,7 +6991,7 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
     if (reloaded) {
       try { if (typeof showFlash === 'function') showFlash('Παραστατικό αποθηκεύτηκε με επιτυχία!', 'success', 2000); } catch(_) {}
     } else {
-      window.location = window.location.pathname; // fallback to full reload
+      try { if (typeof showFlash === 'function') showFlash('Αποθηκεύτηκε, αλλά η μερική ανανέωση πίνακα απέτυχε.', 'warning', 3500); } catch(_) {}
     }
   } catch (err) {
     console.error('save_summary AJAX error', err);
@@ -7334,7 +7354,7 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
       if (reloaded) {
         try { if (typeof showFlash === 'function') showFlash('Παραστατικό χαρακτηρίστηκε με επιτυχία!', 'success', 2000); } catch(_) {}
       } else {
-        window.location = window.location.pathname;
+        try { if (typeof showFlash === 'function') showFlash('Αποθηκεύτηκε, αλλά η μερική ανανέωση πίνακα απέτυχε.', 'warning', 3500); } catch(_) {}
       }
       releaseSummarySaveLock();
     } catch (err) {
@@ -8865,7 +8885,7 @@ document.addEventListener('submit', async function deleteInvoicesAjaxSubmit(ev){
     if (reloaded) {
       try { showFlash('Οι επιλεγμένες γραμμές διαγράφηκαν.', 'success', 2200); } catch(_) {}
     } else {
-      window.location = window.location.pathname;
+      try { showFlash('Η διαγραφή ολοκληρώθηκε, αλλά η μερική ανανέωση πίνακα απέτυχε.', 'warning', 3500); } catch(_) {}
     }
   } catch(err) {
     console.warn('deleteInvoicesAjaxSubmit failed', err);
@@ -9682,6 +9702,12 @@ document.addEventListener('submit', async function deleteInvoicesAjaxSubmit(ev){
 
   function applyReceiptMode(mode, fire = true, persist = true){
     const normalized = String(mode || '').toLowerCase() === 'analysis' ? 'analysis' : 'mixed';
+    if (normalized === 'analysis' && !hasReceiptCustomCategories) {
+      try {
+        showFlash('Η ανάλυση αποδείξεων ενεργοποιείται από Credentials → Επεξεργασία πελάτη → Custom κατηγορίες (επιλογή: Αποδείξεις).', 'warning', 6000);
+      } catch(_) {}
+      return;
+    }
     logDebug('applyReceiptMode:'+normalized);
     if (persist) {
       try { localStorage.setItem('rc:receiptMode', normalized); } catch(_) {}
@@ -9783,6 +9809,13 @@ document.addEventListener('submit', async function deleteInvoicesAjaxSubmit(ev){
       const opt = ev.target && ev.target.closest ? ev.target.closest('[data-receipt-mode]') : null;
       if (!opt) return;
       const mode = opt.getAttribute('data-receipt-mode') || 'mixed';
+      if (mode === 'analysis' && !hasReceiptCustomCategories) {
+        try {
+          showFlash('Η ανάλυση αποδείξεων ενεργοποιείται από Credentials → Επεξεργασία πελάτη → Custom κατηγορίες (επιλογή: Αποδείξεις).', 'warning', 6000);
+        } catch(_) {}
+        receiptsModeMenu.classList.add('hidden');
+        return;
+      }
       applyReceiptMode(mode, true);
       receiptsModeMenu.classList.add('hidden');
     });
@@ -10512,7 +10545,7 @@ RC.handleReceiptAfterScrape = async function(summaryObj, scrapeUrl){
     // Partial reload instead of full page reload
     const reloaded = await partiallyReloadInvoiceTable();
     if (!reloaded) {
-      window.location = window.location.pathname;
+      showFlash('Η αποθήκευση ολοκληρώθηκε, αλλά η μερική ανανέωση πίνακα απέτυχε.', 'warning', 3500);
     }
     return true;
   } catch (e) {
