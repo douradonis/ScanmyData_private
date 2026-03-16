@@ -6306,17 +6306,19 @@ document.getElementById('markSearchForm')?.addEventListener('submit', async func
           if (src && dst) dst.textContent = src.textContent || '';
         });
 
-        const srcLines = parsed.getElementById('summaryLinesContainer');
-        const dstLines = document.getElementById('summaryLinesContainer');
-        if (srcLines && dstLines) dstLines.innerHTML = srcLines.innerHTML;
-
         const srcDataInput = parsed.getElementById('summaryDataInput');
         const dstDataInput = document.getElementById('summaryDataInput');
         if (srcDataInput && dstDataInput) dstDataInput.value = srcDataInput.value || dstDataInput.value || '{}';
 
-        if (typeof window.prefillSummaryModal === 'function') window.prefillSummaryModal();
-        if (window.RC_forcePopulateSummaryModal) {
-          try { window.RC_forcePopulateSummaryModal(); } catch(_) {}
+        // Force the same renderer used in regular invoice flow so VAT category +
+        // expense-category controls are always shown (multi-line dropdowns / single-line buttons).
+        if (typeof window.renderSummaryLinesFromObject === 'function') {
+          try { window.renderSummaryLinesFromObject(parsedSummary); } catch(_) {}
+        } else {
+          if (typeof window.prefillSummaryModal === 'function') window.prefillSummaryModal();
+          if (window.RC_forcePopulateSummaryModal) {
+            try { window.RC_forcePopulateSummaryModal(); } catch(_) {}
+          }
         }
         if (typeof window.ensureCategoryButtonsBound === 'function') {
           try { window.ensureCategoryButtonsBound(); } catch(_) {}
