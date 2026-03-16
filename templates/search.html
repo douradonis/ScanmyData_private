@@ -6250,16 +6250,38 @@ document.getElementById('markSearchForm')?.addEventListener('submit', async func
     } catch(_) {}
 
     // Sync yellow existing-MARK banner state (for reclassification guard)
+    let hasExistingBannerInResponse = false;
     try {
       const existingLive = document.getElementById('existingBanner');
       const existingNew = parsed.getElementById('existingBanner');
       const strongMark = existingNew ? existingNew.querySelector('strong') : null;
       const newMarkText = (strongMark && strongMark.textContent) ? strongMark.textContent.trim() : '';
+      hasExistingBannerInResponse = !!existingNew;
+
+      const bindExistingBannerActions = (rootEl) => {
+        if (!rootEl) return;
+        const forceBtn = rootEl.querySelector('#forceEditBtn');
+        const dismissBtn = rootEl.querySelector('#dismissBannerBtn');
+        if (dismissBtn) dismissBtn.onclick = function(){
+          rootEl.style.display = 'none';
+          try { clearReclassificationSearchState(); } catch(_) {}
+        };
+        if (forceBtn) forceBtn.onclick = async function(){
+          const mv = encodeURIComponent(String(document.getElementById('markInput')?.value || '').trim());
+          if (!mv) return;
+          if (await showModalConfirm('Επιβεβαίωση', 'Θες σίγουρα να επαναχαρακτηρίσεις το MARK και να ανοίξει η φόρμα επεξεργασίας;')) {
+            rootEl.style.display = 'none';
+            window.location = SEARCH_BASE_URL + '?mark=' + mv + '&force_edit=1';
+          }
+        };
+      };
 
       if (existingLive && existingNew) {
+        existingLive.innerHTML = existingNew.innerHTML;
         const liveStrong = existingLive.querySelector('strong');
         if (liveStrong && newMarkText) liveStrong.textContent = newMarkText;
-        existingLive.style.display = '';
+        existingLive.style.display = 'block';
+        bindExistingBannerActions(existingLive);
       } else if (existingLive && !existingNew) {
         existingLive.style.display = 'none';
       } else if (!existingLive && existingNew) {
@@ -6267,19 +6289,18 @@ document.getElementById('markSearchForm')?.addEventListener('submit', async func
         if (form && form.parentNode) {
           const cloned = existingNew.cloneNode(true);
           form.parentNode.insertBefore(cloned, form.nextSibling);
-          const forceBtn = cloned.querySelector('#forceEditBtn');
-          const dismissBtn = cloned.querySelector('#dismissBannerBtn');
-          if (dismissBtn) dismissBtn.addEventListener('click', () => { cloned.style.display = 'none'; try { clearReclassificationSearchState(); } catch(_) {} });
-          if (forceBtn) forceBtn.addEventListener('click', async () => {
-            const mv = encodeURIComponent(String(document.getElementById('markInput')?.value || '').trim());
-            if (!mv) return;
-            if (await showModalConfirm('Επιβεβαίωση', 'Θες σίγουρα να επαναχαρακτηρίσεις το MARK και να ανοίξει η φόρμα επεξεργασίας;')) {
-              window.location = SEARCH_BASE_URL + '?mark=' + mv + '&force_edit=1';
-            }
-          });
+          cloned.style.display = 'block';
+          bindExistingBannerActions(cloned);
         }
       }
     } catch(_) {}
+
+    // If server says this MARK already exists, preserve the old yellow-box confirmation flow
+    // and do NOT auto-open summary modal in this phase.
+    if (hasExistingBannerInResponse) {
+      return;
+    }
+
 
     // Hydrate modal summary from server response and open summary modal without reloading page
     const newSummaryInput = parsed.getElementById('summaryJsonInput');
@@ -6326,6 +6347,26 @@ document.getElementById('markSearchForm')?.addEventListener('submit', async func
 
         const modal = document.getElementById('summaryModal');
         if (modal) modal.style.display = 'flex';
+
+        // Repeat-entry invoices: auto-apply saved mapping/profile and submit, same as classic flow.
+        try {
+          const repeatOn = !!document.getElementById('repeatEntrySwitch')?.checked;
+          const receiptsOn = !!document.getElementById('useReceiptsSwitch')?.checked;
+          if (repeatOn && !receiptsOn && typeof applyMappingToSummaryAndSubmitUsingMapping === 'function') {
+            let mapping = {};
+            try {
+              mapping = (window.__RC_REPEAT_ENTRY_LAST && window.__RC_REPEAT_ENTRY_LAST.mapping) ? window.__RC_REPEAT_ENTRY_LAST.mapping : {};
+              if (!mapping || !Object.keys(mapping).length) {
+                const rep = (typeof apiGetRepeatEntry === 'function') ? await apiGetRepeatEntry(VAT) : null;
+                mapping = rep && rep.repeat_entry && rep.repeat_entry.mapping ? rep.repeat_entry.mapping : {};
+              }
+            } catch(_) { mapping = {}; }
+            if (mapping && Object.keys(mapping).length) {
+              const did = await applyMappingToSummaryAndSubmitUsingMapping(mapping);
+              if (did && modal) modal.style.display = 'none';
+            }
+          }
+        } catch(_) {}
       } catch(_) {}
     }
   } catch(err) {
