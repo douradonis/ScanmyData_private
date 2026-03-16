@@ -947,7 +947,35 @@ document.addEventListener('click', function(e){
         try{ console.info('delete submit, client marks=', JSON.stringify(tdelete)); }catch(_){ }
 
         document.body.appendChild(form);
-        form.submit();
+        (async function(){
+          try {
+            const fd = new FormData(form);
+            const resp = await fetch(form.action, {
+              method: 'POST',
+              credentials: 'same-origin',
+              headers: { 'X-Requested-With': 'XMLHttpRequest' },
+              body: fd
+            });
+            if (!resp.ok) {
+              const txt = await resp.text().catch(()=>'');
+              throw new Error('HTTP ' + resp.status + (txt ? (': ' + txt.slice(0,120)) : ''));
+            }
+            let reloaded = false;
+            try { if (typeof window.partiallyReloadInvoiceTable === 'function') reloaded = await window.partiallyReloadInvoiceTable(); } catch(_) {}
+            if (reloaded) {
+              try { if (typeof showFlash === 'function') showFlash('Οι επιλεγμένες γραμμές διαγράφηκαν.', 'success', 2200); } catch(_) {}
+            } else {
+              try { if (typeof showFlash === 'function') showFlash('Η διαγραφή ολοκληρώθηκε, αλλά η μερική ανανέωση πίνακα απέτυχε.', 'warning', 3200); } catch(_) {}
+            }
+          } catch(err) {
+            try { if (typeof showFlash === 'function') showFlash('Σφάλμα διαγραφής: ' + (err.message || err), 'error', 4500); } catch(_) {}
+          } finally {
+            try { confirmBtn.disabled = false; } catch(_) {}
+            try { if (spinner) spinner.classList.add('hidden'); } catch(_) {}
+            try { if (window.FBP_DELETE && typeof window.FBP_DELETE.closeModal === 'function') window.FBP_DELETE.closeModal(); } catch(_) {}
+            try { form.remove(); } catch(_) {}
+          }
+        })();
       };
     });
 

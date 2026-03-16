@@ -3394,10 +3394,10 @@ document.addEventListener('DOMContentLoaded', replayPersistedReceiptFlash, { onc
       if (!form) return;
       try {
         if (typeof form.requestSubmit === 'function') form.requestSubmit();
-        else form.submit();
+        else form.dispatchEvent(new Event('submit', { cancelable:true, bubbles:true }));
         showFlash('Η αποθήκευση ζητήθηκε από τη φορητή συσκευή.', 'info', 2500);
       } catch (_) {
-        try { form.submit(); } catch (_) {}
+        try { form.dispatchEvent(new Event('submit', { cancelable:true, bubbles:true })); } catch (_) {}
       }
       scheduleSummaryRefresh(400);
     }
@@ -5463,10 +5463,8 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
       const markValRaw = (markInput && markInput.value) ? markInput.value.trim() : '{{ mark or "" }}';
       const markVal = encodeURIComponent(markValRaw || '');
       if (!markVal){ await showModalAlert('Σφάλμα', 'Δεν δόθηκε MARK για επιβεβαίωση.'); return; }
-      if (await showModalConfirm('Επιβεβαίωση', 'Θες σίγουρα να επαναχαρακτηρίσεις το MARK και να ανοίξει η φόρμα επεξεργασίας;')) {
-        if(existingBanner) existingBanner.style.display = 'none';
-        window.location = SEARCH_BASE_URL + '?mark=' + markVal + '&force_edit=1';
-      }
+      if(existingBanner) existingBanner.style.display = 'none';
+      window.location = SEARCH_BASE_URL + '?mark=' + markVal + '&force_edit=1';
     });
   }
 
@@ -5529,10 +5527,19 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
             }
           } catch(_) {}
           await RC.confirmReceiptOnce(normalized, url);
-          // κράτα το mode σε receipts και κάνε hard redirect για καθαρή κατάσταση
+          // κράτα το mode σε receipts και κάνε μερική ανανέωση του πίνακα
           try { localStorage.setItem('useReceiptsSwitch','1'); } catch(_){}
-          const base = location.pathname + '?use_receipts=1';
-          location.replace(base);
+          try {
+            const u = document.getElementById('scrapeUrlInput');
+            if (u) u.value = '';
+            const m = document.getElementById('markInput');
+            if (m) m.value = '';
+          } catch(_) {}
+          let reloaded = false;
+          try { if (typeof partiallyReloadInvoiceTable === 'function') reloaded = await partiallyReloadInvoiceTable(); } catch(_) {}
+          if (!reloaded) {
+            showFlash('Η αποθήκευση ολοκληρώθηκε, αλλά η μερική ανανέωση πίνακα απέτυχε.', 'warning', 3500);
+          }
         } catch(e) {
           console.warn('auto-confirm receipt failed', e);
         }
@@ -6269,10 +6276,8 @@ document.getElementById('markSearchForm')?.addEventListener('submit', async func
         if (forceBtn) forceBtn.onclick = async function(){
           const mv = encodeURIComponent(String(document.getElementById('markInput')?.value || '').trim());
           if (!mv) return;
-          if (await showModalConfirm('Επιβεβαίωση', 'Θες σίγουρα να επαναχαρακτηρίσεις το MARK και να ανοίξει η φόρμα επεξεργασίας;')) {
-            rootEl.style.display = 'none';
-            window.location = SEARCH_BASE_URL + '?mark=' + mv + '&force_edit=1';
-          }
+          rootEl.style.display = 'none';
+          window.location = SEARCH_BASE_URL + '?mark=' + mv + '&force_edit=1';
         };
       };
 
@@ -6387,6 +6392,31 @@ document.getElementById('markSearchForm')?.addEventListener('submit', async func
 // ===== Helper function for partial table reload (after save) =====
 async function partiallyReloadInvoiceTable() {
   try {
+    // Prefer full list fragment extraction (keeps controls + scripts structure)
+    const listUrl = window.location.pathname.indexOf('/list') === 0 ? window.location.href : '/list';
+    const pageRes = await fetch(listUrl, { method: 'GET', credentials: 'same-origin' });
+    if (pageRes.ok) {
+      const html = await pageRes.text();
+      const parsed = new DOMParser().parseFromString(html, 'text/html');
+      const next = parsed.getElementById('summary-container');
+      const live = document.getElementById('summary-container');
+      if (next && live) {
+        live.innerHTML = next.innerHTML;
+        setTimeout(() => {
+          try {
+            if (typeof window.FBP_INIT_TABULATOR === 'function') {
+              window.FBP_INIT_TABULATOR();
+            } else if (typeof window.FBP_INIT_TABLE === 'function') {
+              window.FBP_INIT_TABLE();
+              initializeSelectAllCheckbox();
+            }
+          } catch(e) { console.warn('Table reinitialization failed:', e); }
+        }, 50);
+        return true;
+      }
+    }
+
+    // Fallback to old fragment endpoint
     const tableRes = await fetch('/list/fragment', { method: 'GET', credentials: 'same-origin' });
     if (tableRes.ok) {
       const data = await tableRes.json();
@@ -6394,14 +6424,11 @@ async function partiallyReloadInvoiceTable() {
         const container = document.getElementById('summary-container');
         if (container) {
           container.innerHTML = data.table_html;
-          // Reinitialize table event listeners 
           setTimeout(() => {
-            try { 
-              // If Tabulator is in use, reinitialize it (this is the correct approach)
+            try {
               if (typeof window.FBP_INIT_TABULATOR === 'function') {
                 window.FBP_INIT_TABULATOR();
               } else if (typeof window.FBP_INIT_TABLE === 'function') {
-                // Otherwise fallback to legacy init
                 window.FBP_INIT_TABLE();
                 initializeSelectAllCheckbox();
               }
@@ -6969,7 +6996,7 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
     if (reloaded) {
       try { if (typeof showFlash === 'function') showFlash('Παραστατικό αποθηκεύτηκε με επιτυχία!', 'success', 2000); } catch(_) {}
     } else {
-      window.location = window.location.pathname; // fallback to full reload
+      try { if (typeof showFlash === 'function') showFlash('Αποθηκεύτηκε, αλλά η μερική ανανέωση πίνακα απέτυχε.', 'warning', 3500); } catch(_) {}
     }
   } catch (err) {
     console.error('save_summary AJAX error', err);
@@ -7332,7 +7359,7 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
       if (reloaded) {
         try { if (typeof showFlash === 'function') showFlash('Παραστατικό χαρακτηρίστηκε με επιτυχία!', 'success', 2000); } catch(_) {}
       } else {
-        window.location = window.location.pathname;
+        try { if (typeof showFlash === 'function') showFlash('Αποθηκεύτηκε, αλλά η μερική ανανέωση πίνακα απέτυχε.', 'warning', 3500); } catch(_) {}
       }
       releaseSummarySaveLock();
     } catch (err) {
@@ -8863,7 +8890,7 @@ document.addEventListener('submit', async function deleteInvoicesAjaxSubmit(ev){
     if (reloaded) {
       try { showFlash('Οι επιλεγμένες γραμμές διαγράφηκαν.', 'success', 2200); } catch(_) {}
     } else {
-      window.location = window.location.pathname;
+      try { showFlash('Η διαγραφή ολοκληρώθηκε, αλλά η μερική ανανέωση πίνακα απέτυχε.', 'warning', 3500); } catch(_) {}
     }
   } catch(err) {
     console.warn('deleteInvoicesAjaxSubmit failed', err);
@@ -8924,7 +8951,7 @@ document.addEventListener('submit', async function deleteInvoicesAjaxSubmit(ev){
     return true;
   }
 
-  function autoSubmitReceipt(obj){
+  async function autoSubmitReceipt(obj){
     const receiptsOn = !!(qs('useReceiptsSwitch') && qs('useReceiptsSwitch').checked);
     const repeatOn = !!(qs('repeatEntrySwitch') && qs('repeatEntrySwitch').checked);
     const mixedMode = !isReceiptAnalysisOn();
@@ -8956,23 +8983,24 @@ document.addEventListener('submit', async function deleteInvoicesAjaxSubmit(ev){
       qs('summaryJsonInput').value = JSON.stringify(obj);
     }catch(_){}
 
-    const form = qs('saveSummaryForm');
-    if (!form) return;
     once.submitted = true;
-    sessionStorage.setItem(key,'1');                 // ώστε στο επόμενο reload να ΜΗΝ ξαναστείλει
-    // Ensure repeat_enabled is posted
-    let h = form.querySelector('input[name="repeat_enabled"]');
-    if (!h) {
-      h = document.createElement('input');
-      h.type = 'hidden';
-      h.name = 'repeat_enabled';
-      form.appendChild(h);
-    }
-    h.value = '1';
-    if (typeof form.requestSubmit === 'function') {
-      form.requestSubmit();
-    } else {
-      form.submit();
+    try { sessionStorage.setItem(key,'1'); } catch(_) {}
+
+    try {
+      const scrapeUrl = (qs('scrapeUrlInput')?.value || qs('scrapeUrlField')?.value || '').trim();
+      if (window.RC && typeof RC.handleReceiptAfterScrape === 'function') {
+        const ok = await RC.handleReceiptAfterScrape(obj, scrapeUrl);
+        if (!ok) {
+          once.submitted = false;
+          try { sessionStorage.removeItem(key); } catch(_) {}
+        }
+      } else {
+        once.submitted = false;
+        try { sessionStorage.removeItem(key); } catch(_) {}
+      }
+    } catch(_) {
+      once.submitted = false;
+      try { sessionStorage.removeItem(key); } catch(_) {}
     }
   }
 
@@ -9413,7 +9441,8 @@ document.addEventListener('submit', async function deleteInvoicesAjaxSubmit(ev){
       if (pending) return;
       pending = true;
       try {
-        if (form.requestSubmit) form.requestSubmit(); else form.submit();
+        if (form.requestSubmit) form.requestSubmit();
+        else form.dispatchEvent(new Event('submit', { cancelable:true, bubbles:true }));
       } finally {
         setTimeout(()=>{ pending=false; }, 500);
       }
@@ -9680,6 +9709,12 @@ document.addEventListener('submit', async function deleteInvoicesAjaxSubmit(ev){
 
   function applyReceiptMode(mode, fire = true, persist = true){
     const normalized = String(mode || '').toLowerCase() === 'analysis' ? 'analysis' : 'mixed';
+    if (normalized === 'analysis' && !hasReceiptCustomCategories) {
+      try {
+        showFlash('Η ανάλυση αποδείξεων ενεργοποιείται από Credentials → Επεξεργασία πελάτη → Custom κατηγορίες (επιλογή: Αποδείξεις).', 'warning', 6000);
+      } catch(_) {}
+      return;
+    }
     logDebug('applyReceiptMode:'+normalized);
     if (persist) {
       try { localStorage.setItem('rc:receiptMode', normalized); } catch(_) {}
@@ -9781,6 +9816,13 @@ document.addEventListener('submit', async function deleteInvoicesAjaxSubmit(ev){
       const opt = ev.target && ev.target.closest ? ev.target.closest('[data-receipt-mode]') : null;
       if (!opt) return;
       const mode = opt.getAttribute('data-receipt-mode') || 'mixed';
+      if (mode === 'analysis' && !hasReceiptCustomCategories) {
+        try {
+          showFlash('Η ανάλυση αποδείξεων ενεργοποιείται από Credentials → Επεξεργασία πελάτη → Custom κατηγορίες (επιλογή: Αποδείξεις).', 'warning', 6000);
+        } catch(_) {}
+        receiptsModeMenu.classList.add('hidden');
+        return;
+      }
       applyReceiptMode(mode, true);
       receiptsModeMenu.classList.add('hidden');
     });
@@ -10466,6 +10508,13 @@ RC.confirmReceiptOnce = async function(summaryObj, scrapeUrl){
       body: JSON.stringify(payload)
     });
     const jj = await res.json().catch(()=>null);
+    if (jj && (jj.duplicate === true || jj.allow_edit_existing === true || jj.reclassification_required === true)) {
+      return {
+        ok: false,
+        reason: 'reclassification_required',
+        mark: String((jj.mark || summaryObj.mark || summaryObj.MARK || '')).trim()
+      };
+    }
     if (!res.ok || !jj || !jj.ok) return { ok:false, reason: (jj&&jj.error) || ('HTTP '+res.status) };
 
     return { ok:true };
@@ -10493,6 +10542,38 @@ RC.handleReceiptAfterScrape = async function(summaryObj, scrapeUrl){
     if (!r.ok) {
       if (r.reason === 'missing_afm') {
         window.openReceiptWarning && openReceiptWarning('Λείπει AFM ενεργού πελάτη.');
+      } else if (r.reason === 'reclassification_required') {
+        try {
+          const markVal = String(r.mark || summaryObj.mark || summaryObj.MARK || document.getElementById('markInput')?.value || '').trim();
+          let banner = document.getElementById('existingBanner');
+          if (!banner) {
+            const form = document.getElementById('markSearchForm');
+            const host = (form && form.parentNode) ? form.parentNode : document.body;
+            banner = document.createElement('div');
+            banner.id = 'existingBanner';
+            banner.className = 'mt-4 p-4 bg-yellow-50 rounded border border-yellow-300 text-yellow-800';
+            banner.innerHTML = 'Το MARK <strong></strong> υπάρχει ήδη στο Excel. Θέλεις να τροποποιήσεις τον χαρακτηρισμό;'
+              + '<div class="mt-2 flex gap-2">'
+              + '<button id="forceEditBtn" type="button" class="bg-yellow-600 text-white px-3 py-2 rounded hover:bg-yellow-700">Επιβεβαίωση</button>'
+              + '<button id="dismissBannerBtn" type="button" class="px-3 py-2 border rounded hover:bg-gray-50">Άκυρο</button>'
+              + '</div>';
+            if (form && form.parentNode) host.insertBefore(banner, form.nextSibling);
+            else host.prepend(banner);
+          }
+          const strong = banner.querySelector('strong');
+          if (strong) strong.textContent = markVal || '?';
+          const dismissBtn = banner.querySelector('#dismissBannerBtn');
+          if (dismissBtn) dismissBtn.onclick = function(){ banner.style.display = 'none'; };
+          const forceBtn = banner.querySelector('#forceEditBtn');
+          if (forceBtn) forceBtn.onclick = function(){
+            const mv = encodeURIComponent(String(markVal || document.getElementById('markInput')?.value || '').trim());
+            if (!mv) return;
+            const base = window.SEARCH_BASE_URL || '/search';
+            window.location = base + '?mark=' + mv + '&force_edit=1';
+          };
+          banner.style.display = 'block';
+        } catch(_) {}
+        showFlash('Το MARK υπάρχει ήδη στο Excel.', 'warning', 6000);
       } else {
         const errMsg = 'Σφάλμα αποθήκευσης: ' + (r.reason || 'άγνωστο');
         showFlash(errMsg, 'error', 6000);
@@ -10510,7 +10591,7 @@ RC.handleReceiptAfterScrape = async function(summaryObj, scrapeUrl){
     // Partial reload instead of full page reload
     const reloaded = await partiallyReloadInvoiceTable();
     if (!reloaded) {
-      window.location = window.location.pathname;
+      showFlash('Η αποθήκευση ολοκληρώθηκε, αλλά η μερική ανανέωση πίνακα απέτυχε.', 'warning', 3500);
     }
     return true;
   } catch (e) {
@@ -10550,39 +10631,34 @@ document.addEventListener('DOMContentLoaded', () => {
   };
   hideModal();
 
-  // 2) Βεβαιώσου ότι στο submit περνάει repeat_enabled=1
-  const ensureRepeatHidden = (form) => {
-    if (!form) return;
-    let h = form.querySelector('input[name="repeat_enabled"]');
-    if (!h) {
-      h = document.createElement('input');
-      h.type = 'hidden';
-      h.name = 'repeat_enabled';
-      form.appendChild(h);
-    }
-    h.value = '1';
-  };
-
-  // 3) Αυτόματο submit μόλις είναι έτοιμη η φόρμα/δεδομένα
+  // 2) Αυτόματη επιβεβαίωση μέσω AJAX (χωρίς form.submit / full reload)
   let submitted = false;
   const tryAutoSubmit = () => {
     if (submitted) return;
 
-    // Βρες τη φόρμα αποθήκευσης
-    const form = document.querySelector('form[action$="/save_summary"]');
-    if (!form) return;
+    const summaryEl = document.getElementById('summaryJsonInput');
+    const scrapeUrl = (document.getElementById('scrapeUrlInput')?.value || document.getElementById('scrapeUrlField')?.value || '').trim();
+    if (!summaryEl || !String(summaryEl.value || '').trim()) return;
 
-    // Έλεγξε ότι υπάρχει payload: summary_json (input/textarea) ή τουλάχιστον το mark
-    const payloadEl = form.querySelector('input[name="summary_json"],textarea[name="summary_json"]');
-    const hasPayload = payloadEl ? String(payloadEl.value || '').trim().length > 0 : false;
-    const hasMark = String((form.querySelector('[name="mark"]') || {}).value || '').trim().length === 15;
+    let summaryObj = null;
+    try { summaryObj = JSON.parse(summaryEl.value || '{}'); } catch(_) { summaryObj = null; }
+    if (!summaryObj || typeof summaryObj !== 'object') return;
 
-    if (!hasPayload && !hasMark) return;
-
-    ensureRepeatHidden(form);
     submitted = true;
     hideModal();
-    form.submit();
+
+    Promise.resolve().then(async () => {
+      try {
+        if (window.RC && typeof RC.handleReceiptAfterScrape === 'function') {
+          const ok = await RC.handleReceiptAfterScrape(summaryObj, scrapeUrl);
+          if (!ok) submitted = false;
+        } else {
+          submitted = false;
+        }
+      } catch(_) {
+        submitted = false;
+      }
+    });
   };
 
   // Δοκίμασε άμεσα & με μικρό retry
@@ -10944,10 +11020,19 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       }catch(_){}
       summaryInput.value = JSON.stringify(chosen);
-      setTimeout(function(){
-        if (!saveForm.dataset._autoSubmitted) {
-          saveForm.dataset._autoSubmitted = '1';
-          saveForm.requestSubmit ? saveForm.requestSubmit() : saveForm.submit();
+      setTimeout(async function(){
+        if (saveForm.dataset._autoSubmitted) return;
+        saveForm.dataset._autoSubmitted = '1';
+        try {
+          if (window.RC && typeof RC.handleReceiptAfterScrape === 'function') {
+            const scrapeUrl = (document.getElementById('scrapeUrlInput')?.value || document.getElementById('scrapeUrlField')?.value || '').trim();
+            const ok = await RC.handleReceiptAfterScrape(chosen, scrapeUrl);
+            if (!ok) saveForm.dataset._autoSubmitted = '0';
+          } else {
+            saveForm.requestSubmit ? saveForm.requestSubmit() : saveForm.dispatchEvent(new Event('submit', { cancelable:true, bubbles:true }));
+          }
+        } catch(_) {
+          saveForm.dataset._autoSubmitted = '0';
         }
       }, 30);
     }
@@ -11152,10 +11237,11 @@ document.addEventListener('DOMContentLoaded', () => {
           let ok = false;
           try { if (typeof partiallyReloadInvoiceTable === 'function') ok = await partiallyReloadInvoiceTable(); } catch(_) {}
           if (!ok) {
-            const base = location.pathname + '?use_receipts=1';
-            location.replace(base);
+            if (typeof showFlash === 'function') {
+              showFlash('Η αποθήκευση ολοκληρώθηκε, αλλά η μερική ανανέωση πίνακα απέτυχε.', 'warning', 3500);
+            }
           }
-        } catch(_){ location.reload(); }
+        } catch(_) {}
       }, 120);
     } catch(err){
       console.warn('[RC-AUTOCONFIRM] failed', err);
@@ -11506,6 +11592,115 @@ document.addEventListener('click', function(e){
 
 <!-- === Fast Flow (seamless AJAX mode - auto-enabled with repeat mode) === -->
 <script src="{{ url_for('static', filename='receipts_fast_flow.js') }}"></script>
+
+<script>
+// Final hard guard: keep saveSummaryForm SPA-like (no full page reload).
+;(function(){
+  if (window.__FINAL_SAVE_SUMMARY_AJAX_GUARD__) return;
+  window.__FINAL_SAVE_SUMMARY_AJAX_GUARD__ = true;
+
+  function byId(id){ return document.getElementById(id); }
+
+  function ensureExistingBanner(mark){
+    let banner = byId('existingBanner');
+    if (!banner) {
+      const form = byId('markSearchForm');
+      const host = (form && form.parentNode) ? form.parentNode : document.body;
+      banner = document.createElement('div');
+      banner.id = 'existingBanner';
+      banner.className = 'mt-4 p-4 bg-yellow-50 rounded border border-yellow-300 text-yellow-800';
+      banner.innerHTML = 'Το MARK <strong></strong> υπάρχει ήδη στο Excel. Θέλεις να τροποποιήσεις τον χαρακτηρισμό;'
+        + '<div class="mt-2 flex gap-2">'
+        + '<button id="forceEditBtn" type="button" class="bg-yellow-600 text-white px-3 py-2 rounded hover:bg-yellow-700">Επιβεβαίωση</button>'
+        + '<button id="dismissBannerBtn" type="button" class="px-3 py-2 border rounded hover:bg-gray-50">Άκυρο</button>'
+        + '</div>';
+      if (form && form.parentNode) host.insertBefore(banner, form.nextSibling);
+      else host.prepend(banner);
+    }
+    const strong = banner.querySelector('strong');
+    if (strong) strong.textContent = String(mark || '').trim() || '?';
+    const dismiss = banner.querySelector('#dismissBannerBtn');
+    if (dismiss) dismiss.onclick = function(){ banner.style.display = 'none'; };
+    const force = banner.querySelector('#forceEditBtn');
+    if (force) force.onclick = function(){
+      const mv = encodeURIComponent(String(mark || byId('markInput')?.value || '').trim());
+      if (!mv) return;
+      const base = window.SEARCH_BASE_URL || '/search';
+      window.location = base + '?mark=' + mv + '&force_edit=1';
+    };
+    banner.style.display = 'block';
+    return banner;
+  }
+
+  async function handleSaveSummaryAjax(form){
+    const fd = new FormData(form);
+    const res = await fetch(form.action || '/save_summary', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'X-Requested-With': 'XMLHttpRequest' },
+      body: fd
+    });
+
+    const ct = (res.headers.get('content-type') || '').toLowerCase();
+    if (res.redirected || res.status === 302 || (res.url && res.url.indexOf('allow_edit_existing') !== -1)) {
+      const rawMark = byId('summaryJsonInput')?.value || '{}';
+      let mark = '';
+      try { mark = JSON.parse(rawMark).mark || JSON.parse(rawMark).MARK || ''; } catch(_) {}
+      ensureExistingBanner(mark || byId('markInput')?.value || '');
+      if (typeof showFlash === 'function') showFlash('Το MARK υπάρχει ήδη στο Excel.', 'warning', 4200);
+      return;
+    }
+
+    if (ct.includes('text/html')) {
+      const html = await res.text().catch(()=>'');
+      if (html && html.indexOf('id="existingBanner"') !== -1) {
+        let mark = '';
+        try {
+          const parsed = new DOMParser().parseFromString(html, 'text/html');
+          mark = (parsed.querySelector('#existingBanner strong')?.textContent || '').trim();
+        } catch(_) {}
+        ensureExistingBanner(mark || byId('markInput')?.value || '');
+        if (typeof showFlash === 'function') showFlash('Το MARK υπάρχει ήδη στο Excel.', 'warning', 4200);
+        return;
+      }
+    }
+
+    if (!res.ok) {
+      const txt = await res.text().catch(()=>'');
+      throw new Error('HTTP ' + res.status + (txt ? (': ' + txt.slice(0,120)) : ''));
+    }
+
+    try { if (typeof hideSummaryModal === 'function') hideSummaryModal(); } catch(_) {}
+    try { const s = byId('summaryJsonInput'); if (s) s.value = '{}'; } catch(_) {}
+    let ok = false;
+    try { if (typeof partiallyReloadInvoiceTable === 'function') ok = await partiallyReloadInvoiceTable(); } catch(_) {}
+    if (typeof showFlash === 'function') {
+      if (ok) showFlash('Αποθηκεύτηκε με επιτυχία.', 'success', 2200);
+      else showFlash('Αποθηκεύτηκε, αλλά η μερική ανανέωση απέτυχε.', 'warning', 3200);
+    }
+  }
+
+  document.addEventListener('submit', async function(ev){
+    const form = ev.target;
+    if (!form || form.id !== 'saveSummaryForm') return;
+    if (window.__FINAL_SAVE_SUMMARY_AJAX_IN_FLIGHT__) return;
+
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (typeof ev.stopImmediatePropagation === 'function') ev.stopImmediatePropagation();
+
+    window.__FINAL_SAVE_SUMMARY_AJAX_IN_FLIGHT__ = true;
+    try {
+      try { if (typeof updateSummaryFromDom === 'function') updateSummaryFromDom(); } catch(_) {}
+      await handleSaveSummaryAjax(form);
+    } catch(err) {
+      try { if (typeof showFlash === 'function') showFlash('Σφάλμα αποθήκευσης: ' + (err.message || err), 'error', 5000); } catch(_) {}
+    } finally {
+      window.__FINAL_SAVE_SUMMARY_AJAX_IN_FLIGHT__ = false;
+    }
+  }, true);
+})();
+</script>
 
 <script>
 // Final safety merge: ensure component `summaryDataInput` MTYPEs are copied
