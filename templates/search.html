@@ -10508,6 +10508,13 @@ RC.confirmReceiptOnce = async function(summaryObj, scrapeUrl){
       body: JSON.stringify(payload)
     });
     const jj = await res.json().catch(()=>null);
+    if (jj && (jj.duplicate === true || jj.allow_edit_existing === true || jj.reclassification_required === true)) {
+      return {
+        ok: false,
+        reason: 'reclassification_required',
+        mark: String((jj.mark || summaryObj.mark || summaryObj.MARK || '')).trim()
+      };
+    }
     if (!res.ok || !jj || !jj.ok) return { ok:false, reason: (jj&&jj.error) || ('HTTP '+res.status) };
 
     return { ok:true };
@@ -10535,6 +10542,38 @@ RC.handleReceiptAfterScrape = async function(summaryObj, scrapeUrl){
     if (!r.ok) {
       if (r.reason === 'missing_afm') {
         window.openReceiptWarning && openReceiptWarning('Λείπει AFM ενεργού πελάτη.');
+      } else if (r.reason === 'reclassification_required') {
+        try {
+          const markVal = String(r.mark || summaryObj.mark || summaryObj.MARK || document.getElementById('markInput')?.value || '').trim();
+          let banner = document.getElementById('existingBanner');
+          if (!banner) {
+            const form = document.getElementById('markSearchForm');
+            const host = (form && form.parentNode) ? form.parentNode : document.body;
+            banner = document.createElement('div');
+            banner.id = 'existingBanner';
+            banner.className = 'mt-4 p-4 bg-yellow-50 rounded border border-yellow-300 text-yellow-800';
+            banner.innerHTML = 'Το MARK <strong></strong> υπάρχει ήδη στο Excel. Θέλεις να τροποποιήσεις τον χαρακτηρισμό;'
+              + '<div class="mt-2 flex gap-2">'
+              + '<button id="forceEditBtn" type="button" class="bg-yellow-600 text-white px-3 py-2 rounded hover:bg-yellow-700">Επιβεβαίωση</button>'
+              + '<button id="dismissBannerBtn" type="button" class="px-3 py-2 border rounded hover:bg-gray-50">Άκυρο</button>'
+              + '</div>';
+            if (form && form.parentNode) host.insertBefore(banner, form.nextSibling);
+            else host.prepend(banner);
+          }
+          const strong = banner.querySelector('strong');
+          if (strong) strong.textContent = markVal || '?';
+          const dismissBtn = banner.querySelector('#dismissBannerBtn');
+          if (dismissBtn) dismissBtn.onclick = function(){ banner.style.display = 'none'; };
+          const forceBtn = banner.querySelector('#forceEditBtn');
+          if (forceBtn) forceBtn.onclick = function(){
+            const mv = encodeURIComponent(String(markVal || document.getElementById('markInput')?.value || '').trim());
+            if (!mv) return;
+            const base = window.SEARCH_BASE_URL || '/search';
+            window.location = base + '?mark=' + mv + '&force_edit=1';
+          };
+          banner.style.display = 'block';
+        } catch(_) {}
+        showFlash('Το MARK υπάρχει ήδη στο Excel.', 'warning', 6000);
       } else {
         const errMsg = 'Σφάλμα αποθήκευσης: ' + (r.reason || 'άγνωστο');
         showFlash(errMsg, 'error', 6000);
@@ -11645,9 +11684,6 @@ document.addEventListener('click', function(e){
     const form = ev.target;
     if (!form || form.id !== 'saveSummaryForm') return;
     if (window.__FINAL_SAVE_SUMMARY_AJAX_IN_FLIGHT__) return;
-
-    // Let explicit bypass continue when present.
-    if (window.__RC_SUMMARY_SUBMIT_BYPASS) return;
 
     ev.preventDefault();
     ev.stopPropagation();
