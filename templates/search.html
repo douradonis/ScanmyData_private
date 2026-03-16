@@ -577,7 +577,7 @@ function setActiveProfileHint(name){
   if(!el || !sw) return;
   try { window.__LAST_REPEAT_PROFILE_NAME = name || ''; } catch(_) { window.__LAST_REPEAT_PROFILE_NAME = name || ''; }
 
-  if (sw.checked && receiptModeAllowsProfileHint()) {
+  if (sw.checked) {
     el.style.display = '';
     el.textContent = "Ενεργό προφίλ επαναληψιμης: " + (name || "Γενικό");
   } else {
@@ -6314,8 +6314,70 @@ document.getElementById('markSearchForm')?.addEventListener('submit', async func
     try { parsedSummary = JSON.parse(newSummaryRaw || '{}'); } catch(_) { parsedSummary = null; }
 
     const hasSummary = !!(parsedSummary && typeof parsedSummary === 'object' && Object.keys(parsedSummary).length);
+
+    async function shouldBlockForReclassification(markText){
+      const mark = String(markText || '').trim();
+      if (!mark) return false;
+      try {
+        const force = (new URLSearchParams(window.location.search || '')).get('force_edit') === '1';
+        if (force) return false;
+      } catch(_) {}
+      try {
+        const r = await fetch('/api/check_mark', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'content-type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          body: JSON.stringify({ vat: VAT, mark })
+        });
+        const j = await r.json().catch(()=>null);
+        if (!(j && j.ok && j.found)) return false;
+
+        let live = document.getElementById('existingBanner');
+        if (!live) {
+          const f = document.getElementById('markSearchForm');
+          if (f && f.parentNode) {
+            live = document.createElement('div');
+            live.id = 'existingBanner';
+            live.className = 'mt-4 p-4 bg-yellow-50 rounded border border-yellow-300 text-yellow-800';
+            f.parentNode.insertBefore(live, f.nextSibling);
+          }
+        }
+        if (live) {
+          live.innerHTML = 'Το MARK <strong></strong> υπάρχει ήδη στο Excel. Θέλεις να τροποποιήσεις τον χαρακτηρισμό;'
+            + '<div class="mt-2 flex gap-2">'
+            + '<button id="forceEditBtn" type="button" class="bg-yellow-600 text-white px-3 py-2 rounded hover:bg-yellow-700">Επιβεβαίωση</button>'
+            + '<button id="dismissBannerBtn" type="button" class="px-3 py-2 border rounded hover:bg-gray-50">Άκυρο</button>'
+            + '</div>';
+          const strong = live.querySelector('strong');
+          if (strong) strong.textContent = mark;
+          const dismiss = live.querySelector('#dismissBannerBtn');
+          if (dismiss) dismiss.onclick = function(){
+            live.style.display = 'none';
+            try { clearReclassificationSearchState(); } catch(_) {}
+            try { window.dispatchEvent(new CustomEvent('scanmydata:reclassification-cancelled')); } catch(_) {}
+          };
+          const forceBtn = live.querySelector('#forceEditBtn');
+          if (forceBtn) forceBtn.onclick = function(){
+            const mv = encodeURIComponent(String(document.getElementById('markInput')?.value || mark).trim());
+            if (!mv) return;
+            live.style.display = 'none';
+            window.location = SEARCH_BASE_URL + '?mark=' + mv + '&force_edit=1';
+          };
+          live.style.display = 'block';
+        }
+        try { const m = document.getElementById('summaryModal'); if (m) m.style.display = 'none'; } catch(_) {}
+        try { if (typeof showFlash === 'function') showFlash('Το MARK ' + mark + ' υπάρχει ήδη στο Excel.', 'warning', 4200); } catch(_) {}
+        return true;
+      } catch(_) {
+        return false;
+      }
+    }
+
     if (hasSummary) {
       try {
+        const markToCheck = String((parsedSummary && (parsedSummary.mark || parsedSummary.MARK)) || markVal || '').trim();
+        const blocked = await shouldBlockForReclassification(markToCheck);
+        if (blocked) return;
         const liveSummaryInput = document.getElementById('summaryJsonInput');
         if (liveSummaryInput) liveSummaryInput.value = JSON.stringify(parsedSummary);
         window.__RC_SERVER_MODAL_SUMMARY = parsedSummary;
@@ -11600,6 +11662,26 @@ document.addEventListener('click', function(e){
   window.__FINAL_SAVE_SUMMARY_AJAX_GUARD__ = true;
 
   function byId(id){ return document.getElementById(id); }
+
+  try {
+    const form = byId('saveSummaryForm');
+    if (form && !form.__SCANMYDATA_SPA_SUBMIT_PATCHED__) {
+      form.__SCANMYDATA_SPA_SUBMIT_PATCHED__ = true;
+      const nativeSubmit = HTMLFormElement.prototype.submit;
+      form.submit = function patchedSaveSummarySubmit(){
+        try {
+          if (typeof this.requestSubmit === 'function') {
+            this.requestSubmit();
+            return;
+          }
+          const ev = new Event('submit', { cancelable: true, bubbles: true });
+          const allowed = this.dispatchEvent(ev);
+          if (!allowed) return;
+        } catch(_) {}
+        return nativeSubmit.call(this);
+      };
+    }
+  } catch(_) {}
 
   function ensureExistingBanner(mark){
     let banner = byId('existingBanner');
