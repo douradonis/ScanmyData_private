@@ -68,15 +68,50 @@
   }
 
   function showExistingBanner(mark) {
-    // Shows the yellow "already exists" banner and hides modal
-    const banner = $id('existingBanner');
-    if (banner) {
-      banner.style.display = 'block';
-      const modal = $id('summaryModal');
-      if (modal) modal.style.display = 'none';
-      return true;
+    // Shows (or creates) the yellow "already exists" banner and hides modal
+    let banner = $id('existingBanner');
+
+    if (!banner) {
+      const form = $id('markSearchForm');
+      const host = form && form.parentNode ? form.parentNode : document.body;
+      banner = document.createElement('div');
+      banner.id = 'existingBanner';
+      banner.className = 'mt-4 p-4 bg-yellow-50 rounded border border-yellow-300 text-yellow-800';
+      banner.innerHTML = `
+        Το MARK <strong></strong> υπάρχει ήδη στο Excel. Θέλεις να τροποποιήσεις τον χαρακτηρισμό;
+        <div class="mt-2 flex gap-2">
+          <button id="forceEditBtn" type="button" class="bg-yellow-600 text-white px-3 py-2 rounded hover:bg-yellow-700">Επιβεβαίωση</button>
+          <button id="dismissBannerBtn" type="button" class="px-3 py-2 border rounded hover:bg-gray-50">Άκυρο</button>
+        </div>
+      `;
+      if (form && form.parentNode) host.insertBefore(banner, form.nextSibling);
+      else host.prepend(banner);
     }
-    return false;
+
+    const strong = banner.querySelector('strong');
+    if (strong) strong.textContent = String(mark || '').trim() || '?';
+
+    const dismissBtn = banner.querySelector('#dismissBannerBtn');
+    if (dismissBtn) {
+      dismissBtn.onclick = function() {
+        banner.style.display = 'none';
+      };
+    }
+
+    const forceBtn = banner.querySelector('#forceEditBtn');
+    if (forceBtn) {
+      forceBtn.onclick = function() {
+        const markRaw = String(mark || $id('markInput')?.value || '').trim();
+        if (!markRaw) return;
+        const base = (window.SEARCH_BASE_URL || '/search');
+        window.location = base + '?mark=' + encodeURIComponent(markRaw) + '&force_edit=1';
+      };
+    }
+
+    banner.style.display = 'block';
+    const modal = $id('summaryModal');
+    if (modal) modal.style.display = 'none';
+    return true;
   }
 
   function getModalElement() {
@@ -228,13 +263,31 @@
 
       hideLoadingOverlay();
 
-      // Check if server redirected (existing MARK)
+      // Check if server redirected (existing MARK / reclassification required)
       if (res.redirected || res.status === 302 || res.url.includes('allow_edit_existing')) {
         // Show the existing banner instead of error
         const mark = receipt.mark || receipt.MARK || '?';
         showFlash('Το MARK ' + mark + ' υπάρχει ήδη στο Excel', 'warning', 4000);
         showExistingBanner(mark);
         return false;
+      }
+
+      // When fetch followed redirect, backend returns full HTML (search page).
+      // Detect a rendered yellow banner in that HTML and preserve reclassification flow.
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
+      if (contentType.includes('text/html')) {
+        const html = await res.text().catch(() => '');
+        if (html && html.indexOf('id="existingBanner"') !== -1) {
+          let markFromHtml = (receipt && (receipt.mark || receipt.MARK)) || '';
+          try {
+            const parsed = new DOMParser().parseFromString(html, 'text/html');
+            const strong = parsed.querySelector('#existingBanner strong');
+            if (strong && strong.textContent) markFromHtml = strong.textContent.trim();
+          } catch(_) {}
+          showFlash('Το MARK ' + (markFromHtml || '?') + ' υπάρχει ήδη στο Excel', 'warning', 4000);
+          showExistingBanner(markFromHtml || '?');
+          return false;
+        }
       }
 
       if (!res.ok) {
@@ -257,12 +310,14 @@
         const reloadFn = window.partiallyReloadInvoiceTable;
         if (typeof reloadFn === 'function') {
           const ok = await reloadFn();
-          if (!ok) setTimeout(() => location.reload(), 800);
+          if (!ok) {
+            showFlash('Η εγγραφή αποθηκεύτηκε, αλλά δεν μπόρεσε να γίνει μερική ανανέωση του πίνακα.', 'warning', 3500);
+          }
         } else {
-          setTimeout(() => location.reload(), 800);
+          showFlash('Η εγγραφή αποθηκεύτηκε. Απαιτείται χειροκίνητη ανανέωση πίνακα.', 'warning', 3500);
         }
       } catch(_) {
-        setTimeout(() => location.reload(), 800);
+        showFlash('Η εγγραφή αποθηκεύτηκε. Απαιτείται χειροκίνητη ανανέωση πίνακα.', 'warning', 3500);
       }
 
       return true;

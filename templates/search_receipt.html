@@ -399,7 +399,12 @@ function populateReceiptsModal(lines){
         showFlash(successMsg, 'success', 3000);
         persistReceiptFlash(successMsg, 'success');
         tr.classList.add('opacity-60');
-        setTimeout(()=>{ try{ window.location.reload(); }catch(e){} }, 600);
+        try {
+          const reloadFn = window.partiallyReloadInvoiceTable;
+          if (typeof reloadFn === 'function') {
+            await reloadFn();
+          }
+        } catch(_) {}
       }
       else {
         const errMsg = 'Σφάλμα αποθήκευσης: ' + (result.body?.error || result.error || 'server');
@@ -610,7 +615,12 @@ document.addEventListener('DOMContentLoaded', function(){
       const successMsg = 'Αποθηκεύτηκαν οι αποδείξεις.';
       showFlash(successMsg,'success',4000);
       persistReceiptFlash(successMsg,'success');
-      setTimeout(()=>window.location.reload(),400);
+      try {
+        const reloadFn = window.partiallyReloadInvoiceTable;
+        if (typeof reloadFn === 'function') {
+          await reloadFn();
+        }
+      } catch(_) {}
     }
     else { showFlash('Σφάλμα server: ' + (resp.body?.error || resp.error || 'unknown'),'error',6000); console.error('confirm failed', resp); }
   });
