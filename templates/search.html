@@ -8951,7 +8951,7 @@ document.addEventListener('submit', async function deleteInvoicesAjaxSubmit(ev){
     return true;
   }
 
-  function autoSubmitReceipt(obj){
+  async function autoSubmitReceipt(obj){
     const receiptsOn = !!(qs('useReceiptsSwitch') && qs('useReceiptsSwitch').checked);
     const repeatOn = !!(qs('repeatEntrySwitch') && qs('repeatEntrySwitch').checked);
     const mixedMode = !isReceiptAnalysisOn();
@@ -8983,23 +8983,24 @@ document.addEventListener('submit', async function deleteInvoicesAjaxSubmit(ev){
       qs('summaryJsonInput').value = JSON.stringify(obj);
     }catch(_){}
 
-    const form = qs('saveSummaryForm');
-    if (!form) return;
     once.submitted = true;
-    sessionStorage.setItem(key,'1');                 // ώστε στο επόμενο reload να ΜΗΝ ξαναστείλει
-    // Ensure repeat_enabled is posted
-    let h = form.querySelector('input[name="repeat_enabled"]');
-    if (!h) {
-      h = document.createElement('input');
-      h.type = 'hidden';
-      h.name = 'repeat_enabled';
-      form.appendChild(h);
-    }
-    h.value = '1';
-    if (typeof form.requestSubmit === 'function') {
-      form.requestSubmit();
-    } else {
-      form.submit();
+    try { sessionStorage.setItem(key,'1'); } catch(_) {}
+
+    try {
+      const scrapeUrl = (qs('scrapeUrlInput')?.value || qs('scrapeUrlField')?.value || '').trim();
+      if (window.RC && typeof RC.handleReceiptAfterScrape === 'function') {
+        const ok = await RC.handleReceiptAfterScrape(obj, scrapeUrl);
+        if (!ok) {
+          once.submitted = false;
+          try { sessionStorage.removeItem(key); } catch(_) {}
+        }
+      } else {
+        once.submitted = false;
+        try { sessionStorage.removeItem(key); } catch(_) {}
+      }
+    } catch(_) {
+      once.submitted = false;
+      try { sessionStorage.removeItem(key); } catch(_) {}
     }
   }
 
