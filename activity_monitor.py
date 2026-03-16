@@ -12,11 +12,21 @@ _thread_monitor = threading.local()
 # Setup logger for activity monitoring
 logger = logging.getLogger('activity_monitor')
 logger.setLevel(logging.INFO)
-# Use relative path for the log file
-log_file_path = os.path.join(os.getcwd(), 'activity_monitor.log')
-handler = logging.FileHandler(log_file_path)
-handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-logger.addHandler(handler)
+
+# Enable/disable logging via env var. Defaults to enabled.
+# Set ACTIVITY_MONITOR_LOG=0 (or false/no/off) to disable writing activity_monitor.log.
+ACTIVITY_MONITOR_LOG = str(os.getenv('ACTIVITY_MONITOR_LOG', '1')).strip().lower()
+ACTIVITY_MONITOR_LOG_ENABLED = ACTIVITY_MONITOR_LOG not in ('0', 'false', 'no', 'off', '')
+
+if ACTIVITY_MONITOR_LOG_ENABLED:
+    # Use relative path for the log file
+    log_file_path = os.path.join(os.getcwd(), 'activity_monitor.log')
+    handler = logging.FileHandler(log_file_path)
+    handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    logger.addHandler(handler)
+else:
+    logger.addHandler(logging.NullHandler())
+
 # Prevent propagation to the root logger (avoid duplicate console output)
 logger.propagate = False
 
@@ -24,6 +34,9 @@ _system_info_logged = False
 
 def log_system_info():
     """Log system information at startup."""
+    if not ACTIVITY_MONITOR_LOG_ENABLED:
+        return
+
     global _system_info_logged
     if _system_info_logged:
         return

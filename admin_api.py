@@ -4,6 +4,7 @@ Provides JSON API for admin panel operations
 """
 
 import logging
+import os
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from datetime import datetime, timezone
@@ -1341,32 +1342,26 @@ def api_send_email():
         import os
         app_url = os.getenv('APP_URL', 'http://localhost:5001')
         logo_url = f"{app_url}/icons/scanmydata_logo_3000w.png"
+        # Simple transactional-style HTML (minimal styling to avoid being treated as “promotions”)
         html_body = f"""
         <html>
-            <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-                <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
-                    <div style="text-align: center; margin-bottom: 30px;">
-                        <img src="{logo_url}" alt="ScanmyData" style="height: 60px; width: auto;">
+            <body style="font-family: Arial, sans-serif; line-height: 1.4; color: #000; margin: 0; padding: 20px;">
+                <div style="max-width: 600px; margin: 0 auto;">
+                    <div style="text-align: center; margin-bottom: 20px;">
+                        <img src="{logo_url}" alt="ScanmyData" style="height: 40px; width: auto; display: block; margin: 0 auto;" />
                     </div>
-                    <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
-                        <h2 style="color: #333; margin: 0;">📧 Μήνυμα από Διαχειριστή</h2>
-                    </div>
-                    
-                    <div style="background-color: white; padding: 20px; border: 1px solid #dee2e6; border-radius: 8px;">
-                        <h3 style="color: #495057; border-bottom: 2px solid #e9ecef; padding-bottom: 10px;">{subject}</h3>
-                        <div style="margin: 20px 0; line-height: 1.6; color: #495057;">
-                            {message.replace(chr(10), '<br>')}
-                        </div>
-                    </div>
-                    
-                    <div style="margin-top: 20px; text-align: center;">
-                        <img src="{logo_url}" alt="ScanmyData" style="height: 40px; width: auto; opacity: 0.6;">
-                        <p style="color: #6c757d; font-size: 0.9em; margin-top: 10px;">Αυτό το email στάλθηκε από το ScanmyData</p>
-                    </div>
+
+                    <p style="margin: 0 0 12px; font-weight: bold;">{subject}</p>
+
+                    <div style="margin-bottom: 18px; white-space: pre-wrap;">{message}</div>
+
+                    <p style="margin: 12px 0 0; font-size: 12px; color: #666;">Αυτό το email στάλθηκε από το ScanmyData.</p>
                 </div>
             </body>
         </html>
         """
+        # Provide a plain-text body for better deliverability
+        text_body = message
         
         # Resolve recipient emails for logging, then send
         import email_utils
@@ -1380,7 +1375,7 @@ def api_send_email():
             except Exception:
                 continue
 
-        results = email_utils.send_bulk_email_to_users(user_ids, subject, html_body)
+        results = email_utils.send_bulk_email_to_users(user_ids, subject, html_body, text_body)
 
         # Log the admin action (include recipient list and sent/failed counts)
         try:
@@ -1507,6 +1502,109 @@ def api_test_email():
             return jsonify({'success': False, 'error': 'Failed to send test email. Check SMTP configuration.'}), 400
     except Exception as e:
         logger.error(f"Error sending test email: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@admin_api_bp.route('/resend/inbound/forward-sync', methods=['POST'])
+@login_required
+@_require_admin
+def api_resend_inbound_forward_sync():
+    """Fetch inbound emails from Resend Receiving API and forward new ones via SMTP."""
+    try:
+        payload = request.get_json(silent=True) or {}
+        limit_raw = payload.get('limit', 25)
+        try:
+            limit = int(limit_raw)
+        except Exception:
+            limit = 25
+
+        import email_utils
+        result = email_utils.forward_resend_inbound_to_smtp_user(limit=limit)
+        ok = bool(result.get('errors') == [] and result.get('failed', 0) == 0)
+
+        return jsonify({
+            'success': ok,
+            'result': result,
+        }), (200 if ok else 400)
+    except Exception as e:
+        logger.error(f"Error forwarding Resend inbound emails: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@admin_api_bp.route('/resend/inbound/webhook', methods=['POST'])
+def api_resend_inbound_webhook():
+    """Webhook receiver for inbound Resend events (event-driven forwarding).
+
+    Verifies the Resend/Svix HMAC-SHA256 signature using the signing secret
+    (whsec_... from Resend webhook dashboard → RESEND_WEBHOOK_SIGNING_SECRET).
+    """
+    import hmac
+    import hashlib
+    import base64
+
+    try:
+        import email_utils
+
+        signing_secret = (email_utils.RESEND_WEBHOOK_SIGNING_SECRET or os.getenv('RESEND_WEBHOOK_SIGNING_SECRET') or '').strip()
+        if not signing_secret:
+            return jsonify({'success': False, 'error': 'RESEND_WEBHOOK_SIGNING_SECRET is not configured'}), 503
+
+        # --- Svix signature verification ---
+        svix_id        = request.headers.get('svix-id', '')
+        svix_timestamp = request.headers.get('svix-timestamp', '')
+        svix_signature = request.headers.get('svix-signature', '')  # e.g. "v1,<base64>"
+
+        raw_body = request.get_data()  # bytes, must be read before get_json()
+
+        if not svix_id or not svix_timestamp or not svix_signature:
+            return jsonify({'success': False, 'error': 'Missing Svix signature headers'}), 401
+
+        # The signed payload is: "{svix-id}.{svix-timestamp}.{body}"
+        signed_content = f"{svix_id}.{svix_timestamp}.".encode() + raw_body
+
+        # The secret is whsec_<base64> — strip the prefix and decode
+        secret_bytes = base64.b64decode(
+            signing_secret[6:] if signing_secret.startswith('whsec_') else signing_secret
+        )
+
+        computed = base64.b64encode(
+            hmac.new(secret_bytes, signed_content, hashlib.sha256).digest()
+        ).decode()
+
+        # svix-signature may contain multiple sigs: "v1,<b64> v1,<b64>"
+        valid = any(
+            hmac.compare_digest(computed, part.split(',', 1)[1])
+            for part in svix_signature.split()
+            if ',' in part
+        )
+        if not valid:
+            return jsonify({'success': False, 'error': 'Invalid webhook signature'}), 401
+
+        payload = request.get_json(silent=True) or {}
+        event_type = str(payload.get('type') or payload.get('event') or '').strip().lower()
+        data = payload.get('data') if isinstance(payload.get('data'), dict) else {}
+
+        email_id = str(
+            data.get('id')
+            or data.get('email_id')
+            or payload.get('email_id')
+            or payload.get('id')
+            or ''
+        ).strip()
+
+        if email_id:
+            result = email_utils.forward_specific_resend_inbound_email(email_id)
+        else:
+            result = email_utils.forward_resend_inbound_to_smtp_user(limit=10)
+
+        return jsonify({
+            'success': result.get('failed', 0) == 0,
+            'event': event_type,
+            'email_id': email_id,
+            'result': result,
+        }), (200 if result.get('failed', 0) == 0 else 400)
+    except Exception as e:
+        logger.error(f"Error handling resend inbound webhook: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 

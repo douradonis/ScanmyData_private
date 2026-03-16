@@ -3082,6 +3082,7 @@ html[data-theme="dark"] #helpBotPresence,html[data-theme="dark"] #helpBotFileSta
   let open=false;
   let poller=null; // will be set to a timer that adapts depending on `open`
   let supportSse = null;
+  let supportSseConnected = false;
   let supportSseRetry = null;
   let lastPresence={support_typing:false};
   const NAME_KEY='support_display_name';
@@ -3099,14 +3100,56 @@ html[data-theme="dark"] #helpBotPresence,html[data-theme="dark"] #helpBotFileSta
   const FAST_POLL_INTERVAL = 2000; // 2s when panel open or when new message arrived
   const FAST_POLL_AFTER_NEW_MS = 30000; // keep fast polling for N seconds after new incoming message
 
-  // Adjust polling interval depending on whether the panel is open (faster when open)
+  // Adjust polling interval depending on whether the panel is open (faster when open).
+  // When the panel is closed we avoid regular polling if we can get push events via SSE.
   function _setPollIntervalForOpenState(){
     try{ if(poller) clearInterval(poller); }catch(_e){}
 
     const now = Date.now();
     const shouldFastPoll = open || now < closedFastUntil;
-    const interval = shouldFastPoll ? FAST_POLL_INTERVAL : CLOSED_POLL_INTERVAL;
-    poller = setInterval(refresh, interval);
+    if(shouldFastPoll){
+      poller = setInterval(refresh, FAST_POLL_INTERVAL);
+      return;
+    }
+
+    // If we have a working SSE connection, we can avoid polling entirely when closed.
+    if(supportSseConnected){
+      poller = null;
+      return;
+    }
+
+    poller = setInterval(refresh, CLOSED_POLL_INTERVAL);
+  }
+
+  function initSupportSse(){
+    if (!window.EventSource) return;
+    try{
+      supportSse = new EventSource('/api/support/events');
+      supportSse.addEventListener('open', () => {
+        supportSseConnected = true;
+        _setPollIntervalForOpenState();
+      });
+      supportSse.addEventListener('error', () => {
+        supportSseConnected = false;
+        // fallback to polling when SSE cannot stay open
+        _setPollIntervalForOpenState();
+      });
+      supportSse.addEventListener('message', (evt) => {
+        try{
+          const data = JSON.parse(evt.data || '{}');
+          if (data && data.type === 'support_reply') {
+            // Only refresh when new support message is available
+            if (!open) {
+              refresh();
+            }
+            closedFastUntil = Date.now() + FAST_POLL_AFTER_NEW_MS;
+            if (!open) {
+              _setPollIntervalForOpenState();
+            }
+          }
+        }catch(_){ }
+      });
+    }catch(_){ }
   }
 
   function updateNameFieldState(ticket){
@@ -3248,6 +3291,13 @@ html[data-theme="dark"] #helpBotPresence,html[data-theme="dark"] #helpBotFileSta
   async function refresh(){
     try{
       const r=await fetch(`/api/support/ticket/me?mark_read=${open?'1':'0'}`,{credentials:'same-origin'});
+      if(r.status===401||r.status===403){
+        try{ if(poller) clearInterval(poller); }catch(_){ }
+        if(supportSse){ try{ supportSse.close(); }catch(_){ } }
+        supportSseConnected=false;
+        supportSse = null;
+        return;
+      }
       if(!r.ok) return;
       const j=await r.json();
       const prevTicket = lastTicket;                  // preserve previous state
@@ -3485,6 +3535,7 @@ html[data-theme="dark"] #helpBotPresence,html[data-theme="dark"] #helpBotFileSta
   closeBtn&&closeBtn.addEventListener('click',()=>setOpen(false));
   archiveBtn&&archiveBtn.addEventListener('click', ()=>openArchiveList());
 
+  initSupportSse();
   refresh();
   // start poller (slower when panel closed, faster while open)
   _setPollIntervalForOpenState();
@@ -3555,6 +3606,12 @@ html[data-theme="dark"] #helpBotPresence,html[data-theme="dark"] #helpBotFileSta
     async function poll(){
       try{
         const r = await fetch('/api/sync_progress', { credentials: 'same-origin' });
+        // If we're not authenticated, stop polling to avoid repeated 401 noise.
+        if(r.status === 401 || r.status === 403){
+          if(pollTimer){ clearInterval(pollTimer); pollTimer = null; }
+          hideOverlay();
+          return true;
+        }
         if(!r.ok) return false;
         const j = await r.json().catch(()=> null);
         if(!j) return false;

@@ -17,9 +17,15 @@ try:
 except ImportError:
     pass
 
-# Set GOOGLE_APPLICATION_CREDENTIALS if not already set
+try:
+    from infisical_bootstrap import bootstrap_infisical_secrets
+    bootstrap_infisical_secrets(logger=logging.getLogger(__name__))
+except Exception:
+    pass
+
+# Set GOOGLE_APPLICATION_CREDENTIALS only when explicitly configured
 if not os.getenv('GOOGLE_APPLICATION_CREDENTIALS'):
-    creds_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS') or 'firebase-key.json'
+    creds_path = os.getenv('FIREBASE_CREDENTIALS_PATH') or ''
     if os.path.exists(creds_path):
         os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = os.path.abspath(creds_path)
 

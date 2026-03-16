@@ -174,28 +174,19 @@ def signup():
                     # Try to send verification email via SMTP; fallback to logging
                     verify_link = link_or_err
                     app_url = os.getenv('APP_URL', 'http://localhost:5001')
-                    logo_url = f"{app_url}/icons/scanmydata_logo_3000w.png"
-                    html_body = f"""
-                    <html>
-                        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-                            <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
-                                <div style="text-align: center; margin-bottom: 30px;">
-                                    <img src="{logo_url}" alt="ScanmyData" style="height: 60px; width: auto;">
-                                </div>
-                                <h2 style="color: #0ea5e9;">Επαλήθευση Email</h2>
-                                <p>Γεια σου {user.username},</p>
-                                <p>Παρακαλώ επαλήθευσε τη διεύθυνση email σου πατώντας τον παρακάτω σύνδεσμο:</p>
-                                <p style="margin: 25px 0;">
-                                    <a href="{verify_link}" style="background-color: #0ea5e9; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">Επαλήθευση Email</a>
-                                </p>
-                                <p><small style="color: #6b7280;">Εάν δεν δημιούργησες αυτόν τον λογαριασμό, παρακαλώ αγνόησε αυτό το email.</small></p>
-                                <div style="text-align: center; margin-top: 30px;">
-                                    <img src="{logo_url}" alt="ScanmyData" style="height: 40px; width: auto; opacity: 0.6;">
-                                </div>
-                            </div>
-                        </body>
-                    </html>
-                    """
+                    from email_utils import make_email_html
+                    html_body = make_email_html(
+                        greeting=f"Γεια σου {user.username},",
+                        body_html=(
+                            "<p style='margin:0 0 14px;'>Σε ευχαριστούμε που εγγράφηκες στο <strong>ScanmyData</strong>!"
+                            " Για να ενεργοποιήσεις τον λογαριασμό σου,"
+                            " παρακαλώ επαλήθευσε τη διεύθυνσή σου:</p>"
+                        ),
+                        cta_url=verify_link,
+                        cta_text="Επαλήθευση Email",
+                        security_note="Εάν δεν δημιούργησες αυτόν τον λογαριασμό, αγνόησε αυτό το email.",
+                        logo_url=f"{app_url}/icons/scanmydata_logo_3000w.png",
+                    )
                     sent = email_utils.send_email(user.email, 'Επαλήθευση Email - ScanmyData', html_body)
                     if sent:
                         flash('Ο λογαριασμός δημιουργήθηκε! Ένα email επαλήθευσης έχει σταλεί στα εισερχόμενά σας.', 'success')
@@ -1307,51 +1298,20 @@ def forgot_password():
             ok, link_or_err = FirebaseAuthHandler.generate_password_reset_link(email)
             if ok:
                 reset_link = link_or_err
-                # Enhanced email template for password reset
                 app_url = os.getenv('APP_URL', 'http://localhost:5001')
-                logo_url = f"{app_url}/icons/scanmydata_logo_3000w.png"
-                # Build a resilient HTML email (high contrast and explicit styles)
-                html_body = f"""
-                <html>
-                    <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #0f172a; background-color: #ffffff; margin:0; padding:0;">
-                        <div style="width:100%; padding:20px; background-color:#f8fafc;">
-                            <table width="100%" cellspacing="0" cellpadding="0" style="max-width:600px; margin:0 auto;">
-                                <tr>
-                                    <td style="padding:18px 0; text-align:center;">
-                                        <img src="{logo_url}" alt="ScanmyData" style="height:60px; width:auto; display:block; margin:0 auto;" />
-                                    </td>
-                                </tr>
-                                <tr>
-                                    <td>
-                                        <table width="100%" cellspacing="0" cellpadding="0" style="background:#ffffff; border-radius:10px; box-shadow:0 4px 12px rgba(16,24,40,0.05);">
-                                            <tr>
-                                                <td style="padding:24px; text-align:left;">
-                                                    <h2 style="color:#0f172a; margin:0 0 10px; font-size:20px;">🔐 Επαναφορά Κωδικού</h2>
-                                                    <p style="color:#475569; font-size:15px; margin:0 0 16px;">Λάβαμε αίτημα για επαναφορά του κωδικού πρόσβασής σας. Κάντε κλικ στο παρακάτω κουμπί για να ορίσετε νέο κωδικό:</p>
-                                                    <div style="text-align:center; margin:18px 0;">
-                                                        <a href="{reset_link}" style="display:inline-block; background-color:#ff6b6b; color:#ffffff !important; padding:14px 28px; text-decoration:none; border-radius:8px; font-weight:700; font-family:Arial, sans-serif; border:2px solid #ee5a24;">🔑 Επαναφορά Κωδικού</a>
-                                                    </div>
-                                                    <div style="background:#fff7ed; border:1px solid #ffedd5; padding:12px; border-radius:6px; margin:12px 0; color:#92400e;">
-                                                        <p style="margin:0; font-size:14px;">⏰ <strong>Σημαντικό:</strong> Αυτός ο σύνδεσμος λήγει σε 1 ώρα για λόγους ασφαλείας.</p>
-                                                    </div>
-                                                    <p style="color:#475569; font-size:14px;">Εάν το κουμπί δεν λειτουργεί, αντιγράψτε αυτό το link στον browser σας:</p>
-                                                    <p style="background:#f8fafc; padding:10px; border-radius:6px; word-break:break-all; font-size:13px; font-family:monospace;">{reset_link}</p>
-                                                    <p style="color:#94a3b8; font-size:12px; text-align:center; margin:18px 0 0;">Εάν δεν ζητήσατε αυτή την αλλαγή, αγνοήστε αυτό το email.</p>
-                                                </td>
-                                            </tr>
-                                            <tr>
-                                                <td style="padding:14px; text-align:center;">
-                                                    <img src="{logo_url}" alt="ScanmyData" style="height:40px; width:auto; display:block; margin:0 auto; opacity:0.9;" />
-                                                </td>
-                                            </tr>
-                                        </table>
-                                    </td>
-                                </tr>
-                            </table>
-                        </div>
-                    </body>
-                </html>
-                """
+                from email_utils import make_email_html
+                html_body = make_email_html(
+                    greeting="Γεια σας,",
+                    body_html=(
+                        "<p style='margin:0 0 14px;'>Λάβαμε αίτημα για επαναφορά του κωδικού πρόσβασής σας στο"
+                        " <strong>ScanmyData</strong>. Κάντε κλικ στον παρακάτω σύνδεσμο για να ορίσετε νέο κωδικό:</p>"
+                    ),
+                    cta_url=reset_link,
+                    cta_text="Επαναφορά Κωδικού",
+                    expiry_note="Ο σύνδεσμος λήγει σε 1 ώρα για λόγους ασφαλείας.",
+                    security_note="Εάν δεν ζητήσατε αυτήν την αλλαγή, αγνοήστε αυτό το email.",
+                    logo_url=f"{app_url}/icons/scanmydata_logo_3000w.png",
+                )
                 sent = email_utils.send_email(email, '🔐 Επαναφορά Κωδικού - ScanmyData', html_body)
                 if sent:
                     flash('Εάν το email υπάρχει στο σύστημά μας, θα λάβετε σύνδεσμο επαναφοράς κωδικού (ελέγξτε τα εισερχόμενά σας).', 'info')

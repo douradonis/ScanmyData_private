@@ -6,9 +6,17 @@ import json
 import logging
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
+import base64
 
 # Load environment variables from .env file
 load_dotenv()
+
+try:
+    from infisical_bootstrap import bootstrap_infisical_secrets
+    bootstrap_infisical_secrets(logger=logging.getLogger(__name__))
+except Exception:
+    # Keep module import-safe if Infisical bootstrap is unavailable.
+    pass
 
 import firebase_admin
 from firebase_admin import credentials
@@ -17,7 +25,6 @@ from firebase_admin import auth as fb_auth
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
-import base64
 import time
 import threading
 from typing import List, Dict
@@ -36,6 +43,60 @@ _firebase_app = None
 _firebase_initialized = False
 
 
+def _firebase_credential_input() -> tuple[Optional[Any], Optional[str]]:
+    """Return Firebase credentials in a format accepted by Certificate()."""
+    raw_json = (os.getenv("FIREBASE_CREDENTIALS_JSON") or "").strip()
+    raw_json_b64 = (os.getenv("FIREBASE_CREDENTIALS_JSON_B64") or "").strip()
+    path = (os.getenv("FIREBASE_CREDENTIALS_PATH") or "").strip()
+
+    if raw_json:
+        try:
+            return json.loads(raw_json), "FIREBASE_CREDENTIALS_JSON"
+        except Exception as exc:
+            logger.warning("Invalid FIREBASE_CREDENTIALS_JSON payload: %s", exc)
+
+    if raw_json_b64:
+        try:
+            decoded = base64.b64decode(raw_json_b64).decode("utf-8")
+            return json.loads(decoded), "FIREBASE_CREDENTIALS_JSON_B64"
+        except Exception as exc:
+            logger.warning("Invalid FIREBASE_CREDENTIALS_JSON_B64 payload: %s", exc)
+
+    # Fallback: build service-account JSON from individual secret fields.
+    # Useful when Infisical stores firebase-key fields separately.
+    field_names = [
+        "type",
+        "project_id",
+        "private_key_id",
+        "private_key",
+        "client_email",
+        "client_id",
+        "auth_uri",
+        "token_uri",
+        "auth_provider_x509_cert_url",
+        "client_x509_cert_url",
+        "universe_domain",
+    ]
+    service_account = {}
+    for field in field_names:
+        val = (os.getenv(field) or "").strip()
+        if val:
+            if field == "private_key":
+                val = val.replace("\\n", "\n")
+            service_account[field] = val
+
+    required = ["type", "project_id", "private_key", "client_email", "token_uri"]
+    if all(service_account.get(k) for k in required):
+        return service_account, "SERVICE_ACCOUNT_FIELDS"
+
+    if path:
+        if os.path.exists(path):
+            return path, "FIREBASE_CREDENTIALS_PATH"
+        logger.warning("Firebase credentials file not found: %s", path)
+
+    return None, None
+
+
 def init_firebase():
     """Initialize Firebase Admin SDK and (optionally) enable DB I/O logging.
 
@@ -49,20 +110,25 @@ def init_firebase():
         return True
     
     try:
-        if not FIREBASE_CREDENTIALS_PATH:
-            logger.warning("FIREBASE_CREDENTIALS_PATH not set - Firebase disabled")
+        cred_input, cred_source = _firebase_credential_input()
+        database_url = (os.getenv("FIREBASE_DATABASE_URL") or "").strip()
+
+        if not cred_input:
+            logger.warning(
+                "Firebase disabled: missing credentials. Set FIREBASE_CREDENTIALS_JSON or FIREBASE_CREDENTIALS_JSON_B64 in Infisical"
+            )
             return False
-        
-        if not os.path.exists(FIREBASE_CREDENTIALS_PATH):
-            logger.warning(f"Firebase credentials file not found: {FIREBASE_CREDENTIALS_PATH}")
+
+        if not database_url:
+            logger.warning("Firebase disabled: FIREBASE_DATABASE_URL not set")
             return False
-        
+
         # Initialize Firebase Admin SDK
-        cred = credentials.Certificate(FIREBASE_CREDENTIALS_PATH)
+        cred = credentials.Certificate(cred_input)
         _firebase_app = firebase_admin.initialize_app(
             cred,
             {
-                'databaseURL': FIREBASE_DATABASE_URL
+                'databaseURL': database_url
             }
         )
         _firebase_initialized = True
@@ -75,7 +141,7 @@ def init_firebase():
         except Exception:
             logger.exception('Failed to enable Firebase DB I/O logging')
 
-        logger.info("Firebase Admin SDK initialized successfully")
+        logger.info("Firebase Admin SDK initialized successfully via %s", cred_source or "unknown source")
         return True
     
     except Exception as e:

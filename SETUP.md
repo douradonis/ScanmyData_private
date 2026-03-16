@@ -92,3 +92,23 @@ The app will run on `http://localhost:10000` (or the port set in `PORT` env var)
 - The app uses Gunicorn for production serving.
 - Playwright is only used as fallback for JS-heavy sites; static scraping is preferred for speed.
 - All test scripts have been removed; use the main app for testing.
+
+## Deploy with Coolify (Docker) and Custom Domain
+
+For full Coolify UI deployment instructions, use:
+
+- `docs/coolify_docker_setup.md`
+
+Quick summary:
+
+1. In Coolify, create a new Application from this repository.
+2. Select Dockerfile mode with Dockerfile path set to `Dockerfile`.
+3. Use internal port `5000`.
+4. In Coolify Environment Variables, keep only Infisical bootstrap vars:
+	- `INFISICAL_TOKEN`
+	- `INFISICAL_PROJECT_ID`
+	- `INFISICAL_ENVIRONMENT`
+	- `INFISICAL_BASE_URL`
+5. Add your custom domain from the app Domains section in Coolify.
+6. Create DNS record at your registrar pointing to your Coolify host.
+7. Enable SSL (Let's Encrypt) in Coolify and verify HTTPS.

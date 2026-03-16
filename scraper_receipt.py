@@ -16,6 +16,31 @@ except ImportError:
     def _refine_doc_type(target, page_text):
         return
 
+# some analysis helpers may also carry actual scrapers we forward to
+try:
+    from scraper_receipt_analysis import scrape_einvoicing_gr as _analysis_einvoicing_gr
+except ImportError:
+    _analysis_einvoicing_gr = None
+
+
+def scrape_einvoicing_gr(url, timeout=15, debug=False):
+    """Proxy to the analysis variant so that detect_and_scrape in this module
+    can call the function even though the implementation lives in
+    ``scraper_receipt_analysis``.  The wrapper exists purely for
+    backwards compatibility and testing convenience.
+
+    We intentionally strip out any VAT analysis fields since the
+    receipt-facing module should operate on the simplified schema.  The
+    analysis version returns these for diagnostic purposes only.
+    """
+    if not _analysis_einvoicing_gr:
+        raise RuntimeError("scrape_einvoicing_gr implementation not available")
+    res = _analysis_einvoicing_gr(url, timeout=timeout, debug=debug)
+    if isinstance(res, dict):
+        res.pop("vat_analysis", None)
+        res.pop("vat_analysis_inferred", None)
+    return res
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -1335,546 +1360,6 @@ def scrape_epsilon(url, timeout=20, debug=False):
     return out
 
 
-def scrape_einvoicing_gr(url, timeout=15, debug=False):
-    """
-    e-Invoicing.gr (PEPPOL) pages, π.χ. https://e-invoicing.gr/edocuments/ViewInvoice?ct=PEPPOL&id=...&s=A&h=...
-    1) Μετατρέπει το ViewInvoice URL σε API endpoint /api/GetInvoice
-    2) Εξάγει MARK και ΑΦΜ Πελάτη από το HTML response
-    """
-    out = {
-        "issuer_vat": None, "issue_date": None, "issuer_name": None,
-        "progressive_aa": None, "doc_type": None, "total_amount": None,
-        "is_invoice": False, "MARK": None, "source": "e-Invoicing.gr"
-    }
-
-    parsed = urlparse(url)
-    
-    # Αν είναι ήδη API URL, χρησιμοποίησέ το
-    if "/api/GetInvoice" in parsed.path:
-        api_url = url
-    else:
-        # Μετατροπή ViewInvoice → API endpoint
-        qs = parse_qs(parsed.query)
-        ct = qs.get("ct", [""])[0]
-        doc_id = qs.get("id", [""])[0]
-        source = qs.get("s", [""])[0]
-        hash_token = qs.get("h", [""])[0]
-        
-        if not all([ct, doc_id, source, hash_token]):
-            if debug: print("e-invoicing.gr: missing required parameters")
-            return out
-        
-        base = f"{parsed.scheme}://{parsed.netloc}"
-        api_url = f"{base}/api/GetInvoice?contentType={ct}&id={doc_id}&source={source}&isPreview=True&hashToken={hash_token}"
-    
-    sess = requests.Session()
-    sess.headers.update(HEADERS)
-    
-    try:
-        r = sess.get(api_url, timeout=timeout)
-        r.raise_for_status()
-        r.encoding = 'utf-8'
-        html = r.text
-    except Exception as e:
-        if debug: print("e-invoicing.gr fetch error:", e)
-        return out
-    
-    soup = BeautifulSoup(html, "html.parser")
-    
-    # 1) MARK - Αναζήτηση στο HTML
-    mark = None
-    
-    # Pattern 1: Βρες το div με "M.AR.K:" ή "MARK:"
-    for row in soup.find_all("div", class_="row"):
-        row_text = row.get_text(" ", strip=True)
-        if "M.AR.K:" in row_text or "MARK:" in row_text:
-            cols = row.find_all("div", class_=lambda c: c and "col" in c)
-            if len(cols) >= 2:
-                mark_text = cols[-1].get_text(strip=True)
-                m = MARK_RE.search(mark_text)
-                if m:
-                    mark = m.group(0)
-                    break
-    
-    # Pattern 2: Regex fallback για 15ψήφιο
-    if not mark:
-        m = MARK_RE.search(html)
-        if m:
-            mark = m.group(0)
-    
-    out["MARK"] = mark
-    
-    # 2) ΑΦΜ Πελάτη - Αναζήτηση στο section "ΣΤΟΙΧΕΙΑ ΠΕΛΑΤΗ"
-    counterpart_vat = None
-    
-    # Pattern 1: Βρες το section "ΣΤΟΙΧΕΙΑ ΠΕΛΑΤΗ" και ψάξε για ΑΦΜ
-    customer_section = soup.find(string=re.compile(r"ΣΤΟΙΧΕΙΑ ΠΕΛΑΤΗ", re.I))
-    if customer_section:
-        parent = customer_section.find_parent("div", class_=lambda c: c and "backgrey" in c)
-        if parent:
-            for row in parent.find_all("div", class_="row"):
-                row_text = row.get_text(" ", strip=True)
-                if "Α.Φ.Μ" in row_text or "ΑΦΜ" in row_text:
-                    cols = row.find_all("div", class_=lambda c: c and "col" in c)
-                    if len(cols) >= 2:
-                        afm_text = cols[-1].get_text(strip=True)
-                        m = VAT_RE.search(afm_text)
-                        if m:
-                            counterpart_vat = m.group(0)
-                            break
-    
-    # Pattern 2: Fallback - βρες όλα τα 9ψήφια
-    if not counterpart_vat:
-        all_vats = VAT_RE.findall(html)
-        # Το πρώτο ΑΦΜ είναι συνήθως του εκδότη, το δεύτερο του πελάτη
-        if len(all_vats) >= 2:
-            counterpart_vat = all_vats[1]
-        elif all_vats:
-            counterpart_vat = all_vats[0]
-    
-    out["issuer_vat"] = counterpart_vat
-    
-    # 3) Ημερομηνία - Αναζήτηση "Ημ/νία έκδοσης"
-    for div in soup.find_all("div", class_="fontSize8pt"):
-        div_text = div.get_text(" ", strip=True)
-        if re.search(r"Ημ/νία\s*έκδοσης", div_text, re.I):
-            # Το pattern είναι: "Ημ/νία έκδοσης: 16-10-2025"
-            m = re.search(r"Ημ/νία\s*έκδοσης:\s*(\d{2}-\d{2}-\d{4})", div_text, re.I)
-            if m:
-                out["issue_date"] = _fmt_date_to_ddmmyyyy(m.group(1))
-                break
-    
-    # 4) Επωνυμία εκδότη
-    supplier_section = soup.find("div", class_="BoldBlueHeader fontSize12pt")
-    if supplier_section:
-        out["issuer_name"] = supplier_section.get_text(strip=True)
-    
-    # 5) Αριθμός Παραστατικού (progressive_aa)
-    for div in soup.find_all("div", class_="fontSize8pt"):
-        div_text = div.get_text(" ", strip=True)
-        if re.search(r"Αρ\.\s*Παραστατικού", div_text, re.I):
-            # Παίρνει ΟΛΟ το κείμενο μετά το "Αρ. Παραστατικού:"
-            m = re.search(r"Αρ\.\s*Παραστατικού:\s*(.*)", div_text, re.I)
-            if m:
-                out["progressive_aa"] = m.group(1).strip()
-                break
-    
-    # 6) Είδος Παραστατικού
-    doc_type_el = soup.find("div", class_="BoldBlueHeader fonSize10pt")
-    if doc_type_el:
-        doc_type_text = doc_type_el.get_text(strip=True)
-        out["doc_type"] = doc_type_text
-        if re.search(r"Τιμολόγιο", doc_type_text, re.I):
-            out["is_invoice"] = True
-    
-    # 7) Συνολικό ποσό
-    for row in soup.find_all("div", class_="row"):
-        row_text = row.get_text(" ", strip=True)
-        if re.search(r"ΤΕΛΙΚΟ ΠΟΣΟ|Συνολικ[όή].*ποσ[όo]", row_text, re.I):
-            cols = row.find_all("div", class_=lambda c: c and "col" in c)
-            if len(cols) >= 2:
-                amount_text = cols[-1].get_text(strip=True)
-                cleaned = _clean_amount_to_comma(amount_text)
-                if cleaned:
-                    out["total_amount"] = cleaned
-                    break
-    
-    # Fallback για ποσό: ψάξε για pattern με EUR
-    if not out["total_amount"]:
-        m = re.search(r"([0-9\.,]+)\s*EUR", html)
-        if m:
-            out["total_amount"] = _clean_amount_to_comma(m.group(1))
-    
-    return out
-
-
-def scrape_s1ecos(url, timeout=15, debug=False):
-    """
-    ECOS/S1 einvoice pages, π.χ. https://einvoice.s1ecos.gr/v/...
-    1) Βρίσκουμε το #erpQrBtn και ακολουθούμε το redirect.
-    2) Αν καταλήξει σε mydatapi/mydata → τρέχουμε scrape_mydatapi.
-    3) Fallback: απλό parsing από τη σελίδα (αν υπάρχει).
-    """
-    out = {
-        "issuer_vat": None, "issue_date": None, "issuer_name": None,
-        "progressive_aa": None, "doc_type": None, "total_amount": None,
-        "is_invoice": False, "MARK": None, "source": "S1ECOS"
-    }
-
-    sess = requests.Session()
-    sess.headers.update(HEADERS)
-    try:
-        r = sess.get(url, timeout=timeout, allow_redirects=True)
-        r.raise_for_status()
-        html = r.text
-    except Exception as e:
-        if debug: print("s1ecos fetch error:", e)
-        return out
-
-    soup = BeautifulSoup(html, "html.parser")
-
-    # --- εντοπισμός redirect από το κουμπί/σκριπτάκια του viewer ---
-    def _extract_erp_redirect(soup_obj, base_url):
-        btn = soup_obj.select_one("#erpQrBtn")
-        cand = None
-        if btn:
-            cand = btn.get("href") or btn.get("data-url") or btn.get("data-href")
-            if not cand:
-                onclick = btn.get("onclick") or ""
-                m = re.search(
-                    r"(?:location\.href|window\.location(?:\.href)?|document\.location(?:\.href)?|window\.open)\s*\(\s*['\"]([^'\"]+)['\"]\s*\)",
-                    onclick, flags=re.I
-                )
-                if m: cand = m.group(1)
-
-        if not cand:
-            for s in soup_obj.find_all("script"):
-                txt = s.string or s.get_text() or ""
-                if "erpQrBtn" in txt.lower():
-                    m2 = re.search(r"https?://[^\s'\"<>]+", txt)
-                    if m2:
-                        cand = m2.group(0); break
-                    m3 = re.search(
-                        r"(?:location\.href|window\.location(?:\.href)?|document\.location(?:\.href)?|window\.open)\s*\(\s*['\"]([^'\"]+)['\"]\s*\)",
-                        txt, flags=re.I
-                    )
-                    if m3:
-                        cand = m3.group(1); break
-        return urljoin(base_url, cand) if cand else None
-
-    erp_url = _extract_erp_redirect(soup, r.url)
-
-    if erp_url:
-        try:
-            r2 = sess.get(erp_url, timeout=timeout, allow_redirects=True)
-            r2.raise_for_status()
-            final_u = r2.url.lower()
-            if debug: print("s1ecos erpQrBtn resolved to:", r2.url)
-
-            if ("mydatapi.aade.gr" in final_u) or ("mydata.aade.gr" in final_u):
-                sub = scrape_mydatapi(r2.url, timeout=timeout, debug=debug)
-                sub["source"] = "S1ECOS->MyData"
-                return sub
-            else:
-                # δοκίμασε απευθείας μήπως είναι ενδιάμεση σελίδα με embedded mydatapi στοιχεία
-                sub_try = scrape_mydatapi(r2.url, timeout=timeout, debug=debug)
-                if any(sub_try.get(k) for k in ("issuer_vat", "issue_date", "total_amount", "MARK")):
-                    sub_try["source"] = "S1ECOS->MyData(?)"
-                    return sub_try
-        except Exception as e:
-            if debug: print("s1ecos follow error:", e)
-            # συνέχισε στο fallback
-
-    # --- Fallback: ελαφρύ parsing στη σελίδα S1ECOS (αν έχει ευδιάκριτα labels/τιμές) ---
-    el = soup.select_one("span.field.field-Mark span.value, span.field-Mark span.value")
-    if el and el.get_text(strip=True):
-        out["MARK"] = el.get_text(strip=True)
-
-    for lbl in soup.find_all(string=re.compile(r"Α\.?Φ\.?Μ|Ημερομηνία|Συνολική αξία|Συνολικό ποσό|Είδος παραστατικού|Α/Α", re.I)):
-        parent = lbl.find_parent()
-        if not parent: continue
-        nxt = parent.find_next(["input","td","span","strong"])
-        if not nxt: continue
-        val = nxt.get("value") or nxt.get_text(" ", strip=True)
-
-        if re.search(r"Α\.?Φ\.?Μ", lbl, re.I) and val:
-            m = re.search(r"(\d{9,})", val)
-            if m: out["issuer_vat"] = m.group(1)
-        if re.search(r"Ημερομηνία", lbl, re.I) and val:
-            out["issue_date"] = _norm_date_to_ddmmyyyy(val)
-        if re.search(r"Συνολική αξία|Συνολικό ποσό", lbl, re.I) and val:
-            out["total_amount"] = _clean_amount_to_comma(val)
-        if re.search(r"Είδος παραστατικού", lbl, re.I) and val:
-            out["doc_type"] = val
-            if re.search(r"τιμολό?γιο|τιμολογιο", val, re.I):
-                out["is_invoice"] = True
-
-    if not out["issuer_vat"]:
-        m = VAT_RE.search(html)
-        if m: out["issuer_vat"] = m.group(0)
-    if not out["total_amount"]:
-        m = re.search(r"€\s*([0-9\.,]+)", html)
-        if m: out["total_amount"] = _clean_amount_to_comma(m.group(1))
-
-    return out
-
-
-def scrape_pegcloud(url, timeout=15, debug=False):
-    """
-    Pegcloud e-Invoicing scraper για receipts.
-    Εξάγει: issuer_vat, issue_date, total_amount, MARK, κλπ.
-    URLs: https://e-invoicing.pegcloud.io/pegasus/einv02/search_invoice01.php?auth_code=...
-    """
-    out = {
-        "issuer_vat": None, "issue_date": None, "issuer_name": None,
-        "progressive_aa": None, "doc_type": None, "total_amount": None,
-        "is_invoice": False, "MARK": None, "source": "Pegcloud"
-    }
-    
-    sess = requests.Session()
-    sess.headers.update(HEADERS)
-    try:
-        r = sess.get(url, timeout=timeout)
-        r.raise_for_status()
-        r.encoding = 'utf-8'
-    except Exception as e:
-        if debug: print(f"[Pegcloud RequestError] {e}")
-        return out
-    
-    html = r.text
-    soup = BeautifulSoup(html, "html.parser")
-    
-    # 1) MARK - Αναζήτηση "Μ.Αρ.Κ.:" ή "MARK"
-    mark_match = re.search(r'(?:Μ\.Αρ\.Κ\.|MARK)\s*[:]\s*([0-9]{15})', html, re.I)
-    if mark_match:
-        out["MARK"] = mark_match.group(1)
-    
-    # Fallback: 15ψήφιο αριθμό
-    if not out["MARK"]:
-        m = re.search(r'\b([0-9]{15})\b', html)
-        if m:
-            out["MARK"] = m.group(1)
-    
-    # 2) Issue Date - αναζήτηση ημερομηνίας
-    for pattern in [r"(?:Ημερομηνία|Issue Date)\s*[:]\s*([0-9/\-\.]+)", r"(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4})"]:
-        match = re.search(pattern, html, re.I)
-        if match:
-            out["issue_date"] = _norm_date_to_ddmmyyyy(match.group(1))
-            break
-    
-    # 3) ΑΦΜ Εκδότη - Αναζήτηση "Α.Φ.Μ:" ή "VAT"
-    vat_match = re.search(r'(?:Α\.?Φ\.?Μ|VAT)\s*[:]\s*([0-9]{9})', html, re.I)
-    if vat_match:
-        out["issuer_vat"] = vat_match.group(1)
-    
-    # Fallback: όλα τα 9ψήφια
-    if not out["issuer_vat"]:
-        all_vats = re.findall(r'\b([0-9]{9})\b', html)
-        if all_vats:
-            out["issuer_vat"] = all_vats[0]  # Πρώτο ΑΦΜ συνήθως εκδότη
-    
-    # 4) Total Amount - αναζήτηση χρηματικού ποσού
-    total_match = re.search(r'(?:Σύνολο|Total|Ποσό)\s*[:]*\s*€?\s*([0-9\.,]+)', html, re.I)
-    if total_match:
-        out["total_amount"] = _clean_amount_to_comma(total_match.group(1))
-    
-    # Fallback: € pattern
-    if not out["total_amount"]:
-        m = re.search(r"€\s*([0-9\.,]+)", html)
-        if m:
-            out["total_amount"] = _clean_amount_to_comma(m.group(1))
-    
-    # 5) Doc Type - αναζήτηση είδους παραστατικού
-    dtype_match = re.search(r'(?:Είδος|Type|Document)\s*[:]\s*([^\n<]+)', html, re.I)
-    if dtype_match:
-        out["doc_type"] = dtype_match.group(1).strip()
-    
-    # Detect invoice keyword
-    if re.search(r"τιμολό?γιο|invoice", html, re.I):
-        out["is_invoice"] = True
-    
-    return out
-
-
-def scrape_einvoicing_gr(url, timeout=15, debug=False):
-    """
-    e-Invoicing.gr (PEPPOL) scraper για receipts.
-    URLs: https://e-invoicing.gr/edocuments/ViewInvoice?ct=PEPPOL&id=...&s=A&h=...
-    Εξάγει: issuer_vat, issue_date, total_amount, MARK, κλπ.
-    """
-    out = {
-        "issuer_vat": None, "issue_date": None, "issuer_name": None,
-        "progressive_aa": None, "doc_type": None, "total_amount": None,
-        "is_invoice": False, "MARK": None, "source": "e-Invoicing.gr"
-    }
-
-    parsed = urlparse(url)
-    if "/api/GetInvoice" in parsed.path:
-        api_url = url
-    else:
-        qs = parse_qs(parsed.query)
-        ct = qs.get("ct", [""])[0]
-        doc_id = qs.get("id", [""])[0]
-        source = qs.get("s", [""])[0]
-        hash_token = qs.get("h", [""])[0]
-        if not all([ct, doc_id, source, hash_token]):
-            if debug:
-                print("e-invoicing.gr: missing parameters")
-            return out
-        base = f"{parsed.scheme}://{parsed.netloc}"
-        api_url = f"{base}/api/GetInvoice?contentType={ct}&id={doc_id}&source={source}&isPreview=True&hashToken={hash_token}"
-
-    sess = requests.Session()
-    sess.headers.update(HEADERS)
-    try:
-        r = sess.get(api_url, timeout=timeout, allow_redirects=True)
-        r.raise_for_status()
-        r.encoding = r.apparent_encoding or "utf-8"
-        html = r.text
-    except Exception as e:
-        if debug:
-            print(f"[e-invoicing.gr RequestError] {e}")
-        return out
-
-    soup = BeautifulSoup(html, "html.parser")
-
-    def _extract_amount_by_label(text, label_pattern):
-        if not text:
-            return None
-        m = re.search(rf"{label_pattern}[\s:€]*([0-9][0-9\.,]+)\s*(?:EUR|€)?", text, re.I)
-        return m.group(1) if m else None
-
-    def _parse_payload(target, html_text, soup_obj):
-        page_text = soup_obj.get_text("\n", strip=True)
-
-        if not target.get("MARK"):
-            m_mark = re.search(r'(?:M\.AR\.K|MARK)\s*[:]?\s*([0-9]{15})', page_text, re.I) or MARK_RE.search(page_text)
-            if m_mark:
-                target["MARK"] = m_mark.group(1) if m_mark.lastindex else m_mark.group(0)
-
-        if not target.get("issuer_vat"):
-            m_vat = re.search(r'(?:Α\.?Φ\.?Μ|VAT)\s*[:]?\s*([0-9]{9})', page_text, re.I)
-            if m_vat:
-                target["issuer_vat"] = m_vat.group(1)
-            else:
-                all_vats = VAT_RE.findall(page_text)
-                if all_vats:
-                    target["issuer_vat"] = all_vats[0]
-
-        if not target.get("issue_date"):
-            m_date = (
-                re.search(r"Ημ\/?νία\s*έκδοσης\s*[:]?\s*([0-9]{1,2}[\-/\.][0-9]{1,2}[\-/\.][0-9]{4})", page_text, re.I)
-                or re.search(r"([0-9]{1,2}[\-/\.][0-9]{1,2}[\-/\.][0-9]{4})", page_text)
-            )
-            if m_date:
-                target["issue_date"] = _norm_date_to_ddmmyyyy(m_date.group(1))
-
-        if not target.get("doc_type"):
-            m_doc = re.search(r"(ΑΠΟΔΕΙΞΗ\s+ΛΙΑΝΙΚΗΣ\s+ΠΩΛΗΣΗΣ|ΤΙΜΟΛΟΓΙΟ[^\n]*)", page_text, re.I)
-            if m_doc:
-                target["doc_type"] = re.sub(r"\s+", " ", m_doc.group(1)).strip()
-            else:
-                m_doc2 = re.search(r'(?:Είδος\s*Παραστατικού|Είδος|Type|Document)\s*[:]?\s*([^\n<]+)', page_text, re.I)
-                if m_doc2:
-                    target["doc_type"] = m_doc2.group(1).strip()
-
-        if not target.get("progressive_aa"):
-            m_aa = re.search(r"Αρ\.?\s*Παραστατικ(?:ού|ο)\s*[:]?\s*([0-9A-Za-z\-/\s]+)", page_text, re.I)
-            if m_aa:
-                target["progressive_aa"] = re.sub(r"\s+", " ", m_aa.group(1)).strip()
-
-        if not target.get("issuer_name"):
-            heading_nodes = soup_obj.select(".fontSize12pt, h1, h2, h3")
-            for node in heading_nodes:
-                cand = re.sub(r"\s+", " ", node.get_text(" ", strip=True)).strip()
-                if not cand:
-                    continue
-                if len(cand) < 4 or len(cand) > 140:
-                    continue
-                if re.search(r"Α\.?Φ\.?Μ|DOY|ΔΟΥ|Αρ\.?\s*ΓΕΜΗ|Email|M\.AR\.K|AuthenticationCode|Παραστατικ|Τιμολόγιο|Απόδειξη", cand, re.I):
-                    continue
-                if re.search(r"^[A-Za-z0-9&\-\.,'\(\)/\s]+$", cand):
-                    target["issuer_name"] = cand
-                    break
-
-        if not target.get("issuer_name"):
-            lines = [ln.strip() for ln in page_text.split("\n") if ln and ln.strip()]
-            for ln in lines[:10]:
-                if re.search(r"Α\.?Φ\.?Μ|DOY|ΔΟΥ|Αρ\.?\s*ΓΕΜΗ|Email|M\.AR\.K|AuthenticationCode", ln, re.I):
-                    continue
-                if re.search(r"(ΑΕ|Α\.?Ε\.?|ΕΠΕ|ΙΚΕ|ΟΕ|ΕΕ|LTD|S\.A\.|ΣΚΛΑΒΕΝΙΤΗΣ)", ln, re.I):
-                    target["issuer_name"] = ln
-                    break
-
-        if not target.get("total_amount"):
-            total_raw = (
-                _extract_amount_by_label(page_text, r"ΤΕΛΙΚΗ\s*ΑΞΙΑ")
-                or _extract_amount_by_label(page_text, r"Ποσ[όο]\s*Πληρωμ[ήη]ς")
-                or _extract_amount_by_label(page_text, r"ΠΛΗΡΩΤΕΟ\s*ΠΟΣΟ")
-            )
-            if not total_raw:
-                m_total = re.search(r"([0-9]+[\.,][0-9]{2})\s*EUR", page_text, re.I)
-                if m_total:
-                    total_raw = m_total.group(1)
-            if total_raw:
-                target["total_amount"] = _clean_amount_to_comma(total_raw)
-
-        if target.get("doc_type") and re.search(r"τιμολόγιο|invoice|απόδειξη", target["doc_type"], re.I):
-            target["is_invoice"] = True
-        elif re.search(r"τιμολόγιο|invoice|απόδειξη", page_text, re.I):
-            target["is_invoice"] = True
-
-    def _render_with_browser(target_url):
-        try:
-            from playwright.sync_api import sync_playwright
-        except Exception:
-            return None
-        timeout_ms = int(max(timeout, 8) * 1000)
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                context = browser.new_context(ignore_https_errors=True)
-                page = context.new_page()
-                page.goto(target_url, wait_until="domcontentloaded", timeout=timeout_ms)
-                try:
-                    page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 15000))
-                except Exception:
-                    pass
-                page.wait_for_timeout(2000)
-                rendered = page.content()
-                browser.close()
-                return rendered
-        except Exception as e:
-            if debug:
-                print("e-invoicing.gr browser fallback error:", e)
-            return None
-
-    def _extract_mydatapi_url(text, base_url):
-        if not text:
-            return None
-        normalized = str(text).replace('\\/', '/').replace('&amp;', '&')
-        patterns = [
-            r'https?://mydatapi\.aade\.gr/[^\s"\'<>]*TimologioQR/QRInfo\?q=[^\s"\'<>]+',
-            r'https?://mydata\.aade\.gr/[^\s"\'<>]*TimologioQR/QRInfo\?q=[^\s"\'<>]+',
-            r'/(?:myDATA|mydata)/TimologioQR/QRInfo\?q=[^\s"\'<>]+'
-        ]
-        for pat in patterns:
-            m = re.search(pat, normalized, re.I)
-            if not m:
-                continue
-            cand = m.group(0).strip('"\' )>;')
-            if cand.startswith('/'):
-                cand = urljoin(base_url, cand)
-            return cand
-        return None
-
-    _parse_payload(out, html, soup)
-
-    if not all(out.get(k) for k in ("total_amount", "issuer_name", "doc_type", "progressive_aa")):
-        rendered_html = _render_with_browser(api_url)
-        if rendered_html:
-            _parse_payload(out, rendered_html, BeautifulSoup(rendered_html, "html.parser"))
-
-    # Authoritative fallback via embedded myDATA URL (improves doc_type/is_invoice cases)
-    myd_url = _extract_mydatapi_url(html, api_url)
-    if myd_url:
-        try:
-            sub = scrape_mydatapi(myd_url, timeout=timeout, debug=debug)
-        except Exception:
-            sub = None
-        if isinstance(sub, dict):
-            for key in ("doc_type", "issuer_name", "progressive_aa", "issue_date", "issuer_vat", "MARK"):
-                if not out.get(key) and sub.get(key):
-                    out[key] = sub.get(key)
-            if not out.get("total_amount") and sub.get("total_amount"):
-                out["total_amount"] = sub.get("total_amount")
-            if sub.get("is_invoice") is True:
-                out["is_invoice"] = True
-
-    if out.get("doc_type") and re.search(r"τιμολό?γιο|τιμολογιο|invoice", str(out["doc_type"]), re.I):
-        out["is_invoice"] = True
-
-    return out
 
 
 def scrape_eskap(url, timeout=20, debug=False):
@@ -2183,12 +1668,15 @@ def scrape_simpleinvoicing(url, timeout=20, debug=False):
             if iname:
                 target["issuer_name"] = str(iname).strip()
 
+        explicit_paa = None
+        m_aa = re.search(r"(?:Προοδευτικ(?:ός|ο)\s*α\/?α|Αρ\.?\s*Παραστατικού|Α\s*\/\s*Α|A\s*\/\s*A|(?:\bΑΑ\b|\bAA\b)|Serial|No\.)\s*[:#]?\s*#?\s*([A-Za-z0-9\-_/]+)", page_text, re.I)
+        if m_aa:
+            explicit_paa = m_aa.group(1)
+        if explicit_paa:
+            target["progressive_aa"] = str(explicit_paa).strip()
+
         if not target.get("progressive_aa"):
             paa = _extract_input_or_text(soup_obj, "saa", "s_aa", "aa", "invoiceNo", "invoiceNumber", "serial")
-            if not paa:
-                m_aa = re.search(r"(?:Προοδευτικ(?:ός|ο)\s*α\/?α|Αρ\.?\s*Παραστατικού|Serial|No\.)\s*[:]?\s*([A-Za-z0-9\-_/]+)", page_text, re.I)
-                if m_aa:
-                    paa = m_aa.group(1)
             if paa:
                 target["progressive_aa"] = str(paa).strip()
 
@@ -2295,6 +1783,10 @@ def scrape_simpleinvoicing(url, timeout=20, debug=False):
     seen = set()
     candidate_urls = [u for u in candidate_urls if u and not (u in seen or seen.add(u))]
 
+    # Parse static HTML early so we can preserve fields (e.g. progressive_aa)
+    # even when we later return data from MyData.
+    _parse_html(out, html, soup)
+
     for cu in candidate_urls:
         try:
             rr = sess.get(cu, timeout=timeout, allow_redirects=True)
@@ -2311,6 +1803,11 @@ def scrape_simpleinvoicing(url, timeout=20, debug=False):
         if debug: print("simpleinvoicing resolved myDATA URL:", mydata_url)
         sub = scrape_mydatapi(mydata_url, timeout=timeout, debug=debug)
         if any(sub.get(k) for k in ("issuer_vat", "issue_date", "total_amount", "MARK")):
+            for key in ("progressive_aa", "series", "doc_type", "issuer_name"):
+                if (not sub.get(key)) and out.get(key):
+                    sub[key] = out.get(key)
+            if out.get("is_invoice") is not None:
+                sub["is_invoice"] = out.get("is_invoice")
             sub["source"] = "SimpleInvoicing->MyData"
             return sub
 
@@ -2334,12 +1831,30 @@ def scrape_simpleinvoicing(url, timeout=20, debug=False):
         if debug: print("simpleinvoicing browser-resolved myDATA URL:", mydata_url)
         sub = scrape_mydatapi(mydata_url, timeout=timeout, debug=debug)
         if any(sub.get(k) for k in ("issuer_vat", "issue_date", "total_amount", "MARK")):
+            for key in ("progressive_aa", "series", "doc_type", "issuer_name"):
+                if (not sub.get(key)) and out.get(key):
+                    sub[key] = out.get(key)
+            if out.get("is_invoice") is not None:
+                sub["is_invoice"] = out.get("is_invoice")
             sub["source"] = "SimpleInvoicing->MyData"
             return sub
 
     _parse_html(out, html, soup)
     if rendered_html:
         _parse_html(out, rendered_html, BeautifulSoup(rendered_html, "html.parser"))
+
+    # URL-based AA fallback as last resort only.
+    if not out.get("progressive_aa"):
+        for u in (url, r.url):
+            try:
+                token = urlparse(str(u)).path.split("/invoice/", 1)[1].split("/", 1)[0]
+            except Exception:
+                continue
+            parts = [p.strip() for p in token.split("-") if p.strip()]
+            numeric_parts = [p for p in parts if re.fullmatch(r"\d{1,10}", p)]
+            if numeric_parts:
+                out["progressive_aa"] = numeric_parts[0]
+                break
     return out
 
 # ---------- entry point demonstration ----------
