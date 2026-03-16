@@ -7840,6 +7840,7 @@ def append_doc_to_customer_file(doc, vat):
     cache = json_read(customer_file)
 
     mark = str(doc.get("mark", "")).strip()
+    vat_cat = str(doc.get("vatCategory", "")).strip()
     is_receipt = _is_receipt_record(doc)
 
     # check for legacy mode, where we simply append new documents (avoiding
@@ -7861,14 +7862,16 @@ def append_doc_to_customer_file(doc, vat):
 
     # normal non-legacy behaviour follows
     if mark and not is_receipt:
-        # gather indices of every entry with this mark
+        # gather indices of every entry with this mark and vatCategory
         matching_idxs = []
         for idx, existing in enumerate(cache):
             try:
                 emark = str(existing.get("mark", "")).strip()
+                evat = str(existing.get("vatCategory", "")).strip()
             except Exception:
                 emark = ""
-            if emark and emark == mark:
+                evat = ""
+            if emark and emark == mark and evat == vat_cat:
                 matching_idxs.append(idx)
 
         if matching_idxs:
