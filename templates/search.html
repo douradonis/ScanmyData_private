@@ -3394,10 +3394,10 @@ document.addEventListener('DOMContentLoaded', replayPersistedReceiptFlash, { onc
       if (!form) return;
       try {
         if (typeof form.requestSubmit === 'function') form.requestSubmit();
-        else form.submit();
+        else form.dispatchEvent(new Event('submit', { cancelable:true, bubbles:true }));
         showFlash('Η αποθήκευση ζητήθηκε από τη φορητή συσκευή.', 'info', 2500);
       } catch (_) {
-        try { form.submit(); } catch (_) {}
+        try { form.dispatchEvent(new Event('submit', { cancelable:true, bubbles:true })); } catch (_) {}
       }
       scheduleSummaryRefresh(400);
     }
@@ -10980,10 +10980,19 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       }catch(_){}
       summaryInput.value = JSON.stringify(chosen);
-      setTimeout(function(){
-        if (!saveForm.dataset._autoSubmitted) {
-          saveForm.dataset._autoSubmitted = '1';
-          saveForm.requestSubmit ? saveForm.requestSubmit() : saveForm.submit();
+      setTimeout(async function(){
+        if (saveForm.dataset._autoSubmitted) return;
+        saveForm.dataset._autoSubmitted = '1';
+        try {
+          if (window.RC && typeof RC.handleReceiptAfterScrape === 'function') {
+            const scrapeUrl = (document.getElementById('scrapeUrlInput')?.value || document.getElementById('scrapeUrlField')?.value || '').trim();
+            const ok = await RC.handleReceiptAfterScrape(chosen, scrapeUrl);
+            if (!ok) saveForm.dataset._autoSubmitted = '0';
+          } else {
+            saveForm.requestSubmit ? saveForm.requestSubmit() : saveForm.dispatchEvent(new Event('submit', { cancelable:true, bubbles:true }));
+          }
+        } catch(_) {
+          saveForm.dataset._autoSubmitted = '0';
         }
       }, 30);
     }

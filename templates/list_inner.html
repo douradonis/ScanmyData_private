@@ -947,7 +947,12 @@ document.addEventListener('click', function(e){
         try{ console.info('delete submit, client marks=', JSON.stringify(tdelete)); }catch(_){ }
 
         document.body.appendChild(form);
-        form.submit();
+        try {
+          if (typeof form.requestSubmit === 'function') form.requestSubmit();
+          else form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+        } catch(_) {
+          try { form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true })); } catch(__) {}
+        }
       };
     });
 

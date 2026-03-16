@@ -360,7 +360,12 @@
     var input=$id('summaryJsonInput');
     if(form && input){
       input.value=JSON.stringify(s);
-      if(typeof form.requestSubmit==='function') form.requestSubmit(); else form.submit();
+      try {
+        if(typeof form.requestSubmit==='function') form.requestSubmit();
+        else form.dispatchEvent(new Event('submit', { cancelable:true, bubbles:true }));
+      } catch(_) {
+        try { form.dispatchEvent(new Event('submit', { cancelable:true, bubbles:true })); } catch(__) {}
+      }
       return true;
     }
     return false;
