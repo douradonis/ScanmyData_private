@@ -11620,7 +11620,11 @@ document.addEventListener('click', function(e){
     const strong = banner.querySelector('strong');
     if (strong) strong.textContent = String(mark || '').trim() || '?';
     const dismiss = banner.querySelector('#dismissBannerBtn');
-    if (dismiss) dismiss.onclick = function(){ banner.style.display = 'none'; };
+    if (dismiss) dismiss.onclick = function(){
+      banner.style.display = 'none';
+      try { if (typeof window.clearReclassificationSearchState === 'function') window.clearReclassificationSearchState(); } catch(_) {}
+      try { window.dispatchEvent(new CustomEvent('scanmydata:reclassification-cancelled')); } catch(_) {}
+    };
     const force = banner.querySelector('#forceEditBtn');
     if (force) force.onclick = function(){
       const mv = encodeURIComponent(String(mark || byId('markInput')?.value || '').trim());
@@ -11678,6 +11682,7 @@ document.addEventListener('click', function(e){
       if (ok) showFlash('Αποθηκεύτηκε με επιτυχία.', 'success', 2200);
       else showFlash('Αποθηκεύτηκε, αλλά η μερική ανανέωση απέτυχε.', 'warning', 3200);
     }
+    try { window.dispatchEvent(new CustomEvent('scanmydata:save-summary-finished', { detail: { ok: true } })); } catch(_) {}
   }
 
   document.addEventListener('submit', async function(ev){
@@ -11695,6 +11700,7 @@ document.addEventListener('click', function(e){
       await handleSaveSummaryAjax(form);
     } catch(err) {
       try { if (typeof showFlash === 'function') showFlash('Σφάλμα αποθήκευσης: ' + (err.message || err), 'error', 5000); } catch(_) {}
+      try { window.dispatchEvent(new CustomEvent('scanmydata:save-summary-finished', { detail: { ok: false, error: String(err && (err.message || err) || '') } })); } catch(_) {}
     } finally {
       window.__FINAL_SAVE_SUMMARY_AJAX_IN_FLIGHT__ = false;
     }
