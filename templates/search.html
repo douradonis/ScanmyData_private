@@ -2184,9 +2184,14 @@ function rcReloadAfterWarning(){
       }
     });
     const target = current.pathname + (current.search ? `?${current.searchParams.toString()}` : '') + current.hash;
-    window.location.replace(target);
+    history.replaceState(null, '', target);
+    try { if (typeof clearReclassificationSearchState === 'function') clearReclassificationSearchState(); } catch(_) {}
+    try {
+      const banner = document.getElementById('existingBanner');
+      if (banner) banner.style.display = 'none';
+    } catch(_) {}
   } catch (_){
-    window.location.reload();
+    try { if (typeof clearReclassificationSearchState === 'function') clearReclassificationSearchState(); } catch(__) {}
   }
 }
 
@@ -6323,14 +6328,18 @@ document.getElementById('markSearchForm')?.addEventListener('submit', async func
         if (force) return false;
       } catch(_) {}
       try {
+        const vatFromHidden = String(document.querySelector('input[name="active_vat"]')?.value || '').trim();
+        const vatResolved = String(vatFromHidden || VAT || '').trim();
+        if (!vatResolved) return false;
         const r = await fetch('/api/check_mark', {
           method: 'POST',
           credentials: 'same-origin',
           headers: { 'content-type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-          body: JSON.stringify({ vat: VAT, mark })
+          body: JSON.stringify({ vat: vatResolved, mark })
         });
+        if (!r.ok) return false;
         const j = await r.json().catch(()=>null);
-        if (!(j && j.ok && j.found)) return false;
+        if (!(j && j.ok && j.found === true)) return false;
 
         let live = document.getElementById('existingBanner');
         if (!live) {
@@ -11664,19 +11673,20 @@ document.addEventListener('click', function(e){
   function byId(id){ return document.getElementById(id); }
 
   try {
-    const form = byId('saveSummaryForm');
-    if (form && !form.__SCANMYDATA_SPA_SUBMIT_PATCHED__) {
-      form.__SCANMYDATA_SPA_SUBMIT_PATCHED__ = true;
+    if (!window.__SCANMYDATA_PROTO_SUBMIT_PATCHED__) {
+      window.__SCANMYDATA_PROTO_SUBMIT_PATCHED__ = true;
       const nativeSubmit = HTMLFormElement.prototype.submit;
-      form.submit = function patchedSaveSummarySubmit(){
+      HTMLFormElement.prototype.submit = function patchedFormSubmit(){
         try {
-          if (typeof this.requestSubmit === 'function') {
-            this.requestSubmit();
-            return;
+          if (this && this.id === 'saveSummaryForm') {
+            if (typeof this.requestSubmit === 'function') {
+              this.requestSubmit();
+              return;
+            }
+            const ev = new Event('submit', { cancelable: true, bubbles: true });
+            const allowed = this.dispatchEvent(ev);
+            if (!allowed) return;
           }
-          const ev = new Event('submit', { cancelable: true, bubbles: true });
-          const allowed = this.dispatchEvent(ev);
-          if (!allowed) return;
         } catch(_) {}
         return nativeSubmit.call(this);
       };
