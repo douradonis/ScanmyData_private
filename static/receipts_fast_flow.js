@@ -252,8 +252,18 @@
       showFlash('✓ Αποθηκεύτηκε η απόδειξη', 'success', 2500);
       hideModal();
 
-      // Optionally reload to show new entry in table
-      setTimeout(() => location.reload(), 800);
+      // Refresh list-inner table without full page reload.
+      try {
+        const reloadFn = window.partiallyReloadInvoiceTable;
+        if (typeof reloadFn === 'function') {
+          const ok = await reloadFn();
+          if (!ok) setTimeout(() => location.reload(), 800);
+        } else {
+          setTimeout(() => location.reload(), 800);
+        }
+      } catch(_) {
+        setTimeout(() => location.reload(), 800);
+      }
 
       return true;
     } catch (err) {

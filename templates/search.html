@@ -144,7 +144,7 @@
         <button id="forceEditBtn" type="button" class="bg-yellow-600 text-white px-3 py-2 rounded hover:bg-yellow-700">
             Επιβεβαίωση
         </button>
-        <button id="dismissBannerBtn" type="button" onclick="this.parentElement.parentElement.style.display='none'"
+        <button id="dismissBannerBtn" type="button"
                 class="px-3 py-2 border rounded hover:bg-gray-50">
             Άκυρο
         </button>
@@ -4456,6 +4456,37 @@ function clearReceiptSearchCacheOnClose(){
 }
 window.clearReceiptSearchCacheOnClose = clearReceiptSearchCacheOnClose;
 
+function clearReclassificationSearchState(){
+  try {
+    try { clearReceiptSearchCacheOnClose(); } catch(_) {}
+
+    const idsToClear = ['markInput', 'scrapeUrlInput', 'scrapeUrlField', 'summaryJsonInput', 'summaryDataInput'];
+    idsToClear.forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.value = '';
+      try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch(_) {}
+      try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch(_) {}
+    });
+
+    const linesContainer = document.getElementById('summaryLinesContainer');
+    if (linesContainer) linesContainer.innerHTML = '';
+
+    const searchForm = document.getElementById('markSearchForm');
+    if (searchForm) delete searchForm.dataset.receiptsSubmitting;
+
+    try { window.__RC_pendingSummaryMarks = []; } catch(_) {}
+    try { window.__RC_ALLOW_MODAL_OPEN = false; } catch(_) {}
+    try { if (window.__RC_FLAGS) window.__RC_FLAGS.autoHandled = false; } catch(_) {}
+
+    try { removeForceEditParamFromUrl(); } catch(_) {}
+    try { restoreAllRowsAndUi(); } catch(_) {}
+  } catch(err) {
+    console.warn('clearReclassificationSearchState failed', err);
+  }
+}
+window.clearReclassificationSearchState = clearReclassificationSearchState;
+
 function clearSummaryModalUI(){
   try {
     const ids = [
@@ -5421,7 +5452,10 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
   const dismissBannerBtn = document.getElementById('dismissBannerBtn');
 
   if(dismissBannerBtn){
-    dismissBannerBtn.addEventListener('click', function(){ if(existingBanner) existingBanner.style.display = 'none'; });
+    dismissBannerBtn.addEventListener('click', function(){
+      if(existingBanner) existingBanner.style.display = 'none';
+      try { clearReclassificationSearchState(); } catch(_) {}
+    });
   }
 
   if (forceBtn){
@@ -5887,6 +5921,14 @@ try {
         return /^\d{15}$/.test(candidate) ? candidate : '500000000000000';
       })();
 
+      try {
+        const markInputEl = document.getElementById('markInput');
+        if (markInputEl) {
+          markInputEl.value = nextMark;
+          markInputEl.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      } catch(_) {}
+
       // Repeat receipts: πάρε authoritative receipt_mtype από server settings πελάτη.
       let serverReceiptMtype = '';
       try {
@@ -6162,6 +6204,109 @@ try {
   }
 });
 
+// Invoice MARK search via AJAX (no full-page reload):
+// - submit search form
+// - fetch server-rendered /search
+// - hydrate current modal/banner state from response
+document.getElementById('markSearchForm')?.addEventListener('submit', async function invoiceAjaxSearch(evt){
+  try {
+    if (useReceiptsSwitch && useReceiptsSwitch.checked) return; // handled by receipts flow above
+
+    const form = evt.currentTarget;
+    if (!form) return;
+    const markVal = String(document.getElementById('markInput')?.value || '').trim();
+    if (!markVal) return;
+
+    evt.preventDefault();
+    evt.stopPropagation();
+    if (typeof evt.stopImmediatePropagation === 'function') evt.stopImmediatePropagation();
+
+    const payload = new FormData(form);
+    const resp = await fetch(form.action || window.location.pathname, {
+      method: (form.method || 'POST').toUpperCase(),
+      credentials: 'same-origin',
+      body: payload,
+      headers: { 'X-Requested-With': 'XMLHttpRequest' }
+    });
+
+    if (!resp.ok) {
+      throw new Error('HTTP ' + resp.status);
+    }
+
+    const html = await resp.text();
+    const parsed = new DOMParser().parseFromString(html, 'text/html');
+
+    // Sync returned MARK field
+    try {
+      const returnedMark = parsed.getElementById('markInput')?.value || markVal;
+      const liveMark = document.getElementById('markInput');
+      if (liveMark) {
+        liveMark.value = returnedMark;
+        liveMark.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    } catch(_) {}
+
+    // Sync yellow existing-MARK banner state (for reclassification guard)
+    try {
+      const existingLive = document.getElementById('existingBanner');
+      const existingNew = parsed.getElementById('existingBanner');
+      const strongMark = existingNew ? existingNew.querySelector('strong') : null;
+      const newMarkText = (strongMark && strongMark.textContent) ? strongMark.textContent.trim() : '';
+
+      if (existingLive && existingNew) {
+        const liveStrong = existingLive.querySelector('strong');
+        if (liveStrong && newMarkText) liveStrong.textContent = newMarkText;
+        existingLive.style.display = '';
+      } else if (existingLive && !existingNew) {
+        existingLive.style.display = 'none';
+      } else if (!existingLive && existingNew) {
+        const form = document.getElementById('markSearchForm');
+        if (form && form.parentNode) {
+          const cloned = existingNew.cloneNode(true);
+          form.parentNode.insertBefore(cloned, form.nextSibling);
+          const forceBtn = cloned.querySelector('#forceEditBtn');
+          const dismissBtn = cloned.querySelector('#dismissBannerBtn');
+          if (dismissBtn) dismissBtn.addEventListener('click', () => { cloned.style.display = 'none'; try { clearReclassificationSearchState(); } catch(_) {} });
+          if (forceBtn) forceBtn.addEventListener('click', async () => {
+            const mv = encodeURIComponent(String(document.getElementById('markInput')?.value || '').trim());
+            if (!mv) return;
+            if (await showModalConfirm('Επιβεβαίωση', 'Θες σίγουρα να επαναχαρακτηρίσεις το MARK και να ανοίξει η φόρμα επεξεργασίας;')) {
+              window.location = SEARCH_BASE_URL + '?mark=' + mv + '&force_edit=1';
+            }
+          });
+        }
+      }
+    } catch(_) {}
+
+    // Hydrate modal summary from server response and open summary modal without reloading page
+    const newSummaryInput = parsed.getElementById('summaryJsonInput');
+    const newSummaryRaw = (newSummaryInput && typeof newSummaryInput.value === 'string') ? newSummaryInput.value : '{}';
+    let parsedSummary = null;
+    try { parsedSummary = JSON.parse(newSummaryRaw || '{}'); } catch(_) { parsedSummary = null; }
+
+    const hasSummary = !!(parsedSummary && typeof parsedSummary === 'object' && Object.keys(parsedSummary).length);
+    if (hasSummary) {
+      try {
+        const liveSummaryInput = document.getElementById('summaryJsonInput');
+        if (liveSummaryInput) liveSummaryInput.value = JSON.stringify(parsedSummary);
+        window.__RC_SERVER_MODAL_SUMMARY = parsedSummary;
+        if (typeof window.prefillSummaryModal === 'function') window.prefillSummaryModal();
+        if (window.RC_forcePopulateSummaryModal) {
+          try { window.RC_forcePopulateSummaryModal(); } catch(_) {}
+        }
+        const modal = document.getElementById('summaryModal');
+        if (modal) modal.style.display = 'flex';
+      } catch(_) {}
+    }
+  } catch(err) {
+    console.warn('invoiceAjaxSearch failed; fallback to normal submit', err);
+    try {
+      const form = evt.currentTarget;
+      if (form && typeof form.submit === 'function') form.submit();
+    } catch(_) {}
+  }
+}, true);
+
 
   // Intercept "Αποθήκευση στο Cache" to perform AJAX save for scraped receipts
   // intercept saveSummaryForm submit when scrapeUrlField is present
@@ -6199,6 +6344,7 @@ async function partiallyReloadInvoiceTable() {
   }
   return false;
 }
+window.partiallyReloadInvoiceTable = partiallyReloadInvoiceTable;
 
 // ===== Helper to initialize selectAll checkbox with correct logic (only visible rows) =====
 function initializeSelectAllCheckbox() {
@@ -8608,6 +8754,50 @@ document.addEventListener('submit', function(ev){
     console.warn('delete_invoices frontend patch failed', err);
   }
 }, true);
+
+// Keep list-inner deletes on partial refresh instead of full-page redirects.
+document.addEventListener('submit', async function deleteInvoicesAjaxSubmit(ev){
+  try {
+    const form = ev.target;
+    if (!form || !form.action) return;
+    const a = document.createElement('a');
+    a.href = form.action;
+    const path = (a.pathname || '') + (a.search || '');
+    if (!/delete_invoices/.test(path)) return;
+
+    ev.preventDefault();
+
+    const fd = new FormData(form);
+    const selected = Array.from(document.querySelectorAll('input[name="delete_mark"]:checked')).map(i => (i.value || '').trim()).filter(Boolean);
+    if (selected.length) {
+      fd.delete('delete_mark');
+      selected.forEach(m => fd.append('delete_mark', m));
+    }
+
+    const resp = await fetch(form.action, {
+      method: (form.method || 'POST').toUpperCase(),
+      body: fd,
+      credentials: 'same-origin',
+      headers: { 'X-Requested-With': 'XMLHttpRequest' }
+    });
+
+    if (!resp.ok) {
+      const txt = await resp.text().catch(()=>'');
+      throw new Error('HTTP ' + resp.status + (txt ? (': ' + txt.slice(0, 140)) : ''));
+    }
+
+    let reloaded = false;
+    try { reloaded = await partiallyReloadInvoiceTable(); } catch(_) {}
+    if (reloaded) {
+      try { showFlash('Οι επιλεγμένες γραμμές διαγράφηκαν.', 'success', 2200); } catch(_) {}
+    } else {
+      window.location = window.location.pathname;
+    }
+  } catch(err) {
+    console.warn('deleteInvoicesAjaxSubmit failed', err);
+    try { showFlash('Σφάλμα διαγραφής: ' + (err.message || err), 'error', 4500); } catch(_) {}
+  }
+}, true);
 (function receiptsRepeatModalGuard(){
   const once = { submitted:false };
 
@@ -10732,8 +10922,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // Submit the server form (keeps server-side logic, excel write etc.)
     // Use a microtask so any last-second JSON sync runs first
     setTimeout(() => {
-      try { form.submit(); } catch(e) {
-        try { form.dispatchEvent(new Event('submit', { cancelable:false })); } catch(_){}
+      try {
+        if (typeof form.requestSubmit === 'function') form.requestSubmit();
+        else form.dispatchEvent(new Event('submit', { cancelable:true, bubbles:true }));
+      } catch(e) {
+        try { form.dispatchEvent(new Event('submit', { cancelable:true, bubbles:true })); } catch(_){}
       }
     }, 30);
     return true;
@@ -10767,19 +10960,10 @@ document.addEventListener('DOMContentLoaded', () => {
       }, true);
     }
 
-    // Always ensure page comes back to a clean state after any save
+    // Keep save flow SPA-like: no full reload; table refresh is handled by existing AJAX save handler.
     const saveForm = document.getElementById('saveSummaryForm');
     if (saveForm) {
-      let reloaded = false;
-      const reloadSoon = () => {
-        if (!reloaded) {
-          reloaded = true;
-          rcRememberSearchClear();
-          setTimeout(() => location.reload(), 300);
-        }
-      };
-      saveForm.addEventListener('ajax:done', reloadSoon, { once:true });
-      saveForm.addEventListener('submit', () => setTimeout(reloadSoon, 1200), { once:true });
+      saveForm.addEventListener('ajax:done', () => { try { rcRememberSearchClear(); } catch(_){} }, { once:true });
     }
 
     // If receipts + repeat are ON, suppress the "Λήφθηκε..." toast and auto-save
@@ -10886,11 +11070,19 @@ document.addEventListener('DOMContentLoaded', () => {
       setLS('UI:useReceipts', '1');
       // also persist repeat-enabled locally (just in case)
       setLS('REPEAT:enabled', '1');
-      // soft reload to clear form quickly
-      setTimeout(function(){
+      // Keep page state and refresh only the list table.
+      setTimeout(async function(){
         try {
-          const base = location.pathname + '?use_receipts=1';
-          location.replace(base);
+          const u = document.getElementById('scrapeUrlInput');
+          if (u) u.value = '';
+          const m = document.getElementById('markInput');
+          if (m) m.value = '';
+          let ok = false;
+          try { if (typeof partiallyReloadInvoiceTable === 'function') ok = await partiallyReloadInvoiceTable(); } catch(_) {}
+          if (!ok) {
+            const base = location.pathname + '?use_receipts=1';
+            location.replace(base);
+          }
         } catch(_){ location.reload(); }
       }, 120);
     } catch(err){
