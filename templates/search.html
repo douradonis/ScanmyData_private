@@ -5576,6 +5576,16 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
     e.preventDefault();
     e.stopPropagation();
     try { clearReceiptSearchCacheOnClose(); } catch(_) {}
+    try {
+      const summaryInput = document.getElementById('summaryJsonInput');
+      if (summaryInput) summaryInput.value = '{}';
+      if (typeof window.clearSummaryModalUI === 'function') window.clearSummaryModalUI();
+      window.__RC_SUPPRESS_SUMMARY_MODAL = true;
+      setTimeout(() => { window.__RC_SUPPRESS_SUMMARY_MODAL = false; }, 1200);
+      if (FORCE_EDIT) {
+        try { window.__RC_SERVER_MODAL_SUMMARY = null; } catch(_) {}
+      }
+    } catch(_) {}
     hideSummaryModal();
     removeForceEditParamFromUrl();
   }));
@@ -11091,9 +11101,9 @@ document.addEventListener('DOMContentLoaded', () => {
               this.requestSubmit();
               return;
             }
-            const ev = new Event('submit', { cancelable: true, bubbles: true });
-            const allowed = this.dispatchEvent(ev);
-            if (!allowed) return;
+            this.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+            // Never fall back to native submit for saveSummaryForm: keep SPA flow only.
+            return;
           }
         } catch(_) {}
         return nativeSubmit.call(this);
