@@ -4492,6 +4492,55 @@ function clearReclassificationSearchState(){
 }
 window.clearReclassificationSearchState = clearReclassificationSearchState;
 
+function syncServerWarningModalsFromResponse(parsedDoc){
+  try {
+    if (!parsedDoc) return false;
+    const seen = new Set();
+    const candidates = Array.from(parsedDoc.querySelectorAll('#afmWarningModal, [id$="WarningModal"], [data-modal-type="warning"], .warning-modal'));
+    let opened = false;
+
+    candidates.forEach(src => {
+      if (!src) return;
+      const txt = (src.textContent || '').trim();
+      if (!txt) return;
+
+      let modalId = (src.id || '').trim();
+      if (!modalId) {
+        modalId = 'serverWarningModal';
+      }
+      if (seen.has(modalId)) return;
+      seen.add(modalId);
+
+      let live = document.getElementById(modalId);
+      if (!live) {
+        live = src.cloneNode(true);
+        live.id = modalId;
+        document.body.appendChild(live);
+      } else {
+        live.innerHTML = src.innerHTML;
+      }
+
+      live.style.display = 'flex';
+      live.classList.remove('hidden');
+
+      const ackBtn = live.querySelector('#afmModalConfirm, [data-ack="1"], .js-warning-ack, button');
+      if (ackBtn) {
+        ackBtn.onclick = function(ev){
+          try { ev.preventDefault(); ev.stopPropagation(); } catch(_) {}
+          try { live.style.display = 'none'; } catch(_) {}
+          try { if (typeof window.__RC_handleWarningAck === 'function') window.__RC_handleWarningAck(); } catch(_) {}
+        };
+      }
+      opened = true;
+    });
+
+    return opened;
+  } catch(_) {
+    return false;
+  }
+}
+window.syncServerWarningModalsFromResponse = syncServerWarningModalsFromResponse;
+
 function clearSummaryModalUI(){
   try {
     const ids = [
@@ -6250,6 +6299,13 @@ document.getElementById('markSearchForm')?.addEventListener('submit', async func
     const html = await resp.text();
     const parsed = new DOMParser().parseFromString(html, 'text/html');
     try { hideLoadingOverlay(); } catch(_) {}
+
+    try {
+      const warningShown = (typeof window.syncServerWarningModalsFromResponse === 'function')
+        ? window.syncServerWarningModalsFromResponse(parsed)
+        : false;
+      if (warningShown) return;
+    } catch(_) {}
 
     // Sync returned MARK field
     try {
@@ -11055,15 +11111,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (ct.includes('text/html')) {
       const html = await res.text().catch(()=>'');
-      if (html && html.indexOf('id="existingBanner"') !== -1) {
-        let mark = '';
+      if (html) {
+        let parsed = null;
+        try { parsed = new DOMParser().parseFromString(html, 'text/html'); } catch(_) {}
+        if (html.indexOf('id="existingBanner"') !== -1) {
+          let mark = '';
+          try { mark = (parsed && parsed.querySelector('#existingBanner strong')?.textContent || '').trim(); } catch(_) {}
+          ensureExistingBanner(mark || byId('markInput')?.value || '');
+          if (typeof showFlash === 'function') showFlash('Το MARK υπάρχει ήδη στο Excel.', 'warning', 4200);
+          return;
+        }
         try {
-          const parsed = new DOMParser().parseFromString(html, 'text/html');
-          mark = (parsed.querySelector('#existingBanner strong')?.textContent || '').trim();
+          const warningShown = (parsed && typeof window.syncServerWarningModalsFromResponse === 'function')
+            ? window.syncServerWarningModalsFromResponse(parsed)
+            : false;
+          if (warningShown) {
+            if (typeof showFlash === 'function') showFlash('Προειδοποίηση από τον server. Ελέγξτε το μήνυμα.', 'warning', 4200);
+            return;
+          }
         } catch(_) {}
-        ensureExistingBanner(mark || byId('markInput')?.value || '');
-        if (typeof showFlash === 'function') showFlash('Το MARK υπάρχει ήδη στο Excel.', 'warning', 4200);
-        return;
       }
     }
 
