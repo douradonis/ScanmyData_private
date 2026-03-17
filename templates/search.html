@@ -6873,7 +6873,7 @@ if (__rcSummaryForm && !__rcSummaryForm.dataset.rcTotalsGuardBound) {
         window.__RC_SUMMARY_SUBMIT_BYPASS = true;
         try {
           if (typeof __rcSummaryForm.requestSubmit === 'function') __rcSummaryForm.requestSubmit();
-          else __rcSummaryForm.submit();
+          else __rcSummaryForm.dispatchEvent(new Event('submit', { cancelable:true, bubbles:true }));
         } finally {
           setTimeout(() => { window.__RC_SUMMARY_SUBMIT_BYPASS = false; }, 0);
         }
@@ -7094,7 +7094,7 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
       try { __rc_debug_repeat_log('invoice_submit_invalid_summary_json', { error: String(err && err.message || err || '') }); } catch(_) {}
       // Άφησε το να προχωρήσει στο server
       try{ showLoadingOverlay('Αποθήκευση', 'Παρακαλώ περιμένετε - αποστολή στο server...'); }catch(e){}
-      e.target.submit();
+      e.target.dispatchEvent(new Event('submit', { cancelable:true, bubbles:true }));
       return;
     }
     
@@ -7874,7 +7874,7 @@ function readMappingFromUI(){
       }
 
       // proceed with the legacy form submit so the existing save handler runs
-      try { if (typeof legacyForm.requestSubmit === 'function') legacyForm.requestSubmit(); else legacyForm.submit(); } catch(e){ console.warn('legacy form submit fallback failed', e); }
+      try { if (typeof legacyForm.requestSubmit === 'function') legacyForm.requestSubmit(); else legacyForm.dispatchEvent(new Event('submit', { cancelable:true, bubbles:true })); } catch(e){ console.warn('legacy form submit fallback failed', e); }
     } catch(err) {
       console.warn('defensive modal-save click handler failed', err);
     }
@@ -11152,11 +11152,13 @@ document.addEventListener('DOMContentLoaded', () => {
   document.addEventListener('submit', async function(ev){
     const form = ev.target;
     if (!form || form.id !== 'saveSummaryForm') return;
-    if (window.__FINAL_SAVE_SUMMARY_AJAX_IN_FLIGHT__) return;
 
+    // Always block native submit to avoid accidental full page reloads.
     ev.preventDefault();
     ev.stopPropagation();
     if (typeof ev.stopImmediatePropagation === 'function') ev.stopImmediatePropagation();
+
+    if (window.__FINAL_SAVE_SUMMARY_AJAX_IN_FLIGHT__) return;
 
     window.__FINAL_SAVE_SUMMARY_AJAX_IN_FLIGHT__ = true;
     try {
