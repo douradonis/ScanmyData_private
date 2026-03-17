@@ -2149,6 +2149,17 @@ function activateReclassificationWithoutReload(markValue){
     try { summaryObj = JSON.parse(summaryInput?.value || '{}') || {}; } catch(_) { summaryObj = {}; }
     if (!summaryObj.mark && !summaryObj.MARK) summaryObj.mark = markRaw;
 
+    const hasSummaryPayload = !!(
+      String(summaryObj.AFM || summaryObj.AFM_issuer || '').trim()
+      || String(summaryObj.issueDate || summaryObj.issue_date || '').trim()
+      || String(summaryObj.totalValue || summaryObj.totalNetValue || '').trim()
+      || (Array.isArray(summaryObj.lines) && summaryObj.lines.length)
+    );
+    if (!hasSummaryPayload) {
+      // No payload locally -> force normal server reclassification load to avoid empty modal.
+      return false;
+    }
+
     const isReceiptSummary = !!(
       summaryObj && (
         summaryObj.is_receipt === true
@@ -8247,7 +8258,7 @@ function readMappingFromUI(){
       <div class="flex justify-end gap-2">
         <form method="POST" action="{{ url_for('save_summary') }}" id="saveSummaryForm">
           <input type="hidden" name="summary_json" id="summaryJsonInput" value='{}'>
-          <button type="submit" class="bg-sky-600 text-white px-3 py-2 rounded">Αποθήκευση στο Cache</button>
+          <button type="button" class="bg-sky-600 text-white px-3 py-2 rounded js-summary-save-btn">Αποθήκευση στο Cache</button>
           <input type="hidden" id="scrapeUrlField" name="scrape_url" value="">
           <input type="hidden" id="scrapeCategoryField" name="scrape_category" value="">
           <input type="hidden" id="scrapeForceField" name="scrape_force" value="false">
@@ -11255,6 +11266,20 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     try { window.dispatchEvent(new CustomEvent('scanmydata:save-summary-finished', { detail: { ok: true } })); } catch(_) {}
   }
+
+  document.addEventListener('click', function(ev){
+    const btn = ev.target && ev.target.closest ? ev.target.closest('#saveSummaryForm .js-summary-save-btn') : null;
+    if (!btn) return;
+    const form = btn.closest('form');
+    if (!form || form.id !== 'saveSummaryForm') return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (typeof ev.stopImmediatePropagation === 'function') ev.stopImmediatePropagation();
+    try {
+      const submitEvent = new Event('submit', { cancelable: true, bubbles: true });
+      form.dispatchEvent(submitEvent);
+    } catch(_) {}
+  }, true);
 
   document.addEventListener('submit', async function(ev){
     const form = ev.target;

@@ -57,7 +57,7 @@
                 <form method="POST" action="{{ url_for('save_summary') }}" id="saveSummaryForm">
                     <input type="hidden" name="summary_json" id="summaryJsonInput" value='{{ modal_summary | tojson | safe if modal_summary else "{}" }}'>
                     <input type="hidden" id="summaryDataInput" name="summary_data" value='{}'>
-                    <button type="submit" class="bg-sky-600 text-white px-3 py-2 rounded">Αποθήκευση στο Cache</button>
+                    <button type="button" class="bg-sky-600 text-white px-3 py-2 rounded js-summary-save-btn">Αποθήκευση στο Cache</button>
                     <input type="hidden" id="scrapeUrlField" name="scrape_url" value="">
                     <input type="hidden" id="scrapeCategoryField" name="scrape_category" value="">
                     <input type="hidden" id="scrapeForceField" name="scrape_force" value="false">
