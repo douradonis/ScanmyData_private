@@ -2120,6 +2120,52 @@ const VAT = "{{ vat or '' }}"; // active vat from server
 const INITIAL_MARK = "{{ mark|e }}"; // αρχική τιμή mark (αν υπήρχε)
 const RC_CLEAR_FLAG_KEY = 'rc:clearSearchAfterReload';
 
+
+function rcSummaryHasRenderableLines(obj){
+  try { return !!(obj && Array.isArray(obj.lines) && obj.lines.length); } catch(_) { return false; }
+}
+
+async function hydrateReclassificationSummaryInPlace(markRaw){
+  try {
+    const mark = String(markRaw || '').trim();
+    if (!mark) return false;
+    const endpoint = (window.SEARCH_BASE_URL || SEARCH_BASE_URL || '/search') + '?mark=' + encodeURIComponent(mark) + '&force_edit=1';
+    const res = await fetch(endpoint, { method: 'GET', credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+    if (!res.ok) return false;
+    const html = await res.text().catch(() => '');
+    if (!html) return false;
+    const parsed = new DOMParser().parseFromString(html, 'text/html');
+
+    const parsedInput = parsed.getElementById('summaryJsonInput');
+    let summaryObj = {};
+    try { summaryObj = JSON.parse(parsedInput?.value || '{}') || {}; } catch(_) { summaryObj = {}; }
+
+    if (!rcSummaryHasRenderableLines(summaryObj)) {
+      try {
+        const m = html.match(/__RC_SERVER_MODAL_SUMMARY\s*=\s*([^;]+);/);
+        if (m && m[1]) summaryObj = JSON.parse(m[1]);
+      } catch(_) {}
+    }
+    if (!rcSummaryHasRenderableLines(summaryObj)) return false;
+
+    try {
+      const liveInput = document.getElementById('summaryJsonInput');
+      if (liveInput) liveInput.value = JSON.stringify(summaryObj || {});
+    } catch(_) {}
+    try { window.__RC_SERVER_MODAL_SUMMARY = summaryObj; } catch(_) {}
+
+    const modal = document.getElementById('summaryModal');
+    if (!modal) return false;
+    try {
+      if (typeof renderSummaryLinesFromObject === 'function') renderSummaryLinesFromObject(summaryObj || {});
+      if (typeof prefillSummaryModal === 'function') prefillSummaryModal();
+    } catch(_) {}
+    modal.style.display = 'flex';
+    return true;
+  } catch(_) { return false; }
+}
+window.hydrateReclassificationSummaryInPlace = hydrateReclassificationSummaryInPlace;
+
 function rcRememberSearchClear(){
   try { sessionStorage.setItem(RC_CLEAR_FLAG_KEY, '1'); } catch(_){}
 }
@@ -5364,7 +5410,7 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
       const markVal = encodeURIComponent(markValRaw || '');
       if (!markVal){ await showModalAlert('Σφάλμα', 'Δεν δόθηκε MARK για επιβεβαίωση.'); return; }
       if(existingBanner) existingBanner.style.display = 'none';
-      window.location = SEARCH_BASE_URL + '?mark=' + markVal + '&force_edit=1';
+      if (!(await hydrateReclassificationSummaryInPlace(decodeURIComponent(markVal)))) { window.location = SEARCH_BASE_URL + '?mark=' + markVal + '&force_edit=1'; }
     });
   }
 
@@ -6185,7 +6231,7 @@ document.getElementById('markSearchForm')?.addEventListener('submit', async func
           if (!mv) return;
           if (await showModalConfirm('Επιβεβαίωση', 'Θες σίγουρα να επαναχαρακτηρίσεις το MARK και να ανοίξει η φόρμα επεξεργασίας;')) {
             rootEl.style.display = 'none';
-            window.location = SEARCH_BASE_URL + '?mark=' + mv + '&force_edit=1';
+            if (!(await hydrateReclassificationSummaryInPlace(decodeURIComponent(mv)))) { window.location = SEARCH_BASE_URL + '?mark=' + mv + '&force_edit=1'; }
           }
         };
       };
@@ -10471,11 +10517,11 @@ RC.handleReceiptAfterScrape = async function(summaryObj, scrapeUrl){
           const dismissBtn = banner.querySelector('#dismissBannerBtn');
           if (dismissBtn) dismissBtn.onclick = function(){ banner.style.display = 'none'; };
           const forceBtn = banner.querySelector('#forceEditBtn');
-          if (forceBtn) forceBtn.onclick = function(){
+          if (forceBtn) forceBtn.onclick = async function(){
             const mv = encodeURIComponent(String(markVal || document.getElementById('markInput')?.value || '').trim());
             if (!mv) return;
             const base = window.SEARCH_BASE_URL || '/search';
-            window.location = base + '?mark=' + mv + '&force_edit=1';
+            if (!(await hydrateReclassificationSummaryInPlace(decodeURIComponent(mv)))) { window.location = base + '?mark=' + mv + '&force_edit=1'; }
           };
           banner.style.display = 'block';
         } catch(_) {}
@@ -10926,11 +10972,11 @@ document.addEventListener('DOMContentLoaded', () => {
       try { window.dispatchEvent(new CustomEvent('scanmydata:reclassification-cancelled')); } catch(_) {}
     };
     const force = banner.querySelector('#forceEditBtn');
-    if (force) force.onclick = function(){
+    if (force) force.onclick = async function(){
       const mv = encodeURIComponent(String(mark || byId('markInput')?.value || '').trim());
       if (!mv) return;
       const base = window.SEARCH_BASE_URL || '/search';
-      window.location = base + '?mark=' + mv + '&force_edit=1';
+      if (!(await hydrateReclassificationSummaryInPlace(decodeURIComponent(mv)))) { window.location = base + '?mark=' + mv + '&force_edit=1'; }
     };
     banner.style.display = 'block';
     return banner;
