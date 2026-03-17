@@ -2120,6 +2120,17 @@ const VAT = "{{ vat or '' }}"; // active vat from server
 const INITIAL_MARK = "{{ mark|e }}"; // αρχική τιμή mark (αν υπήρχε)
 const RC_CLEAR_FLAG_KEY = 'rc:clearSearchAfterReload';
 
+(function showAlreadyClassifiedFlashFromServer(){
+  try {
+    const alreadyClassified = {{ 'true' if mark_already_classified_in_json else 'false' }};
+    if (!alreadyClassified) return;
+    const mk = (document.getElementById('markInput')?.value || '{{ mark or "" }}').trim();
+    if (typeof showFlash === 'function') {
+      showFlash('Το MARK ' + (mk || '') + ' είναι ήδη χαρακτηρισμένο στο myDATA (invoices.json).', 'warning', 4500);
+    }
+  } catch(_) {}
+})();
+
 (function bindMarkSubmitForceEditReset(){
   const mf = document.getElementById('markSearchForm');
   if (!mf || mf.dataset.rcForceEditResetBound === '1') return;
@@ -5933,8 +5944,9 @@ document.addEventListener('DOMContentLoaded', function(){
               if (typeof INITIAL_MARK !== 'undefined' && INITIAL_MARK && INITIAL_MARK.trim() !== '') {
                 const cur = new URL(window.location.href);
                 if (cur.searchParams.has('mark') || cur.searchParams.has('force_edit')) {
-                  window.location = SEARCH_BASE_URL;
-                  return;
+                  cur.searchParams.delete('mark');
+                  cur.searchParams.delete('force_edit');
+                  history.replaceState(null, '', cur.pathname + (cur.search ? ('?' + cur.searchParams.toString()) : '') + cur.hash);
                 }
               }
             } catch(e){ /* ignore URL errors and fallthrough to client restore */ }
