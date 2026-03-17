@@ -2120,6 +2120,62 @@ const VAT = "{{ vat or '' }}"; // active vat from server
 const INITIAL_MARK = "{{ mark|e }}"; // αρχική τιμή mark (αν υπήρχε)
 const RC_CLEAR_FLAG_KEY = 'rc:clearSearchAfterReload';
 
+function rcSummaryLooksMeaningful(summaryObj){
+  try {
+    if (!summaryObj || typeof summaryObj !== 'object') return false;
+    if (Array.isArray(summaryObj.lines) && summaryObj.lines.length > 0) return true;
+    const keys = ['mark','MARK','AA','number','AFM','AFM_issuer','type','type_name','issueDate','totalValue'];
+    return keys.some(k => String(summaryObj[k] || '').trim() !== '');
+  } catch(_) { return false; }
+}
+
+async function rcHydrateReclassificationSummaryFromServer(markRaw){
+  try {
+    const endpoint = (window.SEARCH_BASE_URL || SEARCH_BASE_URL || '/search')
+      + '?mark=' + encodeURIComponent(markRaw)
+      + '&force_edit=1';
+    const res = await fetch(endpoint, {
+      method: 'GET',
+      credentials: 'same-origin',
+      headers: { 'X-Requested-With': 'XMLHttpRequest' }
+    });
+    if (!res.ok) return false;
+    const html = await res.text().catch(() => '');
+    if (!html) return false;
+    const parsed = new DOMParser().parseFromString(html, 'text/html');
+
+    let summaryObj = {};
+    try {
+      const parsedSummaryInput = parsed.getElementById('summaryJsonInput');
+      summaryObj = JSON.parse(parsedSummaryInput?.value || '{}') || {};
+    } catch(_) { summaryObj = {}; }
+
+    if (!rcSummaryLooksMeaningful(summaryObj)) {
+      try {
+        const m = html.match(/__RC_SERVER_MODAL_SUMMARY\s*=\s*([^;]+);/);
+        if (m && m[1]) summaryObj = JSON.parse(m[1]);
+      } catch(_) {}
+    }
+
+    if (!rcSummaryLooksMeaningful(summaryObj)) return false;
+    if (!summaryObj.mark && !summaryObj.MARK) summaryObj.mark = markRaw;
+
+    const summaryInput = document.getElementById('summaryJsonInput');
+    const summaryModal = document.getElementById('summaryModal');
+    if (!summaryModal) return false;
+
+    try { window.__RC_SERVER_MODAL_SUMMARY = summaryObj; } catch(_) {}
+    try { if (summaryInput) summaryInput.value = JSON.stringify(summaryObj || {}); } catch(_) {}
+    try {
+      if (typeof renderSummaryLinesFromObject === 'function') renderSummaryLinesFromObject(summaryObj || {});
+      if (typeof prefillSummaryModal === 'function') prefillSummaryModal();
+      summaryModal.style.display = 'flex';
+      return true;
+    } catch(_) {}
+  } catch(_) {}
+  return false;
+}
+
 function activateReclassificationWithoutReload(markValue){
   try {
     const markRaw = String(markValue || document.getElementById('markInput')?.value || '').trim();
@@ -2150,6 +2206,16 @@ function activateReclassificationWithoutReload(markValue){
       const rcModal = document.getElementById('receiptClassModal');
       if (rcModal) rcModal.style.display = 'none';
     } catch(_) {}
+
+    if (!rcSummaryLooksMeaningful(summaryObj)) {
+      try {
+        if (typeof showFlash === 'function') showFlash('Φόρτωση δεδομένων επαναχαρακτηρισμού…', 'info', 1400);
+        rcHydrateReclassificationSummaryFromServer(markRaw).then((ok) => {
+          if (!ok) window.location = (window.SEARCH_BASE_URL || SEARCH_BASE_URL || '/search') + '?mark=' + encodeURIComponent(markRaw) + '&force_edit=1';
+        });
+      } catch(_) {}
+      return true;
+    }
 
     try {
       if (summaryInput) summaryInput.value = JSON.stringify(summaryObj || {});
@@ -11095,20 +11161,35 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!window.__SCANMYDATA_PROTO_SUBMIT_PATCHED__) {
       window.__SCANMYDATA_PROTO_SUBMIT_PATCHED__ = true;
       const nativeSubmit = HTMLFormElement.prototype.submit;
+      const nativeRequestSubmit = HTMLFormElement.prototype.requestSubmit;
       HTMLFormElement.prototype.submit = function patchedFormSubmit(){
         try {
           if (this && this.id === 'saveSummaryForm') {
-            if (typeof this.requestSubmit === 'function') {
-              this.requestSubmit();
+            if (typeof window.__scanmydataForceAjaxSave === 'function') {
+              window.__scanmydataForceAjaxSave(this);
               return;
             }
             this.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
-            // Never fall back to native submit for saveSummaryForm: keep SPA flow only.
             return;
           }
         } catch(_) {}
         return nativeSubmit.call(this);
       };
+      if (typeof nativeRequestSubmit === 'function') {
+        HTMLFormElement.prototype.requestSubmit = function patchedRequestSubmit(submitter){
+          try {
+            if (this && this.id === 'saveSummaryForm') {
+              if (typeof window.__scanmydataForceAjaxSave === 'function') {
+                window.__scanmydataForceAjaxSave(this);
+                return;
+              }
+              this.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+              return;
+            }
+          } catch(_) {}
+          return nativeRequestSubmit.call(this, submitter);
+        };
+      }
     }
   } catch(_) {}
 
@@ -11208,17 +11289,9 @@ document.addEventListener('DOMContentLoaded', () => {
     try { window.dispatchEvent(new CustomEvent('scanmydata:save-summary-finished', { detail: { ok: true } })); } catch(_) {}
   }
 
-  document.addEventListener('submit', async function(ev){
-    const form = ev.target;
+  window.__scanmydataForceAjaxSave = async function(form){
     if (!form || form.id !== 'saveSummaryForm') return;
-
-    // Always block native submit to avoid accidental full page reloads.
-    ev.preventDefault();
-    ev.stopPropagation();
-    if (typeof ev.stopImmediatePropagation === 'function') ev.stopImmediatePropagation();
-
     if (window.__FINAL_SAVE_SUMMARY_AJAX_IN_FLIGHT__) return;
-
     window.__FINAL_SAVE_SUMMARY_AJAX_IN_FLIGHT__ = true;
     try {
       try { if (typeof updateSummaryFromDom === 'function') updateSummaryFromDom(); } catch(_) {}
@@ -11229,6 +11302,18 @@ document.addEventListener('DOMContentLoaded', () => {
     } finally {
       window.__FINAL_SAVE_SUMMARY_AJAX_IN_FLIGHT__ = false;
     }
+  };
+
+  document.addEventListener('submit', async function(ev){
+    const form = ev.target;
+    if (!form || form.id !== 'saveSummaryForm') return;
+
+    // Always block native submit to avoid accidental full page reloads.
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (typeof ev.stopImmediatePropagation === 'function') ev.stopImmediatePropagation();
+
+    await window.__scanmydataForceAjaxSave(form);
   }, true);
 })();
 </script>
