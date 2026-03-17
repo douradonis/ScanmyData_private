@@ -7121,6 +7121,7 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
   if(!scrapeUrl) {
     // Invoice flow - προσθήκη payment validation (για repeat και non-repeat)
     e.preventDefault();
+    try { e.stopImmediatePropagation(); } catch(_) {}
 
     if (window.__SUMMARY_SAVE_IN_PROGRESS) {
       try { __rc_debug_repeat_log('invoice_submit_blocked_lock', {}); } catch(_) {}
@@ -7140,10 +7141,13 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
     } catch(err){
       console.warn('Failed parsing summaryJsonInput for validation', err);
       try { __rc_debug_repeat_log('invoice_submit_invalid_summary_json', { error: String(err && err.message || err || '') }); } catch(_) {}
-      // Άφησε το να προχωρήσει στο server
-      try{ showLoadingOverlay('Αποθήκευση', 'Παρακαλώ περιμένετε - αποστολή στο server...'); }catch(e){}
-      e.target.dispatchEvent(new Event('submit', { cancelable:true, bubbles:true }));
-      return;
+      try {
+        const summaryInputFallback = document.getElementById('summaryJsonInput');
+        if (summaryInputFallback && !String(summaryInputFallback.value || '').trim()) {
+          summaryInputFallback.value = '{}';
+        }
+      } catch(_) {}
+      summary = {};
     }
     
     // Έλεγχος για Γ Κατηγορία και MTYPE
@@ -7481,6 +7485,7 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
   
   // Receipt flow
   e.preventDefault();
+  try { e.stopImmediatePropagation(); } catch(_) {}
 
   // parse summary from hidden input
   let summary = {};
