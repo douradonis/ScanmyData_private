@@ -478,7 +478,7 @@
       if (window.persistReceiptFlash) window.persistReceiptFlash(successMsg, 'success');
       var alreadyMsg = String((apiData && (apiData.already_classified_message || apiData.warning_message)) || '').trim();
       if (!alreadyMsg && apiData && apiData.already_classified_in_json === true) {
-        alreadyMsg = 'Το MARK ' + mark + ' είναι ήδη χαρακτηρισμένο στο invoices.json.';
+        alreadyMsg = 'Το MARK ' + mark + ' είναι ήδη χαρακτηρισμένο στο myDATA (invoices.json).';
       }
       if (alreadyMsg && window.showFlash) {
         window.showFlash(alreadyMsg, 'warning', 4500);

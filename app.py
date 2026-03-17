@@ -9076,7 +9076,7 @@ def search():
             classified_flag = False
             classified_docs = [d for d in docs_for_mark if str(d.get("classification", "")).strip().lower() == "χαρακτηρισμενο"]
             if classified_docs:
-                flash(f"Το MARK {mark} είναι ήδη χαρακτηρισμένο στο invoices.json.", "warning")
+                flash(f"Το MARK {mark} είναι ήδη χαρακτηρισμένο στο myDATA (invoices.json).", "warning")
                 classified_flag = True
                 mark_already_classified_in_json = True
 
@@ -12185,7 +12185,7 @@ def api_confirm_receipt():
         "excel_written": bool(excel_written),
         "updated_existing": bool(updated_existing),
         "already_classified_in_json": bool(already_classified_in_json),
-        "already_classified_message": (f"Το MARK {mark} είναι ήδη χαρακτηρισμένο στο invoices.json." if already_classified_in_json else "")
+        "already_classified_message": (f"Το MARK {mark} είναι ήδη χαρακτηρισμένο στο myDATA (invoices.json)." if already_classified_in_json else "")
     })
 
 
