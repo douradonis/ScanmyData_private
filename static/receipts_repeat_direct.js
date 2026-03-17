@@ -30,6 +30,14 @@
       return String(mode || 'mixed').trim().toLowerCase();
     }catch(_){ return 'mixed'; }
   }
+  function isReclassificationContext(){
+    try{
+      var q = new URLSearchParams(window.location.search || '');
+      if (q.get('allow_edit_existing') === '1') return true;
+      if (q.get('force_edit') === '1') return true;
+    }catch(_){ }
+    return false;
+  }
   function isMixedMode(){
     try{
       var mode = receiptMode();
@@ -484,10 +492,7 @@
     if(trying) return;
     if(!isReceipts()||!isRepeat()) return;
     if(!isMixedMode()) return;
-    try {
-      var q = new URLSearchParams(window.location.search || '');
-      if (q.get('allow_edit_existing') === '1' && q.get('force_edit') !== '1') return;
-    } catch(_) {}
+    if(isReclassificationContext()) return;
     if(hasBlockingWarnings()) return;
 
     var s=parseSummary();
@@ -605,7 +610,7 @@
   function patchOpenModal(){
     var old = window.openModal;
     window.openModal = function(id){
-      if(id==='summaryModal' && isReceipts() && isRepeat() && isMixedMode()){
+      if(id==='summaryModal' && isReceipts() && isRepeat() && isMixedMode() && !isReclassificationContext()){
         tryDirect();
         return;
       }

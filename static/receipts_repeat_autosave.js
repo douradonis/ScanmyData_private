@@ -112,6 +112,16 @@
     }
   }
 
+  async function refreshTableAfterAutoSave(){
+    try {
+      if (typeof window.partiallyReloadInvoiceTable === 'function') {
+        const ok = await window.partiallyReloadInvoiceTable();
+        if (ok) return true;
+      }
+    } catch(_) {}
+    return false;
+  }
+
   // Watch summary input and auto-confirm when ready
   const inp = byId("summaryJsonInput");
   if (!inp) return;
@@ -171,8 +181,15 @@
           persistFlash(msg, 'error');
         }
       })
-      .finally(() => {
-        setTimeout(() => location.replace(location.pathname + "?use_receipts=1"), 150);
+      .finally(async () => {
+        const reloaded = await refreshTableAfterAutoSave();
+        if (!reloaded) {
+          try {
+            if (typeof window.showFlash === 'function') {
+              window.showFlash('Η αποθήκευση ολοκληρώθηκε, αλλά η μερική ανανέωση πίνακα απέτυχε.', 'warning', 3500);
+            }
+          } catch(_) {}
+        }
       });
   }
 
