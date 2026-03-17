@@ -2149,9 +2149,10 @@ window.addEventListener('beforeunload', function(){
 function rcSummaryLooksMeaningful(summaryObj){
   try {
     if (!summaryObj || typeof summaryObj !== 'object') return false;
-    if (Array.isArray(summaryObj.lines) && summaryObj.lines.length > 0) return true;
-    const keys = ['mark','MARK','AA','number','AFM','AFM_issuer','type','type_name','issueDate','totalValue'];
-    return keys.some(k => String(summaryObj[k] || '').trim() !== '');
+    const lines = Array.isArray(summaryObj.lines) ? summaryObj.lines : [];
+    if (lines.length > 0) return true;
+    // For reclassification we require at least one line; header-only payload opens an empty modal.
+    return false;
   } catch(_) { return false; }
 }
 
@@ -2647,160 +2648,6 @@ if (typeof window !== 'undefined') {
 
 // Helper: show transient flash (client-side)
 {% include 'receipt_summary_analysis_logic.html' %}
-  // Μην εκτελείς τον legacy renderer παρακάτω — προκαλεί διπλή εμφάνιση γραμμών.
-  return;
-  function persist() {
-    summaryInput.value = JSON.stringify(obj || {});
-  }
-
-  if (!lines || lines.length === 0) {
-    container.innerHTML = '<div class="mt-4 p-3 bg-yellow-50 rounded">Δεν βρέθηκαν γραμμές για αυτό το MARK.</div>';
-    persist();
-    return;
-  }
-
-  if (lines.length > 1) {
-    // build table
-    const tbl = document.createElement('table');
-    tbl.className = 'w-full border-collapse';
-    tbl.innerHTML = `<thead class="bg-gray-100 sticky top-0">
-      <tr>
-        <th class="p-2 border text-left">#</th>
-        <th class="p-2 border text-left">ΦΠΑ Κατηγορία</th>
-        <th class="p-2 border text-right">Καθαρή Αξία</th>
-        <th class="p-2 border text-right">ΦΠΑ</th>
-        <th class="p-2 border text-left">Κατηγορία Εξόδου</th>
-      </tr>
-    </thead>`;
-    const tbody = document.createElement('tbody');
-    lines.forEach((ln, idx) => {
-      const lid = (ln.id !== undefined) ? String(ln.id) : ('l' + idx);
-      const vat_cat = ln.vatCategory || ln.vat_category || ln.vat || '';
-      const amt = ln.amount || ln.lineTotal || ln.total || '';
-      const vatv = ln.vat || ln.vatRate || '';
-      const tr = document.createElement('tr');
-      tr.dataset.lineId = lid;
-      tr.dataset.vat = vat_cat;
-      tr.className = '';
-      tr.innerHTML = `
-        <td class="p-2 border text-sm text-gray-600">${idx+1}</td>
-        <td class="p-2 border break-words">${vat_cat}</td>
-        <td class="p-2 border text-right">${amt}</td>
-        <td class="p-2 border text-right">${vatv}</td>
-        <td class="p-2 border"></td>`;
-      // build select
-      const td = tr.querySelector('td:last-child');
-      const sel = document.createElement('select');
-      sel.className = 'expense-category p-1 border rounded w-full';
-      sel.dataset.lineId = lid;
-      const opt0 = document.createElement('option'); opt0.value = ''; opt0.innerText = '-- επίλεξε --'; sel.appendChild(opt0);
-      const fallbackCategories = (typeof getCategoriesForVatInReceiptAnalysis === 'function')
-        ? getCategoriesForVatInReceiptAnalysis(vat_cat, window.CUSTOMER_CATEGORIES || [])
-        : (window.CUSTOMER_CATEGORIES || []).filter(c => categoryAllowedForVat(c, vat_cat));
-      fallbackCategories.forEach(c => {
-        const o = document.createElement('option'); o.value = c;
-        o.textContent = (typeof labelForCategory === 'function' ? labelForCategory(c) : c);
-        if ((ln.category || '') === c) o.selected = true;
-        sel.appendChild(o);
-      });
-
-      sel.addEventListener('change', function(){
-        const val = this.value;
-        // find line in obj and update
-        const found = (obj.lines || []).find(x => String(x.id || x.line_id || '') === lid);
-        if(found) found.category = val;
-        persist();
-      });
-      td.appendChild(sel);
-      tbody.appendChild(tr);
-    });
-    tbl.appendChild(tbody);
-    // wrap in container
-    const wrapper = document.createElement('div');
-    wrapper.className = 'overflow-auto max-h-96 border rounded';
-    wrapper.appendChild(tbl);
-    container.appendChild(wrapper);
-    persist();
-    return;
-  }
-
-  // single line case -> render buttons
-  const single = lines[0];
-  const lid = (single.id !== undefined) ? String(single.id) : (single.line_id !== undefined ? String(single.line_id) : 'l0');
-  const amt = single.amount || single.lineTotal || '';
-  const vatv = single.vat || single.vatRate || '';
-  const vat_cat = single.vatCategory || single.vat_category || '';
-  const selected_cat = single.category || '';
-
-  const singleDiv = document.createElement('div');
-  singleDiv.id = 'singleLine';
-  singleDiv.className = 'border rounded p-4';
-  singleDiv.dataset.lineId = lid;
-  singleDiv.dataset.amount = amt;
-  singleDiv.dataset.vat = vatv;
-  singleDiv.dataset.vatcat = vat_cat;
-
-  const infoHtml = document.createElement('div');
-  infoHtml.className = 'mb-3 grid grid-cols-1 md:grid-cols-3 gap-3';
-  infoHtml.innerHTML = `<div><strong>ΦΠΑ Κατηγορία</strong><div>${vat_cat}</div></div>
-                        <div><strong>Καθαρή Αξία</strong><div>${amt}</div></div>
-                        <div><strong>ΦΠΑ</strong><div>${vatv}</div></div>`;
-  singleDiv.appendChild(infoHtml);
-
-  const chooseWrap = document.createElement('div');
-  chooseWrap.className = 'mb-3';
-  chooseWrap.innerHTML = `<strong>Επίλεξε Κατηγορία Εξόδου</strong>`;
-  const btnRow = document.createElement('div');
-  btnRow.id = 'categoryButtons';
-  btnRow.className = 'mt-2 flex flex-wrap gap-2';
-
-  const singleLineFallbackCats = (typeof getCategoriesForVatInReceiptAnalysis === 'function')
-    ? getCategoriesForVatInReceiptAnalysis(vat_cat, getCategories())
-    : (window.CUSTOMER_CATEGORIES || []).filter(c => categoryAllowedForVat(c, vat_cat));
-
-  singleLineFallbackCats.forEach(c => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'category-btn px-3 py-2 border rounded hover:bg-sky-50';
-    b.dataset.cat = c;
-    b.dataset.lineId = lid;
-    b.innerText = (typeof labelForCategory === 'function' ? labelForCategory(c) : c);
-
-    if (c === selected_cat) { b.classList.add('bg-sky-600', 'text-white'); }
-    b.addEventListener('click', function(){
-      const cat = this.dataset.cat;
-      // toggle selection
-      const currently = (obj.lines[0].category || '');
-      obj.lines[0].category = (currently === cat) ? '' : cat;
-      // reflect UI
-      Array.from(btnRow.querySelectorAll('button.category-btn')).forEach(bb=>{
-        bb.classList.toggle('bg-sky-600', bb.dataset.cat === obj.lines[0].category);
-        bb.classList.toggle('text-white', bb.dataset.cat === obj.lines[0].category);
-      });
-      persist();
-    });
-    btnRow.appendChild(b);
-  });
-
-  const clearBtn = document.createElement('button');
-  clearBtn.type = 'button';
-  clearBtn.id = 'clearCategory';
-  clearBtn.className = 'px-3 py-2 border rounded text-sm ml-2 modal-warning-btn modal-warning-btn--danger dark:bg-red-600 dark:hover:bg-red-700';
-  clearBtn.innerText = 'Καθαρισμός';
-  clearBtn.addEventListener('click', function(){
-    obj.lines[0].category = '';
-    Array.from(btnRow.querySelectorAll('button.category-btn')).forEach(bb=>{
-      bb.classList.remove('bg-sky-600', 'text-white');
-    });
-    persist();
-  });
-
-  btnRow.appendChild(clearBtn);
-  chooseWrap.appendChild(btnRow);
-  singleDiv.appendChild(chooseWrap);
-  container.appendChild(singleDiv);
-  persist();
-}
 
 /* Call this helper whenever you open the summary modal after you populated summaryJsonInput.
    Examples of call sites are below (where modal.style.display='flex' is set). */
@@ -2911,6 +2758,7 @@ document.addEventListener('DOMContentLoaded', replayPersistedReceiptFlash, { onc
   });
 
   const remoteCtrl = initRemoteController();
+  try { window.__remoteCtrl = remoteCtrl; } catch(_) {}
   const localCtrl = supportsMedia ? initLocalScanner() : null;
 
   if (!supportsMedia){
@@ -5088,7 +4936,7 @@ function prefillSummaryModal(){
   const name = (selectedOpt?.dataset?.profileName || document.getElementById('charProfileSelect')?.value || "");
   setActiveProfileHint(name);
   try {
-    remoteCtrl?.pageModeChanged?.(currentScannerMode());
+    window.__remoteCtrl?.pageModeChanged?.(currentScannerMode());
   } catch (err) { console.warn('remoteCtrl pageModeChanged failed', err); }
 });
 
