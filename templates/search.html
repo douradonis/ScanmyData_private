@@ -2608,7 +2608,6 @@ document.addEventListener('DOMContentLoaded', replayPersistedReceiptFlash, { onc
   });
 
   const remoteCtrl = initRemoteController();
-  try { window.__remoteCtrl = remoteCtrl; } catch(_) {}
   const localCtrl = supportsMedia ? initLocalScanner() : null;
 
   if (!supportsMedia){
@@ -4786,7 +4785,7 @@ function prefillSummaryModal(){
   const name = (selectedOpt?.dataset?.profileName || document.getElementById('charProfileSelect')?.value || "");
   setActiveProfileHint(name);
   try {
-    window.__remoteCtrl?.pageModeChanged?.(currentScannerMode());
+    remoteCtrl?.pageModeChanged?.(currentScannerMode());
   } catch (err) { console.warn('remoteCtrl pageModeChanged failed', err); }
 });
 
