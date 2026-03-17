@@ -5906,8 +5906,9 @@ document.addEventListener('DOMContentLoaded', function(){
               if (typeof INITIAL_MARK !== 'undefined' && INITIAL_MARK && INITIAL_MARK.trim() !== '') {
                 const cur = new URL(window.location.href);
                 if (cur.searchParams.has('mark') || cur.searchParams.has('force_edit')) {
-                  window.location = SEARCH_BASE_URL;
-                  return;
+                  cur.searchParams.delete('mark');
+                  cur.searchParams.delete('force_edit');
+                  history.replaceState(null, '', cur.pathname + (cur.searchParams.toString() ? ('?' + cur.searchParams.toString()) : '') + cur.hash);
                 }
               }
             } catch(e){ /* ignore URL errors and fallthrough to client restore */ }
