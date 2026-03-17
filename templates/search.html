@@ -138,7 +138,7 @@
 
 {# --- Yellow box αν υπάρχει MARK ήδη στο Excel --- #}
 {% if allow_edit_existing and not request.args.get('force_edit') %}
-<div class="mt-4 p-4 bg-yellow-50 rounded border border-yellow-300 text-yellow-800" id="existingBanner">
+<div class="mt-4 p-4 bg-yellow-50 rounded border border-yellow-300 text-yellow-800" id="existingBanner" data-classified-json="{{ "1" if mark_already_classified_in_json else "0" }}">
     Το MARK <strong>{{ mark }}</strong> υπάρχει ήδη στο Excel. Θέλεις να τροποποιήσεις τον χαρακτηρισμό;
     <div class="mt-2 flex gap-2">
         <button id="forceEditBtn" type="button" class="bg-yellow-600 text-white px-3 py-2 rounded hover:bg-yellow-700">
@@ -2149,10 +2149,36 @@ function activateReclassificationWithoutReload(markValue){
     try { summaryObj = JSON.parse(summaryInput?.value || '{}') || {}; } catch(_) { summaryObj = {}; }
     if (!summaryObj.mark && !summaryObj.MARK) summaryObj.mark = markRaw;
 
-    if (typeof openReceiptClassModal === 'function') {
+    const isReceiptSummary = !!(
+      summaryObj && (
+        summaryObj.is_receipt === true
+        || /αποδει|receipt/i.test(String(summaryObj.type_name || '') + ' ' + String(summaryObj.type || '') + ' ' + String(summaryObj.category || ''))
+      )
+    );
+    const receiptAnalysisOn = !!(
+      summaryObj && (
+        summaryObj.receipt_analysis_enabled === true
+        || summaryObj.receipts_analysis_enabled === true
+        || summaryObj.receiptAnalysisEnabled === true
+      )
+    );
+
+    if (isReceiptSummary && receiptAnalysisOn && typeof openReceiptClassModal === 'function') {
       openReceiptClassModal(summaryObj);
       return true;
     }
+
+    try {
+      if (summaryInput) summaryInput.value = JSON.stringify(summaryObj || {});
+      if (typeof renderSummaryLinesFromObject === 'function') renderSummaryLinesFromObject(summaryObj || {});
+      if (typeof openModal === 'function') {
+        openModal('summaryModal');
+      } else {
+        const modal = document.getElementById('summaryModal');
+        if (modal) modal.style.display = 'flex';
+      }
+      return true;
+    } catch(_) {}
   } catch(_) {}
   return false;
 }
@@ -5554,6 +5580,10 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
     });
   }
 
+  if (existingBanner && existingBanner.dataset && existingBanner.dataset.classifiedJson === '1') {
+    try { if (typeof showFlash === 'function') showFlash('Το MARK ' + (markInput?.value || '{{ mark or "" }}') + ' είναι ήδη χαρακτηρισμένο στο invoices.json.', 'warning', 4500); } catch(_) {}
+  }
+
   if (forceBtn){
     forceBtn.addEventListener('click', async function(){
       const markValRaw = (markInput && markInput.value) ? markInput.value.trim() : '{{ mark or "" }}';
@@ -6520,7 +6550,32 @@ async function partiallyReloadInvoiceTable() {
       }
     }
 
-    // Fallback to old fragment endpoint
+    // Fallback 1: refresh from current search page HTML
+    try {
+      const curRes = await fetch(window.location.pathname + window.location.search, { method: 'GET', credentials: 'same-origin' });
+      if (curRes.ok) {
+        const curHtml = await curRes.text();
+        const curDoc = new DOMParser().parseFromString(curHtml, 'text/html');
+        const nextCur = curDoc.getElementById('summary-container');
+        const liveCur = document.getElementById('summary-container');
+        if (nextCur && liveCur) {
+          liveCur.innerHTML = nextCur.innerHTML;
+          setTimeout(() => {
+            try {
+              if (typeof window.FBP_INIT_TABULATOR === 'function') {
+                window.FBP_INIT_TABULATOR();
+              } else if (typeof window.FBP_INIT_TABLE === 'function') {
+                window.FBP_INIT_TABLE();
+                initializeSelectAllCheckbox();
+              }
+            } catch(e) { console.warn('Table reinitialization failed:', e); }
+          }, 50);
+          return true;
+        }
+      }
+    } catch(_) {}
+
+    // Fallback 2: old fragment endpoint
     const tableRes = await fetch('/list/fragment', { method: 'GET', credentials: 'same-origin' });
     if (tableRes.ok) {
       const data = await tableRes.json();

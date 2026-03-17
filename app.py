@@ -8643,6 +8643,7 @@ def search():
     invoice_lines = []
     customer_categories = []
     allow_edit_existing = False
+    mark_already_classified_in_json = False
     table_html = ""
     file_exists = False
     css_numcols = ""
@@ -9077,6 +9078,7 @@ def search():
             if classified_docs:
                 flash(f"Το MARK {mark} είναι ήδη χαρακτηρισμένο στο invoices.json.", "warning")
                 classified_flag = True
+                mark_already_classified_in_json = True
 
             # check duplicate in excel
             try:
@@ -9665,6 +9667,7 @@ def search():
         customer_categories=customer_categories,
         customer_category_labels=customer_category_labels,
         allow_edit_existing=allow_edit_existing,
+        mark_already_classified_in_json=mark_already_classified_in_json,
         vat=vat,
         active_page="search",
         table_html=strip_server_totals(table_html),
