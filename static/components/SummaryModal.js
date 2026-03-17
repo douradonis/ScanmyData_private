@@ -450,12 +450,11 @@ export class SummaryModal extends ModalManager {
             // hide/close it after successful save or keep it open on cancel.
             return;
           } else {
-            // Fallback: dispatch submit event (may be handled) then call
-            // form.submit() as last resort.
+            // Fallback: dispatch submit event only.
+            // IMPORTANT: do NOT call legacyForm.submit(), because that bypasses
+            // SPA/AJAX submit interceptors and causes full page reload.
             const ev = new Event('submit', { bubbles: true, cancelable: true });
             legacyForm.dispatchEvent(ev);
-            // last-resort synchronous submit (rare)
-            if (typeof legacyForm.submit === 'function') legacyForm.submit();
             return;
           }
         } catch (err) {

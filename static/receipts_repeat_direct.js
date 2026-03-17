@@ -469,13 +469,20 @@
       if (modal) modal.style.display = 'none';
     } catch(_) {}
   }
-  async function afterSubmit(mark, dedupeKey){
+  async function afterSubmit(mark, dedupeKey, apiData){
     lsSet('UI:useReceipts','1');
     if (dedupeKey) ssDel(dedupeKey);
     try{
       var successMsg = 'Αποθηκεύτηκε η απόδειξη (repeat).';
       if (window.showFlash) window.showFlash(successMsg, 'success', 4200);
       if (window.persistReceiptFlash) window.persistReceiptFlash(successMsg, 'success');
+      var alreadyMsg = String((apiData && (apiData.already_classified_message || apiData.warning_message)) || '').trim();
+      if (!alreadyMsg && apiData && apiData.already_classified_in_json === true) {
+        alreadyMsg = 'Το MARK ' + mark + ' είναι ήδη χαρακτηρισμένο στο invoices.json.';
+      }
+      if (alreadyMsg && window.showFlash) {
+        window.showFlash(alreadyMsg, 'warning', 4500);
+      }
     }catch(_){ }
     try {
       if (typeof window.partiallyReloadInvoiceTable === 'function') {
@@ -571,8 +578,8 @@
     }
 
     try {
-      await submitViaConfirmApi(s);
-      await afterSubmit(mark, k);
+      var apiResult = await submitViaConfirmApi(s);
+      await afterSubmit(mark, k, apiResult);
       return;
     } catch(err){
       var errMsg = String((err && err.message) || '').toLowerCase();

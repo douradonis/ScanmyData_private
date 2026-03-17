@@ -12015,6 +12015,20 @@ def api_confirm_receipt():
 
     mark = str(summary.get("mark") or "").strip()
 
+    already_classified_in_json = False
+    try:
+        customer_file = group_path(f"{vat}_invoices.json")
+        customer_rows = json_read(customer_file) or []
+        for row in customer_rows:
+            if str((row or {}).get("mark", "")).strip() != mark:
+                continue
+            cls = str((row or {}).get("classification", "")).strip().lower()
+            if cls == "χαρακτηρισμενο":
+                already_classified_in_json = True
+                break
+    except Exception:
+        log.exception("api_confirm_receipt: could not inspect invoices.json classification state")
+
     # index by mark (fallback receipt MARK requires same receipt identity)
     existing_idx = None
     for i, it in enumerate(epsilon_cache):
@@ -12166,7 +12180,9 @@ def api_confirm_receipt():
         "saved": True,
         "mark": mark,
         "excel_written": bool(excel_written),
-        "updated_existing": bool(updated_existing)
+        "updated_existing": bool(updated_existing),
+        "already_classified_in_json": bool(already_classified_in_json),
+        "already_classified_message": (f"Το MARK {mark} είναι ήδη χαρακτηρισμένο στο invoices.json." if already_classified_in_json else "")
     })
 
 

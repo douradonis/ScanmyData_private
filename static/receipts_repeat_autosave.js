@@ -175,6 +175,12 @@
       .then(result => {
         if(result && result.ok){
           persistFlash('Αποθηκεύτηκε η απόδειξη (repeat).', 'success');
+          try {
+            const alreadyMsg = String((result.data && (result.data.already_classified_message || result.data.warning_message)) || '').trim();
+            if (alreadyMsg && typeof window.showFlash === 'function') {
+              window.showFlash(alreadyMsg, 'warning', 4500);
+            }
+          } catch(_) {}
         } else if(result) {
           const err = (result.data && result.data.error) ? String(result.data.error) : (result.error ? String(result.error) : '');
           const msg = err ? `Σφάλμα αυτόματης αποθήκευσης: ${err}` : 'Σφάλμα αυτόματης αποθήκευσης αποδείξεων.';
