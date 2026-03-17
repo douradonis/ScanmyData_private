@@ -56,7 +56,7 @@
     if (!form || !mark) return false;
     mark.value = u;
     if (typeof form.requestSubmit === 'function') form.requestSubmit();
-    else form.submit();
+    else form.dispatchEvent(new Event('submit', { cancelable:true, bubbles:true }));
     return true;
   }
 
@@ -90,8 +90,14 @@
         window.redirectToReceiptsFlow();
         return;
       }
-      try{ location.reload(); }
-      catch(_){ location.href = location.href; }
+      try {
+        if (typeof window.clearReclassificationSearchState === 'function') window.clearReclassificationSearchState();
+      } catch(_) {}
+      try {
+        const u = new URL(window.location.href);
+        ['mark','scrape_url','force_edit'].forEach(k => u.searchParams.delete(k));
+        history.replaceState(null, '', u.pathname + (u.search ? ('?' + u.searchParams.toString()) : '') + u.hash);
+      } catch(_) {}
     }
     const afmBtn = $id('afmModalConfirm');
     if (afmBtn) afmBtn.addEventListener('click', reloadSoon);

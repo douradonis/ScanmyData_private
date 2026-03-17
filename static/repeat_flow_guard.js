@@ -125,15 +125,41 @@
 
   // --- One-shot submit blocker (prevents loops) ------------------------------
   let autoSaveInProgress = false;
+  let autoSaveWatchdog = null;
+  function resetAutoSaveState(){
+    autoSaveInProgress = false;
+    if (autoSaveWatchdog) {
+      try { clearTimeout(autoSaveWatchdog); } catch(_) {}
+      autoSaveWatchdog = null;
+    }
+  }
   function safeSubmitSaveSummary(){
     if (autoSaveInProgress) return false;
     const form = byId('saveSummaryForm');
     if (!form) return false;
     autoSaveInProgress = true;
-    try { form.submit(); } catch(_) { autoSaveInProgress = false; return false; }
-    // do not reset the flag here; the page will reload
+    try {
+      // IMPORTANT: use requestSubmit/submit-event to keep SPA save interceptors active.
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+      } else {
+        const ev = new Event('submit', { cancelable: true, bubbles: true });
+        form.dispatchEvent(ev);
+      }
+    } catch(_) {
+      resetAutoSaveState();
+      return false;
+    }
+    // Save can complete without full navigation (AJAX), so always keep a watchdog reset.
+    autoSaveWatchdog = setTimeout(resetAutoSaveState, 9000);
     return true;
   }
+
+  try {
+    window.__repeatFlowResetAutoSave = resetAutoSaveState;
+    window.addEventListener('scanmydata:save-summary-finished', resetAutoSaveState);
+    window.addEventListener('scanmydata:reclassification-cancelled', resetAutoSaveState);
+  } catch(_) {}
 
   // --- Apply receipt auto-category + submit ---------------------------------
   function applyReceiptAutoCategoryAndSubmit(){
