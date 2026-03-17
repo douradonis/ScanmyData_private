@@ -2120,6 +2120,16 @@ const VAT = "{{ vat or '' }}"; // active vat from server
 const INITIAL_MARK = "{{ mark|e }}"; // αρχική τιμή mark (αν υπήρχε)
 const RC_CLEAR_FLAG_KEY = 'rc:clearSearchAfterReload';
 
+(function bindMarkSubmitForceEditReset(){
+  const mf = document.getElementById('markSearchForm');
+  if (!mf || mf.dataset.rcForceEditResetBound === '1') return;
+  mf.dataset.rcForceEditResetBound = '1';
+  mf.addEventListener('submit', function(){
+    try { FORCE_EDIT = false; } catch(_) {}
+    try { if (typeof removeForceEditParamFromUrl === 'function') removeForceEditParamFromUrl(); } catch(_) {}
+  }, true);
+})();
+
 function activateReclassificationWithoutReload(markValue){
   try {
     const markRaw = String(markValue || document.getElementById('markInput')?.value || '').trim();
@@ -5088,7 +5098,11 @@ function openRepeatModalWithMapping(mapping){
     window.openRepeatModal();
   }
 }
-  function closeRepeatModal(){ repeatModal.style.display = 'none'; }
+  function closeRepeatModal(){
+    repeatModal.style.display = 'none';
+    try { FORCE_EDIT = false; } catch(_) {}
+    try { if (typeof removeForceEditParamFromUrl === 'function') removeForceEditParamFromUrl(); } catch(_) {}
+  }
 
   
 // --- normalize VAT γραμμής σε ένα από τα κλειδιά 0/6/13/17/24 ---
@@ -11059,6 +11073,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!window.__SCANMYDATA_PROTO_SUBMIT_PATCHED__) {
       window.__SCANMYDATA_PROTO_SUBMIT_PATCHED__ = true;
       const nativeSubmit = HTMLFormElement.prototype.submit;
+      const nativeRequestSubmit = HTMLFormElement.prototype.requestSubmit;
       HTMLFormElement.prototype.submit = function patchedFormSubmit(){
         try {
           if (this && this.id === 'saveSummaryForm') {
@@ -11067,10 +11082,24 @@ document.addEventListener('DOMContentLoaded', () => {
               return;
             }
             const ev = new Event('submit', { cancelable: true, bubbles: true });
-            const allowed = this.dispatchEvent(ev);
-            if (!allowed) return;
+            this.dispatchEvent(ev);
+            return;
           }
         } catch(_) {}
+        return nativeSubmit.call(this);
+      };
+
+      HTMLFormElement.prototype.requestSubmit = function patchedRequestSubmit(submitter){
+        try {
+          if (this && this.id === 'saveSummaryForm') {
+            const ev = new Event('submit', { cancelable: true, bubbles: true });
+            this.dispatchEvent(ev);
+            return;
+          }
+        } catch(_) {}
+        if (typeof nativeRequestSubmit === 'function') {
+          return nativeRequestSubmit.call(this, submitter);
+        }
         return nativeSubmit.call(this);
       };
     }
