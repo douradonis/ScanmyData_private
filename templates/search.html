@@ -2120,6 +2120,32 @@ const VAT = "{{ vat or '' }}"; // active vat from server
 const INITIAL_MARK = "{{ mark|e }}"; // αρχική τιμή mark (αν υπήρχε)
 const RC_CLEAR_FLAG_KEY = 'rc:clearSearchAfterReload';
 
+
+window.__RC_DEBUG_ENABLED = true;
+function rcDebugLog(eventName, details){
+  try {
+    if (!window.__RC_DEBUG_ENABLED) return;
+    const payload = {
+      ts: new Date().toISOString(),
+      event: eventName,
+      href: (window && window.location) ? window.location.href : '',
+      details: details || {}
+    };
+    console.log('[RC-FLOW-DEBUG]', payload);
+  } catch(_) {}
+}
+window.addEventListener('beforeunload', function(){
+  try {
+    if (!window.__RC_DEBUG_ENABLED) return;
+    console.warn('[RC-FLOW-DEBUG] beforeunload fired', {
+      href: window.location.href,
+      activeElement: document.activeElement && (document.activeElement.id || document.activeElement.name || document.activeElement.tagName),
+      inFlightSave: !!window.__FINAL_SAVE_SUMMARY_AJAX_IN_FLIGHT__,
+      stack: (new Error('beforeunload stack')).stack
+    });
+  } catch(_) {}
+});
+
 function rcSummaryLooksMeaningful(summaryObj){
   try {
     if (!summaryObj || typeof summaryObj !== 'object') return false;
@@ -2131,6 +2157,7 @@ function rcSummaryLooksMeaningful(summaryObj){
 
 async function rcHydrateReclassificationSummaryFromServer(markRaw){
   try {
+    rcDebugLog('reclass_hydrate_start', { markRaw });
     const endpoint = (window.SEARCH_BASE_URL || SEARCH_BASE_URL || '/search')
       + '?mark=' + encodeURIComponent(markRaw)
       + '&force_edit=1';
@@ -2139,9 +2166,10 @@ async function rcHydrateReclassificationSummaryFromServer(markRaw){
       credentials: 'same-origin',
       headers: { 'X-Requested-With': 'XMLHttpRequest' }
     });
-    if (!res.ok) return false;
+    if (!res.ok) {
+      rcDebugLog('save_ajax_http_error', { status: res.status }); rcDebugLog('reclass_hydrate_http_fail', { status: res.status }); return false; }
     const html = await res.text().catch(() => '');
-    if (!html) return false;
+    if (!html) { rcDebugLog('reclass_hydrate_empty_html', {}); return false; }
     const parsed = new DOMParser().parseFromString(html, 'text/html');
 
     let summaryObj = {};
@@ -2151,18 +2179,20 @@ async function rcHydrateReclassificationSummaryFromServer(markRaw){
     } catch(_) { summaryObj = {}; }
 
     if (!rcSummaryLooksMeaningful(summaryObj)) {
+      rcDebugLog('reclass_activate_needs_server_hydrate', { keys: Object.keys(summaryObj || {}) });
       try {
         const m = html.match(/__RC_SERVER_MODAL_SUMMARY\s*=\s*([^;]+);/);
         if (m && m[1]) summaryObj = JSON.parse(m[1]);
       } catch(_) {}
     }
 
-    if (!rcSummaryLooksMeaningful(summaryObj)) return false;
+    if (!rcSummaryLooksMeaningful(summaryObj)) {
+      rcDebugLog('reclass_activate_needs_server_hydrate', { keys: Object.keys(summaryObj || {}) }); rcDebugLog('reclass_hydrate_not_meaningful', { parsed_keys: Object.keys(summaryObj || {}) }); return false; }
     if (!summaryObj.mark && !summaryObj.MARK) summaryObj.mark = markRaw;
 
     const summaryInput = document.getElementById('summaryJsonInput');
     const summaryModal = document.getElementById('summaryModal');
-    if (!summaryModal) return false;
+    if (!summaryModal) { rcDebugLog('reclass_activate_missing_modal', {}); return false; }
 
     try { window.__RC_SERVER_MODAL_SUMMARY = summaryObj; } catch(_) {}
     try { if (summaryInput) summaryInput.value = JSON.stringify(summaryObj || {}); } catch(_) {}
@@ -2170,16 +2200,18 @@ async function rcHydrateReclassificationSummaryFromServer(markRaw){
       if (typeof renderSummaryLinesFromObject === 'function') renderSummaryLinesFromObject(summaryObj || {});
       if (typeof prefillSummaryModal === 'function') prefillSummaryModal();
       summaryModal.style.display = 'flex';
+      rcDebugLog('reclass_hydrate_success', { lines: Array.isArray(summaryObj.lines) ? summaryObj.lines.length : 0, mark: summaryObj.mark || summaryObj.MARK || '' });
       return true;
     } catch(_) {}
-  } catch(_) {}
+  } catch(err) { rcDebugLog('reclass_hydrate_exception', { error: String(err && (err.message || err) || '') }); }
   return false;
 }
 
 function activateReclassificationWithoutReload(markValue){
   try {
+    rcDebugLog('reclass_activate_called', { markValue });
     const markRaw = String(markValue || document.getElementById('markInput')?.value || '').trim();
-    if (!markRaw) return false;
+    if (!markRaw) { rcDebugLog('reclass_activate_missing_mark', {}); return false; }
 
     FORCE_EDIT = true;
     const url = new URL(window.location.href);
@@ -2199,7 +2231,7 @@ function activateReclassificationWithoutReload(markValue){
     if (!summaryObj.mark && !summaryObj.MARK) summaryObj.mark = markRaw;
 
     const summaryModal = document.getElementById('summaryModal');
-    if (!summaryModal) return false;
+    if (!summaryModal) { rcDebugLog('reclass_activate_missing_modal', {}); return false; }
 
     try {
       window.__RC_SUPPRESS_RECEIPT_CLASS_ONCE = true;
@@ -2208,10 +2240,14 @@ function activateReclassificationWithoutReload(markValue){
     } catch(_) {}
 
     if (!rcSummaryLooksMeaningful(summaryObj)) {
+      rcDebugLog('reclass_activate_needs_server_hydrate', { keys: Object.keys(summaryObj || {}) });
       try {
         if (typeof showFlash === 'function') showFlash('Φόρτωση δεδομένων επαναχαρακτηρισμού…', 'info', 1400);
         rcHydrateReclassificationSummaryFromServer(markRaw).then((ok) => {
-          if (!ok) window.location = (window.SEARCH_BASE_URL || SEARCH_BASE_URL || '/search') + '?mark=' + encodeURIComponent(markRaw) + '&force_edit=1';
+          if (!ok) {
+            rcDebugLog('reclass_activate_hydrate_failed_fallback_navigation', { markRaw });
+            window.location = (window.SEARCH_BASE_URL || SEARCH_BASE_URL || '/search') + '?mark=' + encodeURIComponent(markRaw) + '&force_edit=1';
+          }
         });
       } catch(_) {}
       return true;
@@ -2225,9 +2261,10 @@ function activateReclassificationWithoutReload(markValue){
       if (typeof renderSummaryLinesFromObject === 'function') renderSummaryLinesFromObject(summaryObj || {});
       if (typeof prefillSummaryModal === 'function') prefillSummaryModal();
       summaryModal.style.display = 'flex';
+      rcDebugLog('reclass_hydrate_success', { lines: Array.isArray(summaryObj.lines) ? summaryObj.lines.length : 0, mark: summaryObj.mark || summaryObj.MARK || '' });
       return true;
     } catch(_) {}
-  } catch(_) {}
+  } catch(err) { rcDebugLog('reclass_hydrate_exception', { error: String(err && (err.message || err) || '') }); }
   return false;
 }
 window.activateReclassificationWithoutReload = activateReclassificationWithoutReload;
@@ -7171,6 +7208,7 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
       body: JSON.stringify(summary)
     }, 'Αποθήκευση Παραστατικού', 'Παρακαλώ περιμένετε - αποθήκευση δεδομένων...');
     if (!res.ok) {
+      rcDebugLog('save_ajax_http_error', { status: res.status });
       const t = await res.text().catch(()=>'');
       await showModalAlert('Σφάλμα', 'Αποτυχία αποθήκευσης (HTTP ' + res.status + '): ' + t);
       return;
@@ -11231,6 +11269,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function handleSaveSummaryAjax(form){
+    rcDebugLog('save_ajax_start', { action: form && form.action, method: (form && form.method) || 'POST' });
     const fd = new FormData(form);
     const res = await fetch(form.action || '/save_summary', {
       method: 'POST',
@@ -11240,6 +11279,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     const ct = (res.headers.get('content-type') || '').toLowerCase();
+    rcDebugLog('save_ajax_response', { status: res.status, redirected: !!res.redirected, url: res.url || '', contentType: ct });
     if (res.redirected || res.status === 302 || (res.url && res.url.indexOf('allow_edit_existing') !== -1)) {
       const rawMark = byId('summaryJsonInput')?.value || '{}';
       let mark = '';
@@ -11274,6 +11314,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (!res.ok) {
+      rcDebugLog('save_ajax_http_error', { status: res.status });
       const txt = await res.text().catch(()=>'');
       throw new Error('HTTP ' + res.status + (txt ? (': ' + txt.slice(0,120)) : ''));
     }
@@ -11281,7 +11322,8 @@ document.addEventListener('DOMContentLoaded', () => {
     try { if (typeof hideSummaryModal === 'function') hideSummaryModal(); } catch(_) {}
     try { const s = byId('summaryJsonInput'); if (s) s.value = '{}'; } catch(_) {}
     let ok = false;
-    try { if (typeof partiallyReloadInvoiceTable === 'function') ok = await partiallyReloadInvoiceTable(); } catch(_) {}
+    try { if (typeof partiallyReloadInvoiceTable === 'function') ok = await partiallyReloadInvoiceTable(); } catch(err) { rcDebugLog('save_ajax_partial_reload_exception', { error: String(err && (err.message || err) || '') }); }
+    rcDebugLog('save_ajax_partial_reload_result', { ok });
     if (typeof showFlash === 'function') {
       if (ok) showFlash('Αποθηκεύτηκε με επιτυχία.', 'success', 2200);
       else showFlash('Αποθηκεύτηκε, αλλά η μερική ανανέωση απέτυχε.', 'warning', 3200);
@@ -11290,12 +11332,15 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   window.__scanmydataForceAjaxSave = async function(form){
+    rcDebugLog('save_force_ajax_called', { formId: form && form.id, inFlight: !!window.__FINAL_SAVE_SUMMARY_AJAX_IN_FLIGHT__ });
     if (!form || form.id !== 'saveSummaryForm') return;
     if (window.__FINAL_SAVE_SUMMARY_AJAX_IN_FLIGHT__) return;
     window.__FINAL_SAVE_SUMMARY_AJAX_IN_FLIGHT__ = true;
     try {
       try { if (typeof updateSummaryFromDom === 'function') updateSummaryFromDom(); } catch(_) {}
+      rcDebugLog('save_force_ajax_before_handle', {});
       await handleSaveSummaryAjax(form);
+      rcDebugLog('save_force_ajax_after_handle', { ok: true });
     } catch(err) {
       try { if (typeof showFlash === 'function') showFlash('Σφάλμα αποθήκευσης: ' + (err.message || err), 'error', 5000); } catch(_) {}
       try { window.dispatchEvent(new CustomEvent('scanmydata:save-summary-finished', { detail: { ok: false, error: String(err && (err.message || err) || '') } })); } catch(_) {}
@@ -11305,6 +11350,7 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   document.addEventListener('submit', async function(ev){
+    rcDebugLog('submit_capture_seen', { targetId: ev && ev.target && ev.target.id, targetTag: ev && ev.target && ev.target.tagName });
     const form = ev.target;
     if (!form || form.id !== 'saveSummaryForm') return;
 
@@ -11313,6 +11359,7 @@ document.addEventListener('DOMContentLoaded', () => {
     ev.stopPropagation();
     if (typeof ev.stopImmediatePropagation === 'function') ev.stopImmediatePropagation();
 
+    rcDebugLog('submit_capture_intercepted_save_form', {});
     await window.__scanmydataForceAjaxSave(form);
   }, true);
 })();
