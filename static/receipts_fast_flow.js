@@ -103,6 +103,9 @@
       forceBtn.onclick = function() {
         const markRaw = String(mark || $id('markInput')?.value || '').trim();
         if (!markRaw) return;
+        if (typeof window.activateReclassificationWithoutReload === 'function' && window.activateReclassificationWithoutReload(markRaw)) {
+          return;
+        }
         const base = (window.SEARCH_BASE_URL || '/search');
         window.location = base + '?mark=' + encodeURIComponent(markRaw) + '&force_edit=1';
       };

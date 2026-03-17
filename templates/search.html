@@ -2100,7 +2100,7 @@ try {
 })();
 // --- Reclass guard (yellow box -> ?force_edit=1) ---
 const URL_PARAMS = (function(){ try { return new URL(window.location.href).searchParams; } catch(_) { return new URLSearchParams(''); } })();
-const FORCE_EDIT = (function(){ try { return URL_PARAMS.get('force_edit') === '1'; } catch(_) { return false; } })();
+let FORCE_EDIT = (function(){ try { return URL_PARAMS.get('force_edit') === '1'; } catch(_) { return false; } })();
 const ALLOW_EDIT_EXISTING = {{ 'true' if allow_edit_existing else 'false' }};
 const CATEGORY_LABELS = (function(){
   try { return {{ (customer_category_labels or {}) | tojson | safe }} || {}; }
@@ -2119,6 +2119,52 @@ const SEARCH_BASE_URL = "{{ url_for('search') }}";
 const VAT = "{{ vat or '' }}"; // active vat from server
 const INITIAL_MARK = "{{ mark|e }}"; // αρχική τιμή mark (αν υπήρχε)
 const RC_CLEAR_FLAG_KEY = 'rc:clearSearchAfterReload';
+
+function activateReclassificationWithoutReload(markValue){
+  try {
+    const markRaw = String(markValue || document.getElementById('markInput')?.value || '').trim();
+    if (!markRaw) return false;
+
+    FORCE_EDIT = true;
+    const url = new URL(window.location.href);
+    url.searchParams.set('mark', markRaw);
+    url.searchParams.set('force_edit', '1');
+    history.replaceState(null, '', url.pathname + '?' + url.searchParams.toString() + url.hash);
+
+    const existingBanner = document.getElementById('existingBanner');
+    if (existingBanner) existingBanner.style.display = 'none';
+
+    const summaryInput = document.getElementById('summaryJsonInput');
+    let summaryObj = {};
+    try { summaryObj = JSON.parse(summaryInput?.value || '{}') || {}; } catch(_) { summaryObj = {}; }
+    if ((!summaryObj || typeof summaryObj !== 'object' || !Object.keys(summaryObj).length) && window.__RC_SERVER_MODAL_SUMMARY) {
+      try { summaryObj = JSON.parse(JSON.stringify(window.__RC_SERVER_MODAL_SUMMARY || {})); } catch(_) {}
+    }
+    if (!summaryObj.mark && !summaryObj.MARK) summaryObj.mark = markRaw;
+
+    const summaryModal = document.getElementById('summaryModal');
+    if (!summaryModal) return false;
+
+    try {
+      window.__RC_SUPPRESS_RECEIPT_CLASS_ONCE = true;
+      const rcModal = document.getElementById('receiptClassModal');
+      if (rcModal) rcModal.style.display = 'none';
+    } catch(_) {}
+
+    try {
+      if (summaryInput) summaryInput.value = JSON.stringify(summaryObj || {});
+    } catch(_) {}
+
+    try {
+      if (typeof renderSummaryLinesFromObject === 'function') renderSummaryLinesFromObject(summaryObj || {});
+      if (typeof prefillSummaryModal === 'function') prefillSummaryModal();
+      summaryModal.style.display = 'flex';
+      return true;
+    } catch(_) {}
+  } catch(_) {}
+  return false;
+}
+window.activateReclassificationWithoutReload = activateReclassificationWithoutReload;
 
 function rcRememberSearchClear(){
   try { sessionStorage.setItem(RC_CLEAR_FLAG_KEY, '1'); } catch(_){}
@@ -5518,7 +5564,9 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
       const markVal = encodeURIComponent(markValRaw || '');
       if (!markVal){ await showModalAlert('Σφάλμα', 'Δεν δόθηκε MARK για επιβεβαίωση.'); return; }
       if(existingBanner) existingBanner.style.display = 'none';
-      window.location = SEARCH_BASE_URL + '?mark=' + markVal + '&force_edit=1';
+      if (!activateReclassificationWithoutReload(decodeURIComponent(markVal))) {
+        window.location = SEARCH_BASE_URL + '?mark=' + markVal + '&force_edit=1';
+      }
     });
   }
 
@@ -6334,11 +6382,11 @@ document.getElementById('markSearchForm')?.addEventListener('submit', async func
           rootEl.style.display = 'none';
           try { clearReclassificationSearchState(); } catch(_) {}
         };
-        if (forceBtn) forceBtn.onclick = async function(){
+        if (forceBtn) forceBtn.onclick = function(){
           const mv = encodeURIComponent(String(document.getElementById('markInput')?.value || '').trim());
           if (!mv) return;
-          if (await showModalConfirm('Επιβεβαίωση', 'Θες σίγουρα να επαναχαρακτηρίσεις το MARK και να ανοίξει η φόρμα επεξεργασίας;')) {
-            rootEl.style.display = 'none';
+          rootEl.style.display = 'none';
+          if (!activateReclassificationWithoutReload(decodeURIComponent(mv))) {
             window.location = SEARCH_BASE_URL + '?mark=' + mv + '&force_edit=1';
           }
         };
@@ -10323,9 +10371,11 @@ function openReceiptClassModal(summaryObj){
         try {
             const input = document.getElementById('summaryJsonInput');
             const obj = input && input.value ? JSON.parse(input.value) : {};
-            if(obj && obj.receipt_analysis_enabled && obj.is_receipt){
+            const suppressReceiptClass = !!window.__RC_SUPPRESS_RECEIPT_CLASS_ONCE;
+            if(obj && obj.receipt_analysis_enabled && obj.is_receipt && !FORCE_EDIT && !suppressReceiptClass){
                 openReceiptClassModal(obj);
             }
+            window.__RC_SUPPRESS_RECEIPT_CLASS_ONCE = false;
         } catch(_){/* ignore */}
     });
 })();
@@ -10629,7 +10679,9 @@ RC.handleReceiptAfterScrape = async function(summaryObj, scrapeUrl){
             const mv = encodeURIComponent(String(markVal || document.getElementById('markInput')?.value || '').trim());
             if (!mv) return;
             const base = window.SEARCH_BASE_URL || '/search';
-            window.location = base + '?mark=' + mv + '&force_edit=1';
+            if (!activateReclassificationWithoutReload(decodeURIComponent(mv))) {
+              window.location = base + '?mark=' + mv + '&force_edit=1';
+            }
           };
           banner.style.display = 'block';
         } catch(_) {}
@@ -10866,18 +10918,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const afmOk = document.getElementById('afmModalConfirm');
   if (afmOk) {
-    afmOk.addEventListener('click', function(){
-      try { document.getElementById('afmWarningModal').style.display = 'none'; } catch(_){}
-      resetSearchAndReload();
-      try { if (typeof clearReclassificationSearchState === 'function') clearReclassificationSearchState(); } catch(_) {}
-      setTimeout(() => {
-        try {
-          const u = new URL(window.location.href);
-          ['mark','url','payload','scrape_url','mark_id','force_edit'].forEach(param => u.searchParams.delete(param));
-          history.replaceState(null, '', u.pathname + (u.search ? ('?' + u.searchParams.toString()) : '') + u.hash);
-        } catch(_) {}
-      }, 40);
-    });
+    // handled centrally via __RC_handleWarningAck + capture-phase listener
   }
 })();
 </script>
@@ -11084,7 +11125,9 @@ document.addEventListener('DOMContentLoaded', () => {
       const mv = encodeURIComponent(String(mark || byId('markInput')?.value || '').trim());
       if (!mv) return;
       const base = window.SEARCH_BASE_URL || '/search';
-      window.location = base + '?mark=' + mv + '&force_edit=1';
+      if (!activateReclassificationWithoutReload(decodeURIComponent(mv))) {
+        window.location = base + '?mark=' + mv + '&force_edit=1';
+      }
     };
     banner.style.display = 'block';
     return banner;
