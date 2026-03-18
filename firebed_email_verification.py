@@ -175,34 +175,154 @@ class FirebedEmailVerification:
             verify_url = f"{base_url}/firebase-auth/verify-email?token={token}"
             
             # Greek subject and body
-            subject = "Επιβεβαίωση Email - ScanmyData"
-
-            from email_utils import make_email_html
-            display = display_name or email.split('@')[0]
-            body_html = f"""
-            <p style='margin:0 0 14px; font-size: 15px;'>Γεια σου <strong>{display}</strong>! 👋</p>
-            <p style='margin:0 0 14px;'>Σε ευχαριστούμε που εγγράφηκες στο <strong>ScanmyData</strong>! Για να ενεργοποιήσεις τον λογαριασμό σου και να έχεις πρόσβαση σε όλες τις δυνατότητες, χρειάζεται να επιβεβαιώσεις το email σου.</p>
-            <p style='margin:0 0 10px;font-weight:600;'>✅ Επιβεβαίωση Email</p>
-            <ul style='margin:0 0 14px;padding-left:20px;line-height:1.5;'>
-              <li>Θα ενεργοποιηθεί ο λογαριασμός σου</li>
-              <li>Θα μπορείς να κάνεις login</li>
-              <li>Θα έχεις πρόσβαση στο dashboard</li>
-              <li>Θα λαμβάνεις σημαντικές ενημερώσεις</li>
-            </ul>
-            <p style='margin:0 0 14px;color:#666;font-size:13px;'>🔒 Ασφάλεια: Αν δεν δημιούργησες εσύ αυτόν τον λογαριασμό, απλά αγνόησε αυτό το email. Ο λογαριασμός δεν θα ενεργοποιηθεί χωρίς επιβεβαίωση.</p>
-            <p style='margin:0 0 10px;font-size:13px;'>Δεν μπορείς να κάνεις κλικ στο κουμπί; Αντίγραψε και επικόλλησε αυτό το link στον browser σου:</p>
-            <p style='margin:0 0 14px;font-size:13px;word-break:break-all;'><a href='{verify_url}' style='color:#1a56db;text-decoration:none;'>{verify_url}</a></p>
+            subject = "✅ Επιβεβαίωση Email - ScanmyData Account"
+            
+            # Logo URL - prefer the email-specific logo for transactional emails
+            logo_url = f"{base_url}/icons/scanmydata_logo_email.png"
+            
+            # HTML Email Template
+            html_body = f"""
+            <!DOCTYPE html>
+            <html lang="el">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Επιβεβαίωση Email - ScanmyData</title>
+                <style>
+                    body {{ 
+                        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                        line-height: 1.6;
+                        color: #0f172a;
+                        max-width: 600px;
+                        margin: 0 auto;
+                        padding: 20px;
+                        background-color: #f8f9fa;
+                    }}
+                    .container {{
+                        background: white;
+                        padding: 40px;
+                        border-radius: 12px;
+                        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+                    }}
+                    .header {{
+                        text-align: center;
+                        margin-bottom: 30px;
+                        border-bottom: 3px solid #e74c3c;
+                        padding-bottom: 20px;
+                    }}
+                    .logo {{
+                        font-size: 28px;
+                        font-weight: bold;
+                        color: #e74c3c;
+                        margin-bottom: 10px;
+                    }}
+                    .welcome {{
+                        font-size: 18px;
+                        color: #2c3e50;
+                        margin-bottom: 20px;
+                    }}
+                    .verify-btn {{
+                        display: inline-block;
+                        background-color: #e74c3c;
+                        background-image: linear-gradient(135deg, #e74c3c, #c0392b);
+                        color: #ffffff !important;
+                        padding: 15px 30px;
+                        text-decoration: none !important;
+                        border-radius: 8px;
+                        font-weight: bold;
+                        text-align: center;
+                        margin: 20px 0;
+                        transition: all 0.3s ease;
+                    }}
+                    .verify-btn:hover {{
+                        background-color: #c0392b;
+                        background-image: linear-gradient(135deg, #c0392b, #a93226);
+                        transform: translateY(-2px);
+                    }}
+                    .info-box {{
+                        background: #f8f9fa;
+                        border-left: 4px solid #3498db;
+                        padding: 15px;
+                        margin: 20px 0;
+                        border-radius: 4px;
+                    }}
+                    .footer {{
+                        margin-top: 30px;
+                        padding-top: 20px;
+                        border-top: 1px solid #eee;
+                        text-align: center;
+                        color: #666;
+                        font-size: 14px;
+                    }}
+                    .security-note {{
+                        background: #fff3cd;
+                        border: 1px solid #ffeaa7;
+                        padding: 15px;
+                        border-radius: 6px;
+                        margin: 20px 0;
+                    }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <div style="text-align: center; margin-bottom: 20px;">
+                            <img src="{logo_url}" alt="ScanmyData" style="height: 80px; width: auto;">
+                        </div>
+                        <h2 style="color: #0ea5e9; margin: 0; text-align: center;">Καλώς ήρθες στο ScanmyData!</h2>
+                    </div>
+                    
+                    <div class="welcome">
+                        Γεια σου {display_name or email.split('@')[0]}! 👋
+                    </div>
+                    
+                    <p>
+                        Σε ευχαριστούμε που εγγράφηκες στο <strong>ScanmyData</strong>! 
+                        Για να ενεργοποιήσεις τον λογαριασμό σου και να έχεις πρόσβαση 
+                        σε όλες τις δυνατότητες, χρειάζεται να επιβεβαιώσεις το email σου.
+                    </p>
+                    
+                    <div style="text-align: center; margin: 30px 0;">
+                        <a href="{verify_url}" class="verify-btn" style="background-color:#e74c3c;color:#ffffff;text-decoration:none;display:inline-block;padding:15px 30px;border-radius:8px;">
+                            ✅ Επιβεβαίωση Email
+                        </a>
+                    </div>
+                    
+                    <div class="info-box">
+                        <strong>📧 Τι θα συμβεί μετά:</strong><br>
+                        • Θα ενεργοποιηθεί ο λογαριασμός σου<br>
+                        • Θα μπορείς να κάνεις login<br>
+                        • Θα έχεις πρόσβαση στο dashboard<br>
+                        • Θα λαμβάνεις σημαντικές ενημερώσεις
+                    </div>
+                    
+                    <div class="security-note">
+                        <strong>🔒 Ασφάλεια:</strong> Αν δεν δημιούργησες εσύ αυτόν τον λογαριασμό, 
+                        απλά αγνόησε αυτό το email. Ο λογαριασμός δεν θα ενεργοποιηθεί χωρίς επιβεβαίωση.
+                    </div>
+                    
+                    <p style="color: #666; font-size: 14px;">
+                        <strong>Δεν μπορείς να κάνεις κλικ στο κουμπί;</strong><br>
+                        Αντίγραψε και επικόλλησε αυτό το link στον browser σου:<br>
+                        <a href="{verify_url}" style="color: #e74c3c; word-break: break-all;">{verify_url}</a>
+                    </p>
+                    
+                    <div class="footer">
+                        <div style="text-align: center; margin-bottom: 15px;">
+                            <img src="{logo_url}" alt="ScanmyData" style="height: 50px; width: auto; opacity: 0.6;">
+                        </div>
+                        <p>
+                            <strong>ScanmyData Team</strong><br>
+                            Αυτό το email στάλθηκε στις {datetime.now().strftime('%d/%m/%Y %H:%M')} ΕΕΤ
+                        </p>
+                        <p style="font-size: 12px; color: #999;">
+                            Το link επιβεβαίωσης ισχύει για 24 ώρες
+                        </p>
+                    </div>
+                </div>
+            </body>
+            </html>
             """
-
-            html_body = make_email_html(
-                greeting="Καλώς ήρθες στο ScanmyData!",
-                body_html=body_html,
-                cta_url=verify_url,
-                cta_text="Επιβεβαίωση Email",
-                expiry_note="Το link επιβεβαίωσης ισχύει για 24 ώρες.",
-                security_note="Αν δεν δημιούργησες εσύ αυτόν τον λογαριασμό, αγνόησε αυτό το email.",
-                header_subtitle='📧 Μήνυμα από Διαχειριστή',
-            )
             
             # Plain text fallback
             text_body = f"""
@@ -279,24 +399,137 @@ ScanmyData Team
             base_url = FirebedEmailVerification.get_base_url()
             reset_url = f"{base_url}/firebase-auth/reset-password?token={token}"
             
-            subject = "Επαναφορά Κωδικού - ScanmyData"
-
-            from email_utils import make_email_html
-            logo_url = f"{base_url}/icons/scanmydata_logo_3000w.png"
-            html_body = make_email_html(
-                greeting="Γεια σας,",
-                body_html=(
-                    "<p style='margin:0 0 14px;'>Λάβαμε αίτημα για επαναφορά του κωδικού στο"
-                    " <strong>ScanmyData</strong>. Κάντε κλικ στον παρακάτω σύνδεσμο για να ορίσετε νέο κωδικό:"
-                    "</p>"
-                ),
-                cta_url=reset_url,
-                cta_text="Επαναφορά Κωδικού",
-                expiry_note="Ο σύνδεσμος λήγει σε 1 ώρα.",
-                security_note="Εάν δεν ζήτησες εσύ επαναφορά, αγνόησε αυτό το email. Ο κωδικός σου παραμένει αμετάβλητος.",
-                header_subtitle='🔐 Επαναφορά Κωδικού',
-                logo_url=logo_url,
-            )
+            subject = "🔐 Επαναφορά Κωδικού - ScanmyData Account"
+            
+            # HTML Email Template
+            html_body = f"""
+            <!DOCTYPE html>
+            <html lang="el">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Επαναφορά Κωδικού - ScanmyData</title>
+                <style>
+                    body {{ 
+                        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                        line-height: 1.6;
+                        color: #333;
+                        max-width: 600px;
+                        margin: 0 auto;
+                        padding: 20px;
+                        background-color: #f8f9fa;
+                    }}
+                    .container {{
+                        background: white;
+                        padding: 40px;
+                        border-radius: 12px;
+                        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+                    }}
+                    .header {{
+                        text-align: center;
+                        margin-bottom: 30px;
+                        border-bottom: 3px solid #f1f5f9;
+                        padding-bottom: 20px;
+                    }}
+                    .logo {{
+                        font-size: 28px;
+                        font-weight: bold;
+                        color: #0f172a;
+                        margin-bottom: 10px;
+                    }}
+                    .reset-btn {{
+                        display: inline-block;
+                        background-color: #ff6b6b;
+                        background-image: linear-gradient(135deg, #ff6b6b, #ee5a24);
+                        color: #ffffff !important;
+                        padding: 14px 28px;
+                        text-decoration: none !important;
+                        border-radius: 8px;
+                        font-weight: bold;
+                        text-align: center;
+                        margin: 20px 0;
+                        border: 2px solid #ee5a24;
+                    }}
+                    .warning-box {{
+                        background: #fff3cd;
+                        border: 1px solid #ffeaa7;
+                        padding: 15px;
+                        border-radius: 6px;
+                        margin: 20px 0;
+                    }}
+                    .info-box {{
+                        background: #e8f4fd;
+                        border-left: 4px solid #3498db;
+                        padding: 15px;
+                        margin: 20px 0;
+                        border-radius: 4px;
+                    }}
+                    .footer {{
+                        margin-top: 30px;
+                        padding-top: 20px;
+                        border-top: 1px solid #eee;
+                        text-align: center;
+                        color: #666;
+                        font-size: 14px;
+                    }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <div style="text-align: center; margin-bottom: 20px;">
+                            <img src="{logo_url}" alt="ScanmyData" style="height: 80px; width: auto;">
+                        </div>
+                        <h2 style="color: #f39c12; margin: 0; text-align: center;">Επαναφορά Κωδικού - ScanmyData</h2>
+                    </div>
+                    
+                    <p>
+                        Λάβαμε αίτημα για επαναφορά του κωδικού για τον λογαριασμό σου στο <strong>ScanmyData</strong>.
+                    </p>
+                    
+                    <div style="text-align: center; margin: 30px 0;">
+                        <a href="{reset_url}" class="reset-btn" style="background-color:#ff6b6b;color:#ffffff;text-decoration:none;display:inline-block;padding:14px 28px;border-radius:8px;">
+                            🔐 Επαναφορά Κωδικού
+                        </a>
+                    </div>
+                    
+                    <div class="info-box">
+                        <strong>📋 Διαδικασία Επαναφοράς:</strong><br>
+                        1. Κάνε κλικ στο κουμπί παραπάνω<br>
+                        2. Εισάγαγε νέο κωδικό (τουλάχιστον 6 χαρακτήρες)<br>
+                        3. Επιβεβαίωσε τον νέο κωδικό<br>
+                        4. Κάνε login με τα νέα στοιχεία
+                    </div>
+                    
+                    <div class="warning-box">
+                        <strong>⚠️ Σημαντικό:</strong><br>
+                        • Το link ισχύει για 1 ώρα από την αποστολή<br>
+                        • Αν δεν ζήτησες εσύ επαναφορά, αγνόησε αυτό το email<br>
+                        • Ο κωδικός σου δεν θα αλλάξει χωρίς την επιβεβαίωσή σου
+                    </div>
+                    
+                    <p style="color: #666; font-size: 14px;">
+                        <strong>Δεν μπορείς να κάνεις κλικ στο κουμπί;</strong><br>
+                        Αντίγραψε και επικόλλησε αυτό το link:<br>
+                        <a href="{reset_url}" style="color: #f39c12; word-break: break-all;">{reset_url}</a>
+                    </p>
+                    
+                    <div class="footer">
+                        <div style="text-align: center; margin-bottom: 15px;">
+                            <img src="{logo_url}" alt="ScanmyData" style="height: 50px; width: auto; opacity: 0.6;">
+                        </div>
+                        <p>
+                            <strong>ScanmyData Security Team</strong><br>
+                            Αποστολή: {datetime.now().strftime('%d/%m/%Y %H:%M')} ΕΕΤ
+                        </p>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            # Logo URL for password reset
+            logo_url = f"{base_url}/icons/scanmydata_logo_email.png"
             
             # Plain text version
             text_body = f"""

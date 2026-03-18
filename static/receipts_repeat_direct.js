@@ -360,12 +360,8 @@
     var input=$id('summaryJsonInput');
     if(form && input){
       input.value=JSON.stringify(s);
-      try {
-        if(typeof form.requestSubmit==='function') form.requestSubmit();
-        else form.dispatchEvent(new Event('submit', { cancelable:true, bubbles:true }));
-      } catch(_) {
-        try { form.dispatchEvent(new Event('submit', { cancelable:true, bubbles:true })); } catch(__) {}
-      }
+      if(typeof form.requestSubmit==='function') form.requestSubmit();
+      else form.dispatchEvent(new Event('submit', { bubbles:true, cancelable:true }));
       return true;
     }
     return false;
@@ -469,15 +465,17 @@
       if (window.showFlash) window.showFlash(successMsg, 'success', 4200);
       if (window.persistReceiptFlash) window.persistReceiptFlash(successMsg, 'success');
     }catch(_){ }
-    try {
+    try{
+      var urlInput = $id('scrapeUrlInput');
+      if (urlInput) urlInput.value = '';
+      var markInput = $id('markInput');
+      if (markInput) markInput.value = '';
+      var modal = $id('summaryModal');
+      if (modal) modal.style.display = 'none';
       if (typeof window.partiallyReloadInvoiceTable === 'function') {
-        var ok = await window.partiallyReloadInvoiceTable();
-        if (ok) return;
+        Promise.resolve(window.partiallyReloadInvoiceTable()).catch(function(){});
       }
-    } catch(_) {}
-    try {
-      if (window.showFlash) window.showFlash('Η αποθήκευση ολοκληρώθηκε, αλλά η μερική ανανέωση πίνακα απέτυχε.', 'warning', 3500);
-    } catch(_) {}
+    }catch(_){ }
   }
   var trying=false;
   async function tryDirect(){

@@ -139,19 +139,14 @@
     if (!form) return false;
     autoSaveInProgress = true;
     try {
-      // IMPORTANT: use requestSubmit/submit-event to keep SPA save interceptors active.
       if (typeof form.requestSubmit === 'function') {
         form.requestSubmit();
       } else {
-        const ev = new Event('submit', { cancelable: true, bubbles: true });
-        form.dispatchEvent(ev);
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
       }
-    } catch(_) {
-      resetAutoSaveState();
-      return false;
-    }
-    // Save can complete without full navigation (AJAX), so always keep a watchdog reset.
-    autoSaveWatchdog = setTimeout(resetAutoSaveState, 9000);
+    } catch(_) { autoSaveInProgress = false; return false; }
+    // release guard soon after submit pipeline starts
+    setTimeout(() => { autoSaveInProgress = false; }, 1200);
     return true;
   }
 

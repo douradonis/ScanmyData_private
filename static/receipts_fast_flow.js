@@ -308,19 +308,11 @@
       showFlash('✓ Αποθηκεύτηκε η απόδειξη', 'success', 2500);
       hideModal();
 
-      // Refresh list-inner table without full page reload.
-      try {
-        const reloadFn = window.partiallyReloadInvoiceTable;
-        if (typeof reloadFn === 'function') {
-          const ok = await reloadFn();
-          if (!ok) {
-            showFlash('Η εγγραφή αποθηκεύτηκε, αλλά δεν μπόρεσε να γίνει μερική ανανέωση του πίνακα.', 'warning', 3500);
-          }
-        } else {
-          showFlash('Η εγγραφή αποθηκεύτηκε. Απαιτείται χειροκίνητη ανανέωση πίνακα.', 'warning', 3500);
-        }
-      } catch(_) {
-        showFlash('Η εγγραφή αποθηκεύτηκε. Απαιτείται χειροκίνητη ανανέωση πίνακα.', 'warning', 3500);
+      // Refresh table fragment without full page reload.
+      if (typeof window.partiallyReloadInvoiceTable === 'function') {
+        setTimeout(() => {
+          try { window.partiallyReloadInvoiceTable(); } catch(_) {}
+        }, 120);
       }
 
       return true;
