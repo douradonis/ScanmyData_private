@@ -144,7 +144,7 @@
         <button id="forceEditBtn" type="button" class="bg-yellow-600 text-white px-3 py-2 rounded hover:bg-yellow-700">
             Επιβεβαίωση
         </button>
-        <button id="dismissBannerBtn" type="button" onclick="this.parentElement.parentElement.style.display='none'"
+        <button id="dismissBannerBtn" type="button"
                 class="px-3 py-2 border rounded hover:bg-gray-50">
             Άκυρο
         </button>
@@ -577,7 +577,7 @@ function setActiveProfileHint(name){
   if(!el || !sw) return;
   try { window.__LAST_REPEAT_PROFILE_NAME = name || ''; } catch(_) { window.__LAST_REPEAT_PROFILE_NAME = name || ''; }
 
-  if (sw.checked && receiptModeAllowsProfileHint()) {
+  if (sw.checked) {
     el.style.display = '';
     el.textContent = "Ενεργό προφίλ επαναληψιμης: " + (name || "Γενικό");
   } else {
@@ -2105,7 +2105,7 @@ try {
 })();
 // --- Reclass guard (yellow box -> ?force_edit=1) ---
 const URL_PARAMS = (function(){ try { return new URL(window.location.href).searchParams; } catch(_) { return new URLSearchParams(''); } })();
-const FORCE_EDIT = (function(){ try { return URL_PARAMS.get('force_edit') === '1'; } catch(_) { return false; } })();
+let FORCE_EDIT = (function(){ try { return URL_PARAMS.get('force_edit') === '1'; } catch(_) { return false; } })();
 const ALLOW_EDIT_EXISTING = {{ 'true' if allow_edit_existing else 'false' }};
 const CATEGORY_LABELS = (function(){
   try { return {{ (customer_category_labels or {}) | tojson | safe }} || {}; }
@@ -2186,9 +2186,14 @@ function rcReloadAfterWarning(){
       }
     });
     const target = current.pathname + (current.search ? `?${current.searchParams.toString()}` : '') + current.hash;
-    window.location.replace(target);
+    history.replaceState(null, '', target);
+    try { if (typeof clearReclassificationSearchState === 'function') clearReclassificationSearchState(); } catch(_) {}
+    try {
+      const banner = document.getElementById('existingBanner');
+      if (banner) banner.style.display = 'none';
+    } catch(_) {}
   } catch (_){
-    window.location.reload();
+    try { if (typeof clearReclassificationSearchState === 'function') clearReclassificationSearchState(); } catch(__) {}
   }
 }
 
@@ -4472,6 +4477,86 @@ function clearReceiptSearchCacheOnClose(){
 }
 window.clearReceiptSearchCacheOnClose = clearReceiptSearchCacheOnClose;
 
+function clearReclassificationSearchState(){
+  try {
+    try { clearReceiptSearchCacheOnClose(); } catch(_) {}
+
+    const idsToClear = ['markInput', 'scrapeUrlInput', 'scrapeUrlField', 'summaryJsonInput', 'summaryDataInput'];
+    idsToClear.forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.value = '';
+      try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch(_) {}
+      try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch(_) {}
+    });
+
+    const linesContainer = document.getElementById('summaryLinesContainer');
+    if (linesContainer) linesContainer.innerHTML = '';
+
+    const searchForm = document.getElementById('markSearchForm');
+    if (searchForm) delete searchForm.dataset.receiptsSubmitting;
+
+    try { window.__RC_pendingSummaryMarks = []; } catch(_) {}
+    try { window.__RC_ALLOW_MODAL_OPEN = false; } catch(_) {}
+    try { if (window.__RC_FLAGS) window.__RC_FLAGS.autoHandled = false; } catch(_) {}
+
+    try { removeForceEditParamFromUrl(); } catch(_) {}
+    try { restoreAllRowsAndUi(); } catch(_) {}
+  } catch(err) {
+    console.warn('clearReclassificationSearchState failed', err);
+  }
+}
+window.clearReclassificationSearchState = clearReclassificationSearchState;
+
+function syncServerWarningModalsFromResponse(parsedDoc){
+  try {
+    if (!parsedDoc) return false;
+    const seen = new Set();
+    const candidates = Array.from(parsedDoc.querySelectorAll('#afmWarningModal, [id$="WarningModal"], [data-modal-type="warning"], .warning-modal'));
+    let opened = false;
+
+    candidates.forEach(src => {
+      if (!src) return;
+      const txt = (src.textContent || '').trim();
+      if (!txt) return;
+
+      let modalId = (src.id || '').trim();
+      if (!modalId) {
+        modalId = 'serverWarningModal';
+      }
+      if (seen.has(modalId)) return;
+      seen.add(modalId);
+
+      let live = document.getElementById(modalId);
+      if (!live) {
+        live = src.cloneNode(true);
+        live.id = modalId;
+        document.body.appendChild(live);
+      } else {
+        live.innerHTML = src.innerHTML;
+      }
+
+      live.style.display = 'flex';
+      live.classList.remove('hidden');
+
+      const ackBtn = live.querySelector('#afmModalConfirm, [data-ack="1"], .js-warning-ack, button');
+      if (ackBtn) {
+        ackBtn.onclick = function(ev){
+          try { ev.preventDefault(); ev.stopPropagation(); } catch(_) {}
+          try { live.style.display = 'none'; } catch(_) {}
+          try { if (typeof window.__RC_handleWarningAck === 'function') window.__RC_handleWarningAck(); } catch(_) {}
+        };
+      }
+      opened = true;
+    });
+
+    return opened;
+  } catch(_) {
+    return false;
+  }
+}
+window.syncServerWarningModalsFromResponse = syncServerWarningModalsFromResponse;
+
 function clearSummaryModalUI(){
   try {
     const ids = [
@@ -6150,6 +6235,14 @@ try {
         return /^\d{15}$/.test(candidate) ? candidate : '500000000000000';
       })();
 
+      try {
+        const markInputEl = document.getElementById('markInput');
+        if (markInputEl) {
+          markInputEl.value = nextMark;
+          markInputEl.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      } catch(_) {}
+
       // Repeat receipts: πάρε authoritative receipt_mtype από server settings πελάτη.
       let serverReceiptMtype = '';
       try {
@@ -6425,6 +6518,185 @@ try {
   }
 });
 
+// Invoice MARK search via AJAX (no full-page reload):
+// - submit search form
+// - fetch server-rendered /search
+// - hydrate current modal/banner state from response
+document.getElementById('markSearchForm')?.addEventListener('submit', async function invoiceAjaxSearch(evt){
+  try {
+    if (useReceiptsSwitch && useReceiptsSwitch.checked) return; // handled by receipts flow above
+
+    const form = evt.currentTarget;
+    if (!form) return;
+    const markVal = String(document.getElementById('markInput')?.value || '').trim();
+    if (!markVal) return;
+
+    evt.preventDefault();
+    evt.stopPropagation();
+    if (typeof evt.stopImmediatePropagation === 'function') evt.stopImmediatePropagation();
+
+    try { showLoadingOverlay('Αναζήτηση', 'Παρακαλώ περιμένετε - ανάκτηση στοιχείων τιμολογίου...'); } catch(_) {}
+
+    const payload = new FormData(form);
+    const resp = await fetch(form.action || window.location.pathname, {
+      method: (form.method || 'POST').toUpperCase(),
+      credentials: 'same-origin',
+      body: payload,
+      headers: { 'X-Requested-With': 'XMLHttpRequest' }
+    });
+
+    if (!resp.ok) {
+      throw new Error('HTTP ' + resp.status);
+    }
+
+    const html = await resp.text();
+    const parsed = new DOMParser().parseFromString(html, 'text/html');
+    try { hideLoadingOverlay(); } catch(_) {}
+
+    try {
+      const warningShown = (typeof window.syncServerWarningModalsFromResponse === 'function')
+        ? window.syncServerWarningModalsFromResponse(parsed)
+        : false;
+      if (warningShown) return;
+    } catch(_) {}
+
+    // Sync returned MARK field
+    try {
+      const returnedMark = parsed.getElementById('markInput')?.value || markVal;
+      const liveMark = document.getElementById('markInput');
+      if (liveMark) {
+        liveMark.value = returnedMark;
+        liveMark.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    } catch(_) {}
+
+    // Sync yellow existing-MARK banner state (for reclassification guard)
+    let hasExistingBannerInResponse = false;
+    try {
+      const existingLive = document.getElementById('existingBanner');
+      const existingNew = parsed.getElementById('existingBanner');
+      const strongMark = existingNew ? existingNew.querySelector('strong') : null;
+      const newMarkText = (strongMark && strongMark.textContent) ? strongMark.textContent.trim() : '';
+      hasExistingBannerInResponse = !!existingNew;
+
+      const bindExistingBannerActions = (rootEl) => {
+        if (!rootEl) return;
+        const forceBtn = rootEl.querySelector('#forceEditBtn');
+        const dismissBtn = rootEl.querySelector('#dismissBannerBtn');
+        if (dismissBtn) dismissBtn.onclick = function(){
+          rootEl.style.display = 'none';
+          try { clearReclassificationSearchState(); } catch(_) {}
+        };
+        if (forceBtn) forceBtn.onclick = function(){
+          const mv = encodeURIComponent(String(document.getElementById('markInput')?.value || '').trim());
+          if (!mv) return;
+          rootEl.style.display = 'none';
+          if (!activateReclassificationWithoutReload(decodeURIComponent(mv))) {
+            window.location = SEARCH_BASE_URL + '?mark=' + mv + '&force_edit=1';
+          }
+        };
+      };
+
+      if (existingLive && existingNew) {
+        existingLive.innerHTML = existingNew.innerHTML;
+        const liveStrong = existingLive.querySelector('strong');
+        if (liveStrong && newMarkText) liveStrong.textContent = newMarkText;
+        existingLive.style.display = 'block';
+        bindExistingBannerActions(existingLive);
+      } else if (existingLive && !existingNew) {
+        existingLive.style.display = 'none';
+      } else if (!existingLive && existingNew) {
+        const form = document.getElementById('markSearchForm');
+        if (form && form.parentNode) {
+          const cloned = existingNew.cloneNode(true);
+          form.parentNode.insertBefore(cloned, form.nextSibling);
+          cloned.style.display = 'block';
+          bindExistingBannerActions(cloned);
+        }
+      }
+    } catch(_) {}
+
+    // If server says this MARK already exists, preserve the old yellow-box confirmation flow
+    // and do NOT auto-open summary modal in this phase.
+    if (hasExistingBannerInResponse) {
+      return;
+    }
+
+
+    // Hydrate modal summary from server response and open summary modal without reloading page
+    const newSummaryInput = parsed.getElementById('summaryJsonInput');
+    const newSummaryRaw = (newSummaryInput && typeof newSummaryInput.value === 'string') ? newSummaryInput.value : '{}';
+    let parsedSummary = null;
+    try { parsedSummary = JSON.parse(newSummaryRaw || '{}'); } catch(_) { parsedSummary = null; }
+
+    const hasSummary = !!(parsedSummary && typeof parsedSummary === 'object' && Object.keys(parsedSummary).length);
+    if (hasSummary) {
+      try {
+        const liveSummaryInput = document.getElementById('summaryJsonInput');
+        if (liveSummaryInput) liveSummaryInput.value = JSON.stringify(parsedSummary);
+        window.__RC_SERVER_MODAL_SUMMARY = parsedSummary;
+
+        // Prefer server-rendered modal body from response so invoice category dropdowns/buttons
+        // stay identical to current non-AJAX behavior.
+        const idsToCopyText = [
+          'summaryModalMark','summary_AA','summary_AFM','summary_Name','summary_issueDate',
+          'summary_type_name','summary_paymentMethodLabel','summary_totalNetValue','summary_totalVatAmount','summary_totalValue'
+        ];
+        idsToCopyText.forEach(id => {
+          const src = parsed.getElementById(id);
+          const dst = document.getElementById(id);
+          if (src && dst) dst.textContent = src.textContent || '';
+        });
+
+        const srcDataInput = parsed.getElementById('summaryDataInput');
+        const dstDataInput = document.getElementById('summaryDataInput');
+        if (srcDataInput && dstDataInput) dstDataInput.value = srcDataInput.value || dstDataInput.value || '{}';
+
+        // Force the same renderer used in regular invoice flow so VAT category +
+        // expense-category controls are always shown (multi-line dropdowns / single-line buttons).
+        if (typeof window.renderSummaryLinesFromObject === 'function') {
+          try { window.renderSummaryLinesFromObject(parsedSummary); } catch(_) {}
+        } else {
+          if (typeof window.prefillSummaryModal === 'function') window.prefillSummaryModal();
+          if (window.RC_forcePopulateSummaryModal) {
+            try { window.RC_forcePopulateSummaryModal(); } catch(_) {}
+          }
+        }
+        if (typeof window.ensureCategoryButtonsBound === 'function') {
+          try { window.ensureCategoryButtonsBound(); } catch(_) {}
+        }
+
+        const modal = document.getElementById('summaryModal');
+        if (modal) modal.style.display = 'flex';
+
+        // Repeat-entry invoices: auto-apply saved mapping/profile and submit, same as classic flow.
+        try {
+          const repeatOn = !!document.getElementById('repeatEntrySwitch')?.checked;
+          const receiptsOn = !!document.getElementById('useReceiptsSwitch')?.checked;
+          if (repeatOn && !receiptsOn && typeof applyMappingToSummaryAndSubmitUsingMapping === 'function') {
+            let mapping = {};
+            try {
+              mapping = (window.__RC_REPEAT_ENTRY_LAST && window.__RC_REPEAT_ENTRY_LAST.mapping) ? window.__RC_REPEAT_ENTRY_LAST.mapping : {};
+              if (!mapping || !Object.keys(mapping).length) {
+                const rep = (typeof apiGetRepeatEntry === 'function') ? await apiGetRepeatEntry(VAT) : null;
+                mapping = rep && rep.repeat_entry && rep.repeat_entry.mapping ? rep.repeat_entry.mapping : {};
+              }
+            } catch(_) { mapping = {}; }
+            if (mapping && Object.keys(mapping).length) {
+              const did = await applyMappingToSummaryAndSubmitUsingMapping(mapping);
+              if (did && modal) modal.style.display = 'none';
+            }
+          }
+        } catch(_) {}
+      } catch(_) {}
+    }
+  } catch(err) {
+    try { hideLoadingOverlay(); } catch(_) {}
+    console.warn('invoiceAjaxSearch failed; prevented full submit fallback', err);
+    try { if (typeof showFlash === 'function') showFlash('Σφάλμα αναζήτησης. Παρακαλώ δοκίμασε ξανά.', 'error', 3200); } catch(_) {}
+  }
+}, true);
+
 
   // Intercept "Αποθήκευση στο Cache" to perform AJAX save for scraped receipts
   // intercept saveSummaryForm submit when scrapeUrlField is present
@@ -6446,6 +6718,31 @@ async function partiallyReloadInvoiceTable() {
   };
 
   try {
+    // Prefer full list fragment extraction (keeps controls + scripts structure)
+    const listUrl = window.location.pathname.indexOf('/list') === 0 ? window.location.href : '/list';
+    const pageRes = await fetch(listUrl, { method: 'GET', credentials: 'same-origin' });
+    if (pageRes.ok) {
+      const html = await pageRes.text();
+      const parsed = new DOMParser().parseFromString(html, 'text/html');
+      const next = parsed.getElementById('summary-container');
+      const live = document.getElementById('summary-container');
+      if (next && live) {
+        live.innerHTML = next.innerHTML;
+        setTimeout(() => {
+          try {
+            if (typeof window.FBP_INIT_TABULATOR === 'function') {
+              window.FBP_INIT_TABULATOR();
+            } else if (typeof window.FBP_INIT_TABLE === 'function') {
+              window.FBP_INIT_TABLE();
+              initializeSelectAllCheckbox();
+            }
+          } catch(e) { console.warn('Table reinitialization failed:', e); }
+        }, 50);
+        return true;
+      }
+    }
+
+    // Fallback to old fragment endpoint
     const tableRes = await fetch('/list/fragment', { method: 'GET', credentials: 'same-origin' });
     if (tableRes.ok) {
       const data = await tableRes.json();
@@ -6482,6 +6779,7 @@ async function partiallyReloadInvoiceTable() {
 
   return false;
 }
+window.partiallyReloadInvoiceTable = partiallyReloadInvoiceTable;
 
 // ===== Helper to initialize selectAll checkbox with correct logic (only visible rows) =====
 function initializeSelectAllCheckbox() {
@@ -8898,6 +9196,50 @@ document.addEventListener('submit', function(ev){
     console.warn('delete_invoices frontend patch failed', err);
   }
 }, true);
+
+// Keep list-inner deletes on partial refresh instead of full-page redirects.
+document.addEventListener('submit', async function deleteInvoicesAjaxSubmit(ev){
+  try {
+    const form = ev.target;
+    if (!form || !form.action) return;
+    const a = document.createElement('a');
+    a.href = form.action;
+    const path = (a.pathname || '') + (a.search || '');
+    if (!/delete_invoices/.test(path)) return;
+
+    ev.preventDefault();
+
+    const fd = new FormData(form);
+    const selected = Array.from(document.querySelectorAll('input[name="delete_mark"]:checked')).map(i => (i.value || '').trim()).filter(Boolean);
+    if (selected.length) {
+      fd.delete('delete_mark');
+      selected.forEach(m => fd.append('delete_mark', m));
+    }
+
+    const resp = await fetch(form.action, {
+      method: (form.method || 'POST').toUpperCase(),
+      body: fd,
+      credentials: 'same-origin',
+      headers: { 'X-Requested-With': 'XMLHttpRequest' }
+    });
+
+    if (!resp.ok) {
+      const txt = await resp.text().catch(()=>'');
+      throw new Error('HTTP ' + resp.status + (txt ? (': ' + txt.slice(0, 140)) : ''));
+    }
+
+    let reloaded = false;
+    try { reloaded = await partiallyReloadInvoiceTable(); } catch(_) {}
+    if (reloaded) {
+      try { showFlash('Οι επιλεγμένες γραμμές διαγράφηκαν.', 'success', 2200); } catch(_) {}
+    } else {
+      try { showFlash('Η διαγραφή ολοκληρώθηκε, αλλά η μερική ανανέωση πίνακα απέτυχε.', 'warning', 3500); } catch(_) {}
+    }
+  } catch(err) {
+    console.warn('deleteInvoicesAjaxSubmit failed', err);
+    try { showFlash('Σφάλμα διαγραφής: ' + (err.message || err), 'error', 4500); } catch(_) {}
+  }
+}, true);
 (function receiptsRepeatModalGuard(){
   const once = { submitted:false };
 
@@ -8952,7 +9294,7 @@ document.addEventListener('submit', function(ev){
     return true;
   }
 
-  function autoSubmitReceipt(obj){
+  async function autoSubmitReceipt(obj){
     const receiptsOn = !!(qs('useReceiptsSwitch') && qs('useReceiptsSwitch').checked);
     const repeatOn = !!(qs('repeatEntrySwitch') && qs('repeatEntrySwitch').checked);
     const mixedMode = !isReceiptAnalysisOn();
@@ -8984,8 +9326,6 @@ document.addEventListener('submit', function(ev){
       qs('summaryJsonInput').value = JSON.stringify(obj);
     }catch(_){}
 
-    const form = qs('saveSummaryForm');
-    if (!form) return;
     once.submitted = true;
     sessionStorage.setItem(key,'1');                 // ώστε στο επόμενο reload να ΜΗΝ ξαναστείλει
     // Ensure repeat_enabled is posted
@@ -9828,6 +10168,13 @@ document.addEventListener('submit', function(ev){
       const opt = ev.target && ev.target.closest ? ev.target.closest('[data-receipt-mode]') : null;
       if (!opt) return;
       const mode = opt.getAttribute('data-receipt-mode') || 'mixed';
+      if (mode === 'analysis' && !hasReceiptCustomCategories) {
+        try {
+          showFlash('Η ανάλυση αποδείξεων ενεργοποιείται από Credentials → Επεξεργασία πελάτη → Custom κατηγορίες (επιλογή: Αποδείξεις).', 'warning', 6000);
+        } catch(_) {}
+        receiptsModeMenu.classList.add('hidden');
+        return;
+      }
       applyReceiptMode(mode, true);
       receiptsModeMenu.classList.add('hidden');
     });
@@ -10521,6 +10868,13 @@ RC.confirmReceiptOnce = async function(summaryObj, scrapeUrl){
       body: JSON.stringify(payload)
     });
     const jj = await res.json().catch(()=>null);
+    if (jj && (jj.duplicate === true || jj.allow_edit_existing === true || jj.reclassification_required === true)) {
+      return {
+        ok: false,
+        reason: 'reclassification_required',
+        mark: String((jj.mark || summaryObj.mark || summaryObj.MARK || '')).trim()
+      };
+    }
     if (!res.ok || !jj || !jj.ok) return { ok:false, reason: (jj&&jj.error) || ('HTTP '+res.status) };
 
     return { ok:true };
@@ -10548,6 +10902,40 @@ RC.handleReceiptAfterScrape = async function(summaryObj, scrapeUrl){
     if (!r.ok) {
       if (r.reason === 'missing_afm') {
         window.openReceiptWarning && openReceiptWarning('Λείπει AFM ενεργού πελάτη.');
+      } else if (r.reason === 'reclassification_required') {
+        try {
+          const markVal = String(r.mark || summaryObj.mark || summaryObj.MARK || document.getElementById('markInput')?.value || '').trim();
+          let banner = document.getElementById('existingBanner');
+          if (!banner) {
+            const form = document.getElementById('markSearchForm');
+            const host = (form && form.parentNode) ? form.parentNode : document.body;
+            banner = document.createElement('div');
+            banner.id = 'existingBanner';
+            banner.className = 'mt-4 p-4 bg-yellow-50 rounded border border-yellow-300 text-yellow-800';
+            banner.innerHTML = 'Το MARK <strong></strong> υπάρχει ήδη στο Excel. Θέλεις να τροποποιήσεις τον χαρακτηρισμό;'
+              + '<div class="mt-2 flex gap-2">'
+              + '<button id="forceEditBtn" type="button" class="bg-yellow-600 text-white px-3 py-2 rounded hover:bg-yellow-700">Επιβεβαίωση</button>'
+              + '<button id="dismissBannerBtn" type="button" class="px-3 py-2 border rounded hover:bg-gray-50">Άκυρο</button>'
+              + '</div>';
+            if (form && form.parentNode) host.insertBefore(banner, form.nextSibling);
+            else host.prepend(banner);
+          }
+          const strong = banner.querySelector('strong');
+          if (strong) strong.textContent = markVal || '?';
+          const dismissBtn = banner.querySelector('#dismissBannerBtn');
+          if (dismissBtn) dismissBtn.onclick = function(){ banner.style.display = 'none'; };
+          const forceBtn = banner.querySelector('#forceEditBtn');
+          if (forceBtn) forceBtn.onclick = function(){
+            const mv = encodeURIComponent(String(markVal || document.getElementById('markInput')?.value || '').trim());
+            if (!mv) return;
+            const base = window.SEARCH_BASE_URL || '/search';
+            if (!activateReclassificationWithoutReload(decodeURIComponent(mv))) {
+              window.location = base + '?mark=' + mv + '&force_edit=1';
+            }
+          };
+          banner.style.display = 'block';
+        } catch(_) {}
+        showFlash('Το MARK υπάρχει ήδη στο Excel.', 'warning', 6000);
       } else {
         const errMsg = 'Σφάλμα αποθήκευσης: ' + (r.reason || 'άγνωστο');
         showFlash(errMsg, 'error', 6000);
@@ -10605,36 +10993,19 @@ document.addEventListener('DOMContentLoaded', () => {
   };
   hideModal();
 
-  // 2) Βεβαιώσου ότι στο submit περνάει repeat_enabled=1
-  const ensureRepeatHidden = (form) => {
-    if (!form) return;
-    let h = form.querySelector('input[name="repeat_enabled"]');
-    if (!h) {
-      h = document.createElement('input');
-      h.type = 'hidden';
-      h.name = 'repeat_enabled';
-      form.appendChild(h);
-    }
-    h.value = '1';
-  };
-
-  // 3) Αυτόματο submit μόλις είναι έτοιμη η φόρμα/δεδομένα
+  // 2) Αυτόματη επιβεβαίωση μέσω AJAX (χωρίς form.submit / full reload)
   let submitted = false;
   const tryAutoSubmit = () => {
     if (submitted) return;
 
-    // Βρες τη φόρμα αποθήκευσης
-    const form = document.querySelector('form[action$="/save_summary"]');
-    if (!form) return;
+    const summaryEl = document.getElementById('summaryJsonInput');
+    const scrapeUrl = (document.getElementById('scrapeUrlInput')?.value || document.getElementById('scrapeUrlField')?.value || '').trim();
+    if (!summaryEl || !String(summaryEl.value || '').trim()) return;
 
-    // Έλεγξε ότι υπάρχει payload: summary_json (input/textarea) ή τουλάχιστον το mark
-    const payloadEl = form.querySelector('input[name="summary_json"],textarea[name="summary_json"]');
-    const hasPayload = payloadEl ? String(payloadEl.value || '').trim().length > 0 : false;
-    const hasMark = String((form.querySelector('[name="mark"]') || {}).value || '').trim().length === 15;
+    let summaryObj = null;
+    try { summaryObj = JSON.parse(summaryEl.value || '{}'); } catch(_) { summaryObj = null; }
+    if (!summaryObj || typeof summaryObj !== 'object') return;
 
-    if (!hasPayload && !hasMark) return;
-
-    ensureRepeatHidden(form);
     submitted = true;
     hideModal();
     if (typeof form.requestSubmit === 'function') form.requestSubmit();
@@ -11418,14 +11789,7 @@ document.addEventListener('click', function(e){
 
   const afmOk = document.getElementById('afmModalConfirm');
   if (afmOk) {
-    afmOk.addEventListener('click', function(){
-      try { document.getElementById('afmWarningModal').style.display = 'none'; } catch(_){}
-      const target = resetSearchAndReload();
-      setTimeout(() => {
-        if (target){ window.location.replace(target); }
-        else { window.location.reload(); }
-      }, 40);
-    });
+    // handled centrally via __RC_handleWarningAck + capture-phase listener
   }
 })();
 </script>
@@ -11510,7 +11874,7 @@ document.addEventListener('click', function(e){
   function doReload() {
     // καθάρισε flags ώστε να μην ξανανοίξει modal
     clearUrlFlags();
-    window.location.reload();
+    try { if (typeof clearReclassificationSearchState === 'function') clearReclassificationSearchState(); } catch(_) {}
   }
 
   // ---- 3) Bootstrap-aware reload: αφού κλείσει το modal ----
@@ -11573,6 +11937,156 @@ document.addEventListener('click', function(e){
 
 <!-- === Fast Flow (seamless AJAX mode - auto-enabled with repeat mode) === -->
 <script src="{{ url_for('static', filename='receipts_fast_flow.js') }}"></script>
+
+<script>
+// Final hard guard: keep saveSummaryForm SPA-like (no full page reload).
+;(function(){
+  if (window.__FINAL_SAVE_SUMMARY_AJAX_GUARD__) return;
+  window.__FINAL_SAVE_SUMMARY_AJAX_GUARD__ = true;
+
+  function byId(id){ return document.getElementById(id); }
+
+  try {
+    if (!window.__SCANMYDATA_PROTO_SUBMIT_PATCHED__) {
+      window.__SCANMYDATA_PROTO_SUBMIT_PATCHED__ = true;
+      const nativeSubmit = HTMLFormElement.prototype.submit;
+      HTMLFormElement.prototype.submit = function patchedFormSubmit(){
+        try {
+          if (this && this.id === 'saveSummaryForm') {
+            if (typeof this.requestSubmit === 'function') {
+              this.requestSubmit();
+              return;
+            }
+            const ev = new Event('submit', { cancelable: true, bubbles: true });
+            const allowed = this.dispatchEvent(ev);
+            if (!allowed) return;
+          }
+        } catch(_) {}
+        return nativeSubmit.call(this);
+      };
+    }
+  } catch(_) {}
+
+  function ensureExistingBanner(mark){
+    let banner = byId('existingBanner');
+    if (!banner) {
+      const form = byId('markSearchForm');
+      const host = (form && form.parentNode) ? form.parentNode : document.body;
+      banner = document.createElement('div');
+      banner.id = 'existingBanner';
+      banner.className = 'mt-4 p-4 bg-yellow-50 rounded border border-yellow-300 text-yellow-800';
+      banner.innerHTML = 'Το MARK <strong></strong> υπάρχει ήδη στο Excel. Θέλεις να τροποποιήσεις τον χαρακτηρισμό;'
+        + '<div class="mt-2 flex gap-2">'
+        + '<button id="forceEditBtn" type="button" class="bg-yellow-600 text-white px-3 py-2 rounded hover:bg-yellow-700">Επιβεβαίωση</button>'
+        + '<button id="dismissBannerBtn" type="button" class="px-3 py-2 border rounded hover:bg-gray-50">Άκυρο</button>'
+        + '</div>';
+      if (form && form.parentNode) host.insertBefore(banner, form.nextSibling);
+      else host.prepend(banner);
+    }
+    const strong = banner.querySelector('strong');
+    if (strong) strong.textContent = String(mark || '').trim() || '?';
+    const dismiss = banner.querySelector('#dismissBannerBtn');
+    if (dismiss) dismiss.onclick = function(){
+      banner.style.display = 'none';
+      try { if (typeof window.clearReclassificationSearchState === 'function') window.clearReclassificationSearchState(); } catch(_) {}
+      try { window.dispatchEvent(new CustomEvent('scanmydata:reclassification-cancelled')); } catch(_) {}
+    };
+    const force = banner.querySelector('#forceEditBtn');
+    if (force) force.onclick = function(){
+      const mv = encodeURIComponent(String(mark || byId('markInput')?.value || '').trim());
+      if (!mv) return;
+      const base = window.SEARCH_BASE_URL || '/search';
+      if (!activateReclassificationWithoutReload(decodeURIComponent(mv))) {
+        window.location = base + '?mark=' + mv + '&force_edit=1';
+      }
+    };
+    banner.style.display = 'block';
+    return banner;
+  }
+
+  async function handleSaveSummaryAjax(form){
+    const fd = new FormData(form);
+    const res = await fetch(form.action || '/save_summary', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'X-Requested-With': 'XMLHttpRequest' },
+      body: fd
+    });
+
+    const ct = (res.headers.get('content-type') || '').toLowerCase();
+    if (res.redirected || res.status === 302 || (res.url && res.url.indexOf('allow_edit_existing') !== -1)) {
+      const rawMark = byId('summaryJsonInput')?.value || '{}';
+      let mark = '';
+      try { mark = JSON.parse(rawMark).mark || JSON.parse(rawMark).MARK || ''; } catch(_) {}
+      ensureExistingBanner(mark || byId('markInput')?.value || '');
+      if (typeof showFlash === 'function') showFlash('Το MARK υπάρχει ήδη στο Excel.', 'warning', 4200);
+      return;
+    }
+
+    if (ct.includes('text/html')) {
+      const html = await res.text().catch(()=>'');
+      if (html) {
+        let parsed = null;
+        try { parsed = new DOMParser().parseFromString(html, 'text/html'); } catch(_) {}
+        if (html.indexOf('id="existingBanner"') !== -1) {
+          let mark = '';
+          try { mark = (parsed && parsed.querySelector('#existingBanner strong')?.textContent || '').trim(); } catch(_) {}
+          ensureExistingBanner(mark || byId('markInput')?.value || '');
+          if (typeof showFlash === 'function') showFlash('Το MARK υπάρχει ήδη στο Excel.', 'warning', 4200);
+          return;
+        }
+        try {
+          const warningShown = (parsed && typeof window.syncServerWarningModalsFromResponse === 'function')
+            ? window.syncServerWarningModalsFromResponse(parsed)
+            : false;
+          if (warningShown) {
+            if (typeof showFlash === 'function') showFlash('Προειδοποίηση από τον server. Ελέγξτε το μήνυμα.', 'warning', 4200);
+            return;
+          }
+        } catch(_) {}
+      }
+    }
+
+    if (!res.ok) {
+      const txt = await res.text().catch(()=>'');
+      throw new Error('HTTP ' + res.status + (txt ? (': ' + txt.slice(0,120)) : ''));
+    }
+
+    try { if (typeof hideSummaryModal === 'function') hideSummaryModal(); } catch(_) {}
+    try { const s = byId('summaryJsonInput'); if (s) s.value = '{}'; } catch(_) {}
+    let ok = false;
+    try { if (typeof partiallyReloadInvoiceTable === 'function') ok = await partiallyReloadInvoiceTable(); } catch(_) {}
+    if (typeof showFlash === 'function') {
+      if (ok) showFlash('Αποθηκεύτηκε με επιτυχία.', 'success', 2200);
+      else showFlash('Αποθηκεύτηκε, αλλά η μερική ανανέωση απέτυχε.', 'warning', 3200);
+    }
+    try { window.dispatchEvent(new CustomEvent('scanmydata:save-summary-finished', { detail: { ok: true } })); } catch(_) {}
+  }
+
+  document.addEventListener('submit', async function(ev){
+    const form = ev.target;
+    if (!form || form.id !== 'saveSummaryForm') return;
+
+    // Always block native submit to avoid accidental full page reloads.
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (typeof ev.stopImmediatePropagation === 'function') ev.stopImmediatePropagation();
+
+    if (window.__FINAL_SAVE_SUMMARY_AJAX_IN_FLIGHT__) return;
+
+    window.__FINAL_SAVE_SUMMARY_AJAX_IN_FLIGHT__ = true;
+    try {
+      try { if (typeof updateSummaryFromDom === 'function') updateSummaryFromDom(); } catch(_) {}
+      await handleSaveSummaryAjax(form);
+    } catch(err) {
+      try { if (typeof showFlash === 'function') showFlash('Σφάλμα αποθήκευσης: ' + (err.message || err), 'error', 5000); } catch(_) {}
+      try { window.dispatchEvent(new CustomEvent('scanmydata:save-summary-finished', { detail: { ok: false, error: String(err && (err.message || err) || '') } })); } catch(_) {}
+    } finally {
+      window.__FINAL_SAVE_SUMMARY_AJAX_IN_FLIGHT__ = false;
+    }
+  }, true);
+})();
+</script>
 
 <script>
 // Final safety merge: ensure component `summaryDataInput` MTYPEs are copied

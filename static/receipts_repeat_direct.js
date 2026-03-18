@@ -204,6 +204,11 @@
 
   function hasBlockingWarnings(){
     try{
+      var banner = document.getElementById('existingBanner');
+      if (banner) {
+        var cs = getComputedStyle(banner);
+        if (cs.display !== 'none' && cs.visibility !== 'hidden' && cs.opacity !== '0') return true;
+      }
       if(window.RC && typeof window.RC.hasWarnings === 'function'){
         return !!window.RC.hasWarnings();
       }
@@ -368,7 +373,16 @@
         headers:{'content-type':'application/x-www-form-urlencoded'},
         body:'summary_json='+encodeURIComponent(JSON.stringify(s)),
         credentials:'same-origin'
-      }).then(function(r){ if(!r.ok) throw new Error('save failed'); return r.text(); });
+      }).then(function(r){
+        if(!r.ok) throw new Error('save failed');
+        return r.text().then(function(txt){
+          var body = String(txt || '');
+          if (r.redirected || (r.url && r.url.indexOf('allow_edit_existing') !== -1) || body.indexOf('id="existingBanner"') !== -1) {
+            throw new Error('reclassification_required');
+          }
+          return body;
+        });
+      });
     }catch(e){ return Promise.reject(e); }
   }
   function submitViaConfirmApi(s){
@@ -395,6 +409,9 @@
       }).then(function(r){
         return r.json().catch(function(){ return null; }).then(function(j){ return { r: r, j: j }; });
       }).then(function(out){
+        if (out && out.j && (out.j.duplicate === true || out.j.allow_edit_existing === true)) {
+          throw new Error('reclassification_required');
+        }
         if(!out.r.ok || !out.j || !out.j.ok){
           throw new Error((out.j && out.j.error) ? out.j.error : ('save failed (' + out.r.status + ')'));
         }
@@ -402,7 +419,45 @@
       });
     }catch(e){ return Promise.reject(e); }
   }
-  function afterSubmit(mark, dedupeKey){
+
+  function showReclassificationBanner(mark){
+    var banner = document.getElementById('existingBanner');
+    if (!banner) {
+      var form = document.getElementById('markSearchForm');
+      var host = (form && form.parentNode) ? form.parentNode : document.body;
+      banner = document.createElement('div');
+      banner.id = 'existingBanner';
+      banner.className = 'mt-4 p-4 bg-yellow-50 rounded border border-yellow-300 text-yellow-800';
+      banner.innerHTML = 'Το MARK <strong></strong> υπάρχει ήδη στο Excel. Θέλεις να τροποποιήσεις τον χαρακτηρισμό;'
+        + '<div class="mt-2 flex gap-2">'
+        + '<button id="forceEditBtn" type="button" class="bg-yellow-600 text-white px-3 py-2 rounded hover:bg-yellow-700">Επιβεβαίωση</button>'
+        + '<button id="dismissBannerBtn" type="button" class="px-3 py-2 border rounded hover:bg-gray-50">Άκυρο</button>'
+        + '</div>';
+      if (form && form.parentNode) host.insertBefore(banner, form.nextSibling);
+      else host.prepend(banner);
+    }
+
+    var strong = banner.querySelector('strong');
+    if (strong) strong.textContent = String(mark || '').trim() || '?';
+
+    var dismissBtn = banner.querySelector('#dismissBannerBtn');
+    if (dismissBtn) dismissBtn.onclick = function(){ banner.style.display = 'none'; };
+
+    var forceBtn = banner.querySelector('#forceEditBtn');
+    if (forceBtn) forceBtn.onclick = function(){
+      var base = (window.SEARCH_BASE_URL || '/search');
+      var mv = encodeURIComponent(String(mark || document.getElementById('markInput')?.value || '').trim());
+      if (!mv) return;
+      window.location = base + '?mark=' + mv + '&force_edit=1';
+    };
+
+    banner.style.display = 'block';
+    try {
+      var modal = document.getElementById('summaryModal');
+      if (modal) modal.style.display = 'none';
+    } catch(_) {}
+  }
+  async function afterSubmit(mark, dedupeKey){
     lsSet('UI:useReceipts','1');
     if (dedupeKey) ssDel(dedupeKey);
     try{
@@ -427,6 +482,10 @@
     if(trying) return;
     if(!isReceipts()||!isRepeat()) return;
     if(!isMixedMode()) return;
+    try {
+      var q = new URLSearchParams(window.location.search || '');
+      if (q.get('allow_edit_existing') === '1' && q.get('force_edit') !== '1') return;
+    } catch(_) {}
     if(hasBlockingWarnings()) return;
 
     var s=parseSummary();
@@ -506,9 +565,17 @@
 
     try {
       await submitViaConfirmApi(s);
-      afterSubmit(mark, k);
+      await afterSubmit(mark, k);
       return;
     } catch(err){
+      var errMsg = String((err && err.message) || '').toLowerCase();
+      if (errMsg.indexOf('reclassification_required') !== -1 || errMsg.indexOf('already') !== -1 || errMsg.indexOf('υπάρ') !== -1 || errMsg.indexOf('exist') !== -1) {
+        trying = false;
+        ssDel(k);
+        showReclassificationBanner(mark);
+        try { if (window.showFlash) window.showFlash('Το MARK ' + mark + ' υπάρχει ήδη στο Excel.', 'warning', 4500); } catch(_) {}
+        return;
+      }
       if(submitViaForm(s)){
         setTimeout(function(){
           trying=false;
@@ -518,7 +585,7 @@
       }
       try {
         await submitViaFetch(s);
-        afterSubmit(mark, k);
+        await afterSubmit(mark, k);
         return;
       } catch(err2){
         trying=false;

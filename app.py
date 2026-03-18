@@ -4792,6 +4792,93 @@ def save_epsilon_cache_for_vat(vat: str, data: List[Dict]):
     except Exception:
         log.exception("Could not write epsilon cache for %s", vat)
 
+
+def _pfloat_any(v) -> float:
+    try:
+        if v is None:
+            return 0.0
+        if isinstance(v, (int, float)):
+            return float(v)
+        s = str(v).strip()
+        if not s:
+            return 0.0
+        s = s.replace(' ', '')
+        if ',' in s and '.' in s:
+            s = s.replace('.', '').replace(',', '.')
+        else:
+            s = s.replace(',', '.')
+        return float(s)
+    except Exception:
+        return 0.0
+
+
+def _build_table_rows_from_epsilon(vat: str) -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    eps = load_epsilon_cache_for_vat(str(vat or '')) or []
+    for rec in eps:
+        if not isinstance(rec, dict):
+            continue
+        lines = rec.get('lines') if isinstance(rec.get('lines'), list) else []
+        net = _pfloat_any(rec.get('totalNetValue') or rec.get('net') or rec.get('total_net'))
+        vat_val = _pfloat_any(rec.get('totalVatAmount') or rec.get('vat') or rec.get('total_vat'))
+        total = _pfloat_any(rec.get('totalValue') or rec.get('total') or rec.get('total_amount'))
+        if (net == 0.0 and vat_val == 0.0) and lines:
+            for ln in lines:
+                if not isinstance(ln, dict):
+                    continue
+                net += _pfloat_any(ln.get('amount') or ln.get('lineTotal') or ln.get('total'))
+                vat_val += _pfloat_any(ln.get('vat') or ln.get('vatRate') or ln.get('vatAmount'))
+            if total == 0.0:
+                total = net + vat_val
+        if total == 0.0 and (net or vat_val):
+            total = net + vat_val
+
+        mark = str(rec.get('mark') or rec.get('MARK') or '').strip()
+        issue_type = str(rec.get('type_name') or rec.get('type') or '').strip()
+        is_receipt = bool(rec.get('is_receipt')) or ('αποδ' in issue_type.lower()) or ('receipt' in issue_type.lower())
+        tipo_excel = 'ΑΠΟΔΕΙΞΗ' if is_receipt else (issue_type or 'ΤΙΜΟΛΟΓΙΟ')
+
+        row = {
+            'MARK': mark,
+            'ΑΦΜ': str(rec.get('AFM_issuer') or rec.get('AFM') or vat or '').strip(),
+            'Επωνυμία': str(rec.get('Name_issuer') or rec.get('Name') or '').strip(),
+            'Σειρά': str(rec.get('series') or '').strip(),
+            'Αριθμός': str(rec.get('number') or rec.get('AA') or rec.get('aa') or rec.get('progressive_aa') or '').strip(),
+            'Ημερομηνία': str(rec.get('issueDate') or rec.get('issue_date') or '').strip(),
+            'Είδος': tipo_excel,
+            'ΦΠΑ_ΚΑΤΗΓΟΡΙΑ': str(rec.get('vatCategory') or '').strip(),
+            'Καθαρή Αξία': f"{net:.2f}".replace('.', ','),
+            'ΦΠΑ': f"{vat_val:.2f}".replace('.', ','),
+            'Σύνολο': f"{total:.2f}".replace('.', ','),
+        }
+        rows.append(row)
+
+    return rows
+
+
+def _render_table_html_for_vat(vat: str, with_checkbox_value: bool = True):
+    import pandas as pd
+    rows = _build_table_rows_from_epsilon(vat)
+    if not rows:
+        return "", False, ""
+
+    df = pd.DataFrame(rows).fillna("").astype(str)
+    if "MARK" in df.columns:
+        if with_checkbox_value:
+            checkboxes = df["MARK"].apply(lambda v: f'<input type="checkbox" name="delete_mark" value="{str(v)}">')
+        else:
+            checkboxes = ['<input type="checkbox" name="delete_mark" />'] * len(df)
+        df.insert(0, "✓", checkboxes)
+
+    table_html = df.to_html(classes="summary-table", index=False, escape=False)
+    table_html = table_html.replace(
+        "<th>✓</th>",
+        '<th><input type="checkbox" id="selectAll" title="Επιλογή όλων"></th>'
+    )
+    table_html = table_html.replace("<td>", '<td><div class="cell-wrap">').replace("</td>", "</div></td>")
+    table_html = strip_server_totals(table_html)
+    return table_html, True, ""
+
 # στο app.py — κάτω από get_active_credential_from_session()
 @app.context_processor
 def inject_active_credential():
@@ -9551,31 +9638,15 @@ def search():
     except Exception:
         log.exception("Could not read repeat_entry config from credentials")
 
-    # --- Build table_html same way as /list ---
+    # --- Build table_html from epsilon_invoices.json of active client ---
     try:
-        active = get_active_credential_from_session()
-        excel_path = DEFAULT_EXCEL_FILE
-        if active and active.get("vat"):
-            excel_path = excel_path_for(vat=active.get("vat"))
-        elif active and active.get("name"):
-            excel_path = excel_path_for(cred_name=active.get("name"))
-        if os.path.exists(excel_path):
-            file_exists = True
-            import pandas as pd
-            df = pd.read_excel(excel_path, engine="openpyxl", dtype=str).fillna("")
-            df = df.astype(str)
-            drop_cols = [col for col in ["ΦΠΑ_ΑΝΑΛΥΣΗ", "Α/Α", "ΦΠΑ_ΚΑΤΗΓΟΡΙΑ"] if col in df.columns]
-            if drop_cols:
-                df = df.drop(columns=drop_cols)
-            checkbox_html = '<input type="checkbox" name="delete_mark" />'
-            df.insert(0, "✓", [checkbox_html] * len(df))
-            table_html = df.to_html(classes="summary-table", index=False, escape=False)
-        else:
-            file_exists = False
-            table_html = ""
+        active = get_active_credential_from_session() or {}
+        active_vat = str(active.get("vat") or vat or "").strip()
+        table_html, file_exists, _ = _render_table_html_for_vat(active_vat, with_checkbox_value=False)
     except Exception:
         log.exception("Failed building table_html for search page")
         table_html = ""
+        file_exists = False
 
     try:
         force_edit_active = (
@@ -13638,68 +13709,21 @@ def list_invoices():
     error = ""
     css_numcols = ""
 
-    if os.path.exists(excel_path):
-        try:
-            df = pd.read_excel(excel_path, engine="openpyxl", dtype=str).fillna("")
-            df = df.astype(str)
-
-            # Κόψε εσωτερική ανάλυση ΦΠΑ
-            drop_cols = [col for col in ["ΦΠΑ_ΑΝΑΛΥΣΗ", "Α/Α", "ΦΠΑ_ΚΑΤΗΓΟΡΙΑ"] if col in df.columns]
-            if drop_cols:
-                df = df.drop(columns=drop_cols)
-
-            # Πρώτη στήλη με checkbox
-            if "MARK" in df.columns:
-                checkboxes = df["MARK"].apply(
-                    lambda v: f'<input type="checkbox" name="delete_mark" value="{str(v)}">'
-                )
-                df.insert(0, "✓", checkboxes)
-
-            # HTML πίνακας
-            table_html = df.to_html(classes="summary-table", index=False, escape=False)
-
-            # Header checkbox
-            table_html = table_html.replace(
-                "<th>✓</th>",
-                '<th><input type="checkbox" id="selectAll" title="Επιλογή όλων"></th>'
-            )
-
-            # Περιτύλιγμα κελιών
-            table_html = table_html.replace("<td>", '<td><div class="cell-wrap">').replace("</td>", "</div></td>")
-
-            # ✨ ΚΑΘΑΡΙΣΜΑ: κόψε οποιοδήποτε server-side totals (tfoot ή tr με "ΣΥΝΟΛΑ")
-            table_html = strip_server_totals(table_html)
-
-            # CSS στοίχισης αριθμητικών στηλών
-            import re as _re
-            headers = _re.findall(r'<th[^>]*>(.*?)</th>', table_html, flags=_re.S)
-            num_indices = []
-            for i, h in enumerate(headers):
-                text = _re.sub(r'<.*?>', '', h).strip()
-                if (
-                    text in ("Καθαρή Αξία", "ΦΠΑ", "Σύνολο", "Total", "Net", "VAT")
-                    or "ΦΠΑ" in text
-                    or "ΠΟΣΟ" in text
-                ):
-                    num_indices.append(i + 1)
-            css_rules = []
-            for idx in num_indices:
-                css_rules.append(
-                    f".summary-table td:nth-child({idx}), .summary-table th:nth-child({idx}) {{ text-align: right; }}"
-                )
-            css_numcols = "\n".join(css_rules)
-
-        except Exception as e:
-            error = f"Σφάλμα ανάγνωσης Excel: {e}"
-    else:
-        error = f"Δεν βρέθηκε το αρχείο {os.path.basename(excel_path)}."
+    try:
+        active_vat = str((active or {}).get("vat") or "").strip()
+        table_html, file_exists, _ = _render_table_html_for_vat(active_vat, with_checkbox_value=True)
+        if not file_exists:
+            error = "Δεν βρέθηκαν εγγραφές στο epsilon_invoices.json."
+    except Exception as e:
+        file_exists = False
+        error = f"Σφάλμα ανάγνωσης epsilon_invoices.json: {e}"
 
     active_name = session.get("active_credential")
     return safe_render(
         "list.html",
         table_html=Markup(table_html),
         error=error,
-        file_exists=os.path.exists(excel_path),
+        file_exists=file_exists,
         css_numcols=css_numcols,
         active_page="list_invoices",
         active_credential=active_name
@@ -13712,40 +13736,11 @@ def list_fragment():
     Used by client-side partial refresh when other users update the same VAT.
     """
     try:
-        active = get_active_credential_from_session()
-        excel_path = DEFAULT_EXCEL_FILE
-        if active and active.get("vat"):
-            excel_path = excel_path_for(vat=active.get("vat"))
-        elif active and active.get("name"):
-            excel_path = excel_path_for(cred_name=active.get("name"))
-
-        table_html = ""
-        if os.path.exists(excel_path):
-            try:
-                import pandas as pd
-                df = pd.read_excel(excel_path, engine="openpyxl", dtype=str).fillna("")
-                df = df.astype(str)
-                drop_cols = [col for col in ["ΦΠΑ_ΑΝΑΛΥΣΗ", "Α/Α", "ΦΠΑ_ΚΑΤΗΓΟΡΙΑ"] if col in df.columns]
-                if drop_cols:
-                    df = df.drop(columns=drop_cols)
-
-                if "MARK" in df.columns:
-                    # Match full-page checkbox: include value attribute
-                    checkboxes = df["MARK"].apply(lambda v: f'<input type="checkbox" name="delete_mark" value="{str(v)}">')
-                    df.insert(0, "✓", checkboxes)
-
-                table_html = df.to_html(classes="summary-table", index=False, escape=False)
-                table_html = table_html.replace(
-                    "<th>✓</th>",
-                    '<th><input type="checkbox" id="selectAll" title="Επιλογή όλων"></th>'
-                )
-                # Wrap TDs same as full-page render
-                table_html = table_html.replace("<td>", '<td><div class="cell-wrap">').replace("</td>", "</div></td>")
-                table_html = strip_server_totals(table_html)
-            except Exception:
-                table_html = "<div class=\"p-3 text-red-600\">Σφάλμα ανάγνωσης Excel.</div>"
-        else:
-            table_html = f"<div class=\"p-3 text-gray-500\">Δεν βρέθηκε το αρχείο {os.path.basename(excel_path)}.</div>"
+        active = get_active_credential_from_session() or {}
+        active_vat = str(active.get("vat") or "").strip()
+        table_html, exists, _ = _render_table_html_for_vat(active_vat, with_checkbox_value=True)
+        if not exists:
+            table_html = '<div class="p-3 text-gray-500">Δεν βρέθηκαν εγγραφές στο epsilon_invoices.json.</div>'
 
         return jsonify({"ok": True, "table_html": table_html})
     except Exception as exc:
