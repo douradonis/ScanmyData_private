@@ -58,6 +58,19 @@ DATE_PATTERNS = [r"(\d{4}-\d{2}-\d{2})", r"(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{4})", r
 
 # ---------- helpers ----------
 
+def _normalize_url(url: str) -> str:
+    """
+    Διορθώνει συνηθισμένα συντακτικά λάθη σε URLs, π.χ.:
+    - https:/example.com → https://example.com
+    - http:/example.com → http://example.com
+    """
+    if not url:
+        return url
+    url = str(url).strip()
+    # Διόρθωση λάθους protocol: https:/ → https://
+    url = re.sub(r'^(https?):/([^/])', r'\1://\2', url)
+    return url
+
 def _fetch_url_text(url, headers=None, timeout=15, debug=False):
     """
     Best-effort fetch with retries for unstable endpoints (e.g. AADE pages).
@@ -1897,6 +1910,7 @@ def detect_and_scrape(url, timeout=20, debug=False):
 # if run as script, quick demo input
 if __name__ == "__main__":
     u = input("URL: ").strip()
+    u = _normalize_url(u)
     res = detect_and_scrape(u, debug=True)
     import pprint
     pprint.pprint(res)
