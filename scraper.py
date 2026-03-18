@@ -21,6 +21,19 @@ except Exception:
 def _use_browser_fallback() -> bool:
     return os.getenv("MYDATA_USE_BROWSER", "0").lower() in ("1", "true", "yes")
 
+def _normalize_url(url: str) -> str:
+    """
+    Διορθώνει συνηθισμένα συντακτικά λάθη σε URLs, π.χ.:
+    - https:/example.com → https://example.com
+    - http:/example.com → http://example.com
+    """
+    if not url:
+        return url
+    url = str(url).strip()
+    # Διόρθωση λάθους protocol: https:/ → https://
+    url = re.sub(r'^(https?):/([^/])', r'\1://\2', url)
+    return url
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -453,12 +466,19 @@ def scrape_mydatapi(url, debug=False):
                 mark = m.group(1)
                 break
     
-    # Pattern 3: ΑΦΜ Πελάτη - ψάχνουμε για crvatnumber, vatNumber, κλπ
-    afm_match = re.search(r'(?:var\s+)?(?:crvatnumber|vatNumber|counterpartVat|afm)\s*[=:]\s*["\']?([0-9]{9})["\']?', html, re.I)
-    if afm_match:
-        afm = afm_match.group(1)
+    # Pattern 3: ΑΦΜ Πελάτη - ψάχνουμε πρώτα για τo crvatnumber field (customer VAT)
+    # Αυτό είναι το πιο αξιόπιστο, γιατί έχει id="crvatnumber"
+    crvatnumber_input = BeautifulSoup(html, "html.parser").find("input", id="crvatnumber")
+    if crvatnumber_input and crvatnumber_input.get("value"):
+        afm = crvatnumber_input.get("value").strip()
     
-    # Pattern 4: Είδος Παραστατικού
+    # Pattern 4: Fallback - ψάξε για crvatnumber, vatNumber, counterpartVat, κλπ σε plain text
+    if not afm:
+        afm_match = re.search(r'(?:var\s+)?(?:crvatnumber|vatNumber|counterpartVat|afm)\s*[=:]\s*["\']?([0-9]{9})["\']?', html, re.I)
+        if afm_match:
+            afm = afm_match.group(1)
+    
+    # Pattern 5: Είδος Παραστατικού
     dtype_match = re.search(r'(?:var\s+)?(?:dtype|docType|invoiceType)\s*[=:]\s*["\']([^"\']+)["\']', html, re.I)
     if dtype_match:
         doc_type = dtype_match.group(1)
@@ -470,10 +490,10 @@ def scrape_mydatapi(url, debug=False):
             mark = m.group(1)
     
     if not afm:
-        # Βρες όλα τα 9ψήφια και πάρε το τελευταίο (συνήθως είναι του πελάτη, όχι του εκδότη)
+        # Βρες όλα τα 9ψήφια και πάρε το δεύτερο (συνήθως είναι του πελάτη, όχι του εκδότη)
         all_vats = re.findall(r'\b([0-9]{9})\b', html)
         if len(all_vats) >= 2:
-            afm = all_vats[-1]  # Τελευταίο είναι συνήθως ο πελάτης
+            afm = all_vats[1]  # Δεύτερο είναι συνήθως ο πελάτης
         elif all_vats:
             afm = all_vats[0]
     
@@ -698,8 +718,8 @@ def scrape_einvoice(url):
 def scrape_impact(url):
     """
     Επιστρέφει (mark, counterpart_vat) — όπου mark είναι str ή None.
-    1) Αν υπάρχει #erpQrBtn που οδηγεί σε mydatapi → διαβάζει MARK/ΑΦΜ από scrape_mydatapi.
-    2) Αλλιώς, fallback στην παλιά εξαγωγή του MARK μόνο.
+    1) Αν υπάρχει embedded mydatapi URL → διαβάζει MARK/ΑΦΜ από scrape_mydatapi.
+    2) Αλλιώς fallback στην παλιά εξαγωγή του MARK μόνο.
     """
     sess = requests.Session()
     sess.headers.update(HEADERS)
@@ -713,18 +733,20 @@ def scrape_impact(url):
 
     soup = BeautifulSoup(r.text, "html.parser")
 
-    # 1) Προσπάθησε μέσω erpQrBtn -> mydatapi
-    try:
-        data = _erp_qr_to_mydatapi_from_soup(sess, soup, r.url, timeout=15)
-    except Exception:
-        data = None
-
-    if data:
-        mark = (data.get("MARK") or "").strip()
-        afm = (data.get("ΑΦΜ Πελάτη") or "").strip()
-        afm = re.sub(r"\D", "", afm) if afm else None
-        mark_str = mark if mark and mark != "N/A" else None
-        return mark_str, afm
+    # 1) Ψάξε για embedded mydatapi URL στο HTML
+    mydatapi_url = _extract_mydatapi_url_from_text(r.text, r.url)
+    if mydatapi_url:
+        try:
+            data = scrape_mydatapi(mydatapi_url, debug=False)
+            if data:
+                mark = (data.get("MARK") or "").strip()
+                afm = (data.get("ΑΦΜ Πελάτη") or "").strip()
+                afm = re.sub(r"\D", "", afm) if afm else None
+                mark_str = mark if mark and mark != "N/A" else None
+                if mark_str or afm:
+                    return mark_str, afm
+        except Exception:
+            pass
 
     # 2) Fallback: παλιά λογική εύρεσης MARK από τη σελίδα
     el = soup.select_one("span.field.field-Mark span.value, span.field-Mark span.value")
@@ -880,31 +902,43 @@ def scrape_einvoicing_gr(url, return_meta=False):
     
     soup_initial = BeautifulSoup(r_initial.text, "html.parser")
 
-    # 0) Άμεση εξαγωγή embedded mydatapi URL από HTML/scripts
-    embedded_myd = _extract_mydatapi_url_from_text(r_initial.text, r_initial.url)
-    if embedded_myd:
-        mark_str, afm, is_receipt, doc_type = _try_mydatapi_extract(embedded_myd)
-        if mark_str or afm:
-            return _pack(mark_str, afm, is_receipt=is_receipt, doc_type=doc_type)
+    # 0) Ψάξε πρώτα για κουμπί "Παραστατικό (ΑΑΔΕ)" που οδηγεί σε mydatapi
+    # Αυτό είναι το προτιμητέο, γιατί δίνει πρώσβαση στο mydatapi flow
+    # Ψάξε για <a> που περιέχει text "Παραστατικό" και έχει href
+    mydatapi_url_button = None
+    for a_tag in soup_initial.find_all("a", href=True):
+        a_text = a_tag.get_text(strip=True)
+        if "Παραστατικό" in a_text and ("ΑΑΔΕ" in a_text or "mydata" in a_tag.get("href", "").lower()):
+            mydatapi_url_button = urljoin(r_initial.url, a_tag.get("href"))
+            break
     
-    # Ψάξε για κουμπί "Παραστατικό (ΑΑΔΕ)" που οδηγεί σε mydatapi
-    mydatapi_button = soup_initial.find("span", class_=lambda c: c and "btn" in c, string=lambda s: s and "Παραστατικό" in s)
-    
-    if mydatapi_button:
-        # Βρες το parent link που έχει το href
-        parent_link = mydatapi_button.find_parent("a")
-        if parent_link and parent_link.get("href"):
-            mydatapi_url = urljoin(r_initial.url, parent_link.get("href"))
-            mark_str, afm, is_receipt, doc_type = _try_mydatapi_extract(mydatapi_url)
+    if mydatapi_url_button:
+        try:
+            mark_str, afm, is_receipt, doc_type = _try_mydatapi_extract(mydatapi_url_button)
             if mark_str or afm:
                 return _pack(mark_str, afm, is_receipt=is_receipt, doc_type=doc_type)
+        except Exception:
+            pass
 
-    # 1.5) Headless fallback: πάτημα κουμπιού MyData για δυναμικές σελίδες
+    # 1) Άμεση εξαγωγή embedded mydatapi URL από HTML/scripts
+    embedded_myd = _extract_mydatapi_url_from_text(r_initial.text, r_initial.url)
+    if embedded_myd:
+        try:
+            mark_str, afm, is_receipt, doc_type = _try_mydatapi_extract(embedded_myd)
+            if mark_str or afm:
+                return _pack(mark_str, afm, is_receipt=is_receipt, doc_type=doc_type)
+        except Exception:
+            pass
+
+    # 2) Headless fallback: πάτημα κουμπιού MyData για δυναμικές σελίδες
     browser_myd = _resolve_mydatapi_via_browser(url, timeout=20, debug=False)
     if browser_myd:
-        mark_str, afm, is_receipt, doc_type = _try_mydatapi_extract(browser_myd)
-        if mark_str or afm:
-            return _pack(mark_str, afm, is_receipt=is_receipt, doc_type=doc_type)
+        try:
+            mark_str, afm, is_receipt, doc_type = _try_mydatapi_extract(browser_myd)
+            if mark_str or afm:
+                return _pack(mark_str, afm, is_receipt=is_receipt, doc_type=doc_type)
+        except Exception:
+            pass
     
     # Fallback: χρησιμοποίησε την παλιά λογική (API endpoint ή HTML parsing)
     parsed = urlparse(url)
@@ -1339,6 +1373,7 @@ def scrape_megasoft(url):
 # -------------------- MAIN --------------------
 def main():
     url = input("Εισάγετε το URL: ").strip()
+    url = _normalize_url(url)
     domain = urlparse(url).netloc.lower()
     data = {}
     marks = []
@@ -1360,7 +1395,8 @@ def main():
 
     elif "einvoice.impact.gr" in domain or "impact.gr" in domain:
         source = "Impact E-Invoicing"
-        marks, counterpart_vat = scrape_impact(url)
+        mark, counterpart_vat = scrape_impact(url)
+        marks = [mark] if mark else []
 
     elif "epsilonnet.gr" in domain:
         source = "Epsilon (myData)"
@@ -1419,6 +1455,12 @@ def main():
     if source == "ECOS E-Invoicing":
         if counterpart_vat:
             print("counterpart VAT:", counterpart_vat)
+
+    if source == "Impact E-Invoicing":
+        if counterpart_vat:
+            print("ΑΦΜ Πελάτη:", counterpart_vat)
+        else:
+            print("Δεν βρέθηκε ΑΦΜ πελάτη.")
 
     if source == "Epsilon (myData)":
         if counterpart_vat:
