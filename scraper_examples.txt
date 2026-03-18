@@ -1,1 +1,0 @@
-python scraper_receipt_analysis.py
