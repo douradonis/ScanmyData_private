@@ -15067,7 +15067,7 @@ def admin_send_email():
     
     # POST: send email
     try:
-        from email_utils import make_email_html, send_bulk_email_to_users
+        from email_utils import send_bulk_email_to_users
         
         user_ids = request.form.getlist('user_ids')
         subject = request.form.get('subject', '').strip()
@@ -15079,13 +15079,20 @@ def admin_send_email():
         
         user_ids = [int(uid) for uid in user_ids]
         
-        # Build consistent email HTML (matches other transactional templates)
-        body_html = f"<p style='margin:0 0 18px;'>" + message.replace("\n", "<br>") + "</p>"
-        html_body = make_email_html(
-            greeting=subject,
-            body_html=body_html,
-            header_subtitle='📧 Μήνυμα από Διαχειριστή',
-        )
+        # Build HTML body
+        html_body = f"""
+        <html>
+            <body>
+                <h3>{subject}</h3>
+                <hr>
+                <div style="white-space: pre-wrap; line-height: 1.6;">
+                    {message}
+                </div>
+                <hr>
+                <p><small>This is a message from the Firebed Admin Team</small></p>
+            </body>
+        </html>
+        """
         
         result = send_bulk_email_to_users(user_ids, subject, html_body)
         
