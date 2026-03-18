@@ -1567,18 +1567,23 @@ function katToPercent(k){
     openModal();
   });
   document.getElementById('editReceiptClassBtn')?.addEventListener('click', ()=>{
+    const canOpenReceiptAnalysis = !!(
+      (typeof window.__rcReceiptAnalysisAvailable === 'function' && window.__rcReceiptAnalysisAvailable())
+      || window.__RC_HAS_RECEIPT_CUSTOM_CATEGORIES
+    );
+    if (!canOpenReceiptAnalysis) {
+      if (typeof window.__rcShowReceiptAnalysisUnavailable === 'function') window.__rcShowReceiptAnalysisUnavailable();
+      return;
+    }
     try { window.__RC_REPEAT_MODAL_FORCE_RECEIPTS = true; } catch(_) {}
     try {
       const summaryInput = document.getElementById('summaryJsonInput');
       const summaryObj = summaryInput && summaryInput.value ? JSON.parse(summaryInput.value) : (window._lastSummaryObj || {});
       if (typeof openReceiptClassModal === 'function') {
         openReceiptClassModal(summaryObj || {});
-      } else {
-        openModal();
       }
     } catch(_) {
       if (typeof openReceiptClassModal === 'function') openReceiptClassModal(window._lastSummaryObj || {});
-      else openModal();
     }
   });
   
@@ -2119,10 +2124,7 @@ const SEARCH_BASE_URL = "{{ url_for('search') }}";
 const VAT = "{{ vat or '' }}"; // active vat from server
 const INITIAL_MARK = "{{ mark|e }}"; // αρχική τιμή mark (αν υπήρχε)
 const RC_CLEAR_FLAG_KEY = 'rc:clearSearchAfterReload';
-
-function rcRememberSearchClear(){
-  try { sessionStorage.setItem(RC_CLEAR_FLAG_KEY, '1'); } catch(_){}
-}
+  window.__RC_CLEAR_MARK_AFTER_SAVE = false;
 
 function rcConsumeSearchClear(){
   try {
@@ -3394,10 +3396,10 @@ document.addEventListener('DOMContentLoaded', replayPersistedReceiptFlash, { onc
       if (!form) return;
       try {
         if (typeof form.requestSubmit === 'function') form.requestSubmit();
-        else form.submit();
+        else form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
         showFlash('Η αποθήκευση ζητήθηκε από τη φορητή συσκευή.', 'info', 2500);
       } catch (_) {
-        try { form.submit(); } catch (_) {}
+        try { form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); } catch (_) {}
       }
       scheduleSummaryRefresh(400);
     }
@@ -4388,8 +4390,11 @@ async function apiSaveRepeatEntry(enabled, mapping, vat){
 function removeForceEditParamFromUrl(){
   try {
     const url = new URL(window.location.href);
-    if (url.searchParams.has('force_edit')) {
-      url.searchParams.delete('force_edit');
+    let dirty = false;
+    ['force_edit','mark','url','scrape_url','mark_id'].forEach(p => {
+      if (url.searchParams.has(p)) { url.searchParams.delete(p); dirty = true; }
+    });
+    if (dirty) {
       history.replaceState(null, '', url.pathname + (url.search ? ('?' + url.searchParams.toString()) : '') + url.hash);
     }
   } catch(e){ console.warn('removeForceEditParamFromUrl failed', e); }
@@ -4411,6 +4416,17 @@ function hideSummaryModal(){
   } catch(_){}
 }
 window.hideSummaryModal = hideSummaryModal;
+
+function rcIsSummaryModalSuppressed(){
+  try {
+    if (window.__RC_SUPPRESS_SUMMARY_MODAL === true) return true;
+    const until = Number(window.__RC_SUPPRESS_SUMMARY_MODAL_UNTIL || 0);
+    if (until && Date.now() < until) return true;
+    if (window.__RC_BLOCK_SUMMARY_AUTOSHOW === true) return true;
+  } catch(_) {}
+  return false;
+}
+window.rcIsSummaryModalSuppressed = rcIsSummaryModalSuppressed;
 
 function clearReceiptSearchCacheOnClose(){
   try {
@@ -5420,21 +5436,251 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
   const existingBanner = document.getElementById('existingBanner');
   const dismissBannerBtn = document.getElementById('dismissBannerBtn');
 
-  if(dismissBannerBtn){
-    dismissBannerBtn.addEventListener('click', function(){ if(existingBanner) existingBanner.style.display = 'none'; });
+  function rcEnsureExistingBanner(markText){
+    let banner = document.getElementById('existingBanner');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.id = 'existingBanner';
+      banner.className = 'mt-4 p-4 bg-yellow-50 rounded border border-yellow-300 text-yellow-800';
+      banner.innerHTML =
+        'Το MARK <strong></strong> υπάρχει ήδη στο Excel. Θέλεις να τροποποιήσεις τον χαρακτηρισμό;'
+        + '<div class="mt-2 flex gap-2">'
+        + '<button id="forceEditBtn" type="button" class="bg-yellow-600 text-white px-3 py-2 rounded hover:bg-yellow-700">Επιβεβαίωση</button>'
+        + '<button id="dismissBannerBtn" type="button" class="px-3 py-2 border rounded hover:bg-gray-50">Άκυρο</button>'
+        + '</div>';
+      const host = document.getElementById('markSearchForm')?.closest('.bg-white');
+      if (host && host.parentNode) host.parentNode.insertBefore(banner, host.nextSibling);
+      else document.body.appendChild(banner);
+    }
+    const strong = banner.querySelector('strong');
+    if (strong) strong.textContent = String(markText || '').trim();
+    banner.style.display = '';
+    rcBindExistingBannerButtons();
+    return banner;
   }
 
-  if (forceBtn){
-    forceBtn.addEventListener('click', async function(){
-      const markValRaw = (markInput && markInput.value) ? markInput.value.trim() : '{{ mark or "" }}';
-      const markVal = encodeURIComponent(markValRaw || '');
-      if (!markVal){ await showModalAlert('Σφάλμα', 'Δεν δόθηκε MARK για επιβεβαίωση.'); return; }
-      if (await showModalConfirm('Επιβεβαίωση', 'Θες σίγουρα να επαναχαρακτηρίσεις το MARK και να ανοίξει η φόρμα επεξεργασίας;')) {
-        if(existingBanner) existingBanner.style.display = 'none';
-        window.location = SEARCH_BASE_URL + '?mark=' + markVal + '&force_edit=1';
-      }
-    });
+  function rcClearReclassSearchState(){
+    try { window.__RC_PENDING_FORCE_SUMMARY = null; } catch(_){ }
+    try {
+      const sum = document.getElementById('summaryJsonInput');
+      if (sum) sum.value = '{}';
+      const sumData = document.getElementById('summaryDataInput');
+      if (sumData) sumData.value = '{}';
+      const linesWrap = document.getElementById('summaryLinesContainer');
+      if (linesWrap) linesWrap.innerHTML = '';
+    } catch(_){ }
+    try { rcClearWarningSearchFields(false); } catch(_){ }
+    try { hideSummaryModal(); } catch(_){ }
+    try {
+      const u = new URL(window.location.href);
+      u.searchParams.delete('mark');
+      u.searchParams.delete('force_edit');
+      const next = u.pathname + (u.searchParams.toString() ? ('?' + u.searchParams.toString()) : '') + (u.hash || '');
+      window.history.replaceState({}, '', next);
+    } catch(_){ }
   }
+
+  function rcOpenSummaryModalFromObject(obj){
+    if (!obj || typeof obj !== 'object') return false;
+    try {
+      const summaryInputEl = document.getElementById('summaryJsonInput');
+      if (summaryInputEl) summaryInputEl.value = JSON.stringify(obj);
+      try { window.__RC_SERVER_MODAL_SUMMARY = obj; } catch(_){ }
+
+      if (typeof window.renderSummaryLinesFromObject === 'function') {
+        try { window.renderSummaryLinesFromObject(obj); } catch(_){ }
+      }
+      if (window.RC_forcePopulateSummaryModal) {
+        try { window.RC_forcePopulateSummaryModal(); } catch(_){ }
+      }
+
+      const m = document.getElementById('summaryModal');
+      if (m && !(window.__RC_FLAGS && window.__RC_FLAGS.autoHandled)) {
+        m.style.display = 'flex';
+      }
+      return true;
+    } catch(_){
+      return false;
+    }
+  }
+
+  async function rcSubmitInvoiceSearchWithoutReload(evt){
+    evt.preventDefault();
+    const form = evt.currentTarget;
+    if (!form) return;
+    if (form.dataset.invoiceSubmitting === '1') return;
+
+    const typedMark = (document.getElementById('markInput')?.value || '').trim();
+    if (!typedMark) {
+      if (typeof showFlash === 'function') showFlash('Συμπλήρωσε MARK ή URL.', 'error', 3500);
+      return;
+    }
+
+    form.dataset.invoiceSubmitting = '1';
+    try {
+      const payload = new FormData(form);
+      payload.set('mark', typedMark);
+      payload.set('ajax', '1');
+
+      const actionUrl = form.getAttribute('action') || window.location.pathname;
+      const res = await fetchWithOverlay(actionUrl, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        body: payload,
+      }, 'Αναζήτηση Παραστατικού', 'Παρακαλώ περιμένετε - ανάκτηση στοιχείων...');
+
+      const j = await res.json().catch(() => null);
+      if (!res.ok || !j) {
+        const msg = (j && (j.error || j.message)) ? (j.error || j.message) : ('Αποτυχία αναζήτησης (HTTP ' + res.status + ')');
+        if (typeof showFlash === 'function') showFlash(msg, 'error', 5000);
+        return;
+      }
+
+      const resolvedMark = String((j.mark || typedMark) || '').trim();
+      if (window.__RC_CLEAR_MARK_AFTER_SAVE) {
+        if (markInput) {
+          markInput.value = '';
+          try { markInput.dispatchEvent(new Event('input', { bubbles: true })); } catch(_){ }
+        }
+        window.__RC_CLEAR_MARK_AFTER_SAVE = false;
+      } else if (resolvedMark && markInput) {
+        markInput.value = resolvedMark;
+        try { markInput.dispatchEvent(new Event('input', { bubbles: true })); } catch(_){ }
+      }
+
+      try {
+        if (Array.isArray(j.customer_categories)) {
+          const _normList = (typeof normalizeCategoryList === 'function')
+            ? normalizeCategoryList(j.customer_categories || [])
+            : (j.customer_categories || []).map(v => String(v || '').trim()).filter(v => v && v.toLowerCase() !== 'αποδειξακια');
+          CUSTOMER_CATEGORIES = _normList;
+          if (typeof window !== 'undefined') window.CUSTOMER_CATEGORIES = CUSTOMER_CATEGORIES.slice();
+        }
+      } catch(_){ }
+      try {
+        if (j.customer_category_labels) {
+          Object.assign(CATEGORY_LABELS, j.customer_category_labels || {});
+          if (typeof window !== 'undefined') {
+            window.CATEGORY_LABELS = window.CATEGORY_LABELS || {};
+            Object.assign(window.CATEGORY_LABELS, j.customer_category_labels || {});
+          }
+        }
+      } catch(_){ }
+      try {
+        if (j.category_vat_constraints && typeof setCategoryConstraints === 'function') {
+          setCategoryConstraints(j.category_vat_constraints);
+        }
+      } catch(_){ }
+
+      if (j.classified_message && typeof showFlash === 'function') {
+        showFlash(String(j.classified_message), 'warning', 6000);
+      }
+
+      // Classified hit must not fall through to generic "not found" warning.
+      if (j.classified_message) {
+        try { window.__RC_PENDING_FORCE_SUMMARY = null; } catch(_){ }
+        const b = document.getElementById('existingBanner');
+        if (b) b.style.display = 'none';
+        return;
+      }
+
+      if (j.modal_warning) {
+        if (typeof showModalAlert === 'function') {
+          await showModalAlert('Προειδοποίηση', String(j.modal_warning));
+        } else if (typeof showFlash === 'function') {
+          showFlash(String(j.modal_warning), 'warning', 7000);
+        }
+        return;
+      }
+
+      if (j.allow_edit_existing) {
+        rcEnsureExistingBanner(resolvedMark || typedMark);
+      } else {
+        const b = document.getElementById('existingBanner');
+        if (b) b.style.display = 'none';
+      }
+
+      if (j.allow_edit_existing) {
+        try { window.__RC_PENDING_FORCE_SUMMARY = j.modal_summary || null; } catch(_){ }
+        return;
+      }
+
+      if (j.modal_summary && typeof j.modal_summary === 'object') {
+        try { window.__RC_PENDING_FORCE_SUMMARY = null; } catch(_){ }
+        rcOpenSummaryModalFromObject(j.modal_summary);
+
+        try {
+          const repeatSwitchEl = document.getElementById('repeatEntrySwitch');
+          const repeatOn = !!(repeatSwitchEl && repeatSwitchEl.checked);
+          if (repeatOn && typeof apiGetRepeatEntry === 'function' && typeof applyMappingToSummaryAndSubmitUsingMapping === 'function') {
+            const repResp = await apiGetRepeatEntry(VAT);
+            const rawMap = (repResp && repResp.repeat_entry && repResp.repeat_entry.mapping) ? repResp.repeat_entry.mapping : {};
+            const mapping = (typeof normalizeMapping === 'function') ? normalizeMapping(rawMap) : (rawMap || {});
+            const required = ['0%','6%','13%','17%','24%'];
+            const complete = required.every(k => String(mapping[k] || '').trim() !== '');
+            if (complete) {
+              await applyMappingToSummaryAndSubmitUsingMapping(mapping);
+              return;
+            }
+          }
+        } catch (e) {
+          console.warn('invoice repeat auto-apply failed', e);
+        }
+      } else if (j.error) {
+        if (typeof showFlash === 'function') showFlash(String(j.error), 'error', 5000);
+      } else {
+        if (typeof showFlash === 'function') showFlash('Δεν βρέθηκε παραστατικό για το MARK.', 'warning', 4000);
+      }
+    } catch (err) {
+      if (typeof showFlash === 'function') showFlash('Σφάλμα δικτύου κατά την αναζήτηση.', 'error', 5000);
+      console.warn('invoice search ajax failed', err);
+    } finally {
+      form.dataset.invoiceSubmitting = '';
+    }
+  }
+
+  async function rcHandleForceEditClick(){
+    const markValRaw = (document.getElementById('markInput')?.value || '{{ mark or "" }}').trim();
+    const markVal = encodeURIComponent(markValRaw || '');
+    if (!markVal){ await showModalAlert('Σφάλμα', 'Δεν δόθηκε MARK για επιβεβαίωση.'); return; }
+    const b = document.getElementById('existingBanner');
+    if (b) b.style.display = 'none';
+    let pending = null;
+    try { pending = window.__RC_PENDING_FORCE_SUMMARY || null; } catch(_){ pending = null; }
+    if (!pending) {
+      try {
+        const raw = document.getElementById('summaryJsonInput')?.value || '';
+        if (raw && raw !== '{}' && raw !== 'null') pending = JSON.parse(raw);
+      } catch(_){ pending = null; }
+    }
+    if (pending && rcOpenSummaryModalFromObject(pending)) {
+      try { window.__RC_PENDING_FORCE_SUMMARY = null; } catch(_){ }
+      return;
+    }
+    window.location = SEARCH_BASE_URL + '?mark=' + markVal + '&force_edit=1';
+  }
+
+  function rcBindExistingBannerButtons(){
+    const b = document.getElementById('existingBanner');
+    if (!b) return;
+    const dismissBtn = document.getElementById('dismissBannerBtn');
+    if (dismissBtn && dismissBtn.dataset.bound !== '1') {
+      dismissBtn.dataset.bound = '1';
+      dismissBtn.addEventListener('click', function(){
+        const bb = document.getElementById('existingBanner');
+        if (bb) bb.style.display = 'none';
+        rcClearReclassSearchState();
+      });
+    }
+    const fBtn = document.getElementById('forceEditBtn');
+    if (fBtn && fBtn.dataset.bound !== '1') {
+      fBtn.dataset.bound = '1';
+      fBtn.addEventListener('click', async function(){ await rcHandleForceEditClick(); });
+    }
+  }
+
+  rcBindExistingBannerButtons();
 
   const modal = document.getElementById('summaryModal');
   const modalCloseBtns = Array.from(document.querySelectorAll('#modalCloseX, #modalCloseBtn'));
@@ -5495,10 +5741,17 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
             }
           } catch(_) {}
           await RC.confirmReceiptOnce(normalized, url);
-          // κράτα το mode σε receipts και κάνε hard redirect για καθαρή κατάσταση
+          // κράτα το mode σε receipts χωρίς hard reload
           try { localStorage.setItem('useReceiptsSwitch','1'); } catch(_){}
-          const base = location.pathname + '?use_receipts=1';
-          location.replace(base);
+          try {
+            document.getElementById('scrapeUrlInput') && (document.getElementById('scrapeUrlInput').value = '');
+            document.getElementById('markInput') && (document.getElementById('markInput').value = '');
+          } catch(_) {}
+          try {
+            if (typeof partiallyReloadInvoiceTable === 'function') {
+              await partiallyReloadInvoiceTable();
+            }
+          } catch(_) {}
         } catch(e) {
           console.warn('auto-confirm receipt failed', e);
         }
@@ -5750,6 +6003,11 @@ document.addEventListener('DOMContentLoaded', function(){
           const v = (mi.value || '').trim();
           if (v === '' && (lastVal && lastVal.trim() !== '')) {
             try {
+              if (window.__RC_CLEAR_MARK_AFTER_SAVE) {
+                // Keep it cleared after save; do not restore from URL
+                lastVal = v;
+                return;
+              }
               if (typeof INITIAL_MARK !== 'undefined' && INITIAL_MARK && INITIAL_MARK.trim() !== '') {
                 const cur = new URL(window.location.href);
                 if (cur.searchParams.has('mark') || cur.searchParams.has('force_edit')) {
@@ -5794,6 +6052,11 @@ document.addEventListener('DOMContentLoaded', function(){
   // Add a handler: when receipts switch ON and user submits form -> call /api/scrape_receipt and show modal
   // ====================== RECEIPTS SCRAPE FLOW ======================
 document.getElementById('markSearchForm')?.addEventListener('submit', async function (evt) {
+  if (!(useReceiptsSwitch && useReceiptsSwitch.checked)) {
+    await rcSubmitInvoiceSearchWithoutReload(evt);
+    return;
+  }
+
   if (useReceiptsSwitch && useReceiptsSwitch.checked) {
 
     // --- de-dupe receipts submit (scrape) ---
@@ -6145,7 +6408,7 @@ try {
         if (window.RC_forcePopulateSummaryModal) {
           try { window.RC_forcePopulateSummaryModal(); } catch(e){ console.warn('RC_forcePopulateSummaryModal failed', e); }
         }
-        if (!(window.__RC_FLAGS && window.__RC_FLAGS.autoHandled)) {
+        if (!(window.__RC_FLAGS && window.__RC_FLAGS.autoHandled) && !(typeof rcIsSummaryModalSuppressed === 'function' && rcIsSummaryModalSuppressed())) {
           // Set bypass flag to allow modal open even in repeat mode
           window.__RC_ALLOW_MODAL_OPEN = true;
           modal.style.display = 'flex';
@@ -6169,6 +6432,19 @@ try {
 
 // ===== Helper function for partial table reload (after save) =====
 async function partiallyReloadInvoiceTable() {
+  const reinitTable = () => {
+    setTimeout(() => {
+      try {
+        if (typeof window.FBP_INIT_TABULATOR === 'function') {
+          window.FBP_INIT_TABULATOR();
+        } else if (typeof window.FBP_INIT_TABLE === 'function') {
+          window.FBP_INIT_TABLE();
+          initializeSelectAllCheckbox();
+        }
+      } catch(e) { console.warn('Table reinitialization failed:', e); }
+    }, 50);
+  };
+
   try {
     const tableRes = await fetch('/list/fragment', { method: 'GET', credentials: 'same-origin' });
     if (tableRes.ok) {
@@ -6177,19 +6453,7 @@ async function partiallyReloadInvoiceTable() {
         const container = document.getElementById('summary-container');
         if (container) {
           container.innerHTML = data.table_html;
-          // Reinitialize table event listeners 
-          setTimeout(() => {
-            try { 
-              // If Tabulator is in use, reinitialize it (this is the correct approach)
-              if (typeof window.FBP_INIT_TABULATOR === 'function') {
-                window.FBP_INIT_TABULATOR();
-              } else if (typeof window.FBP_INIT_TABLE === 'function') {
-                // Otherwise fallback to legacy init
-                window.FBP_INIT_TABLE();
-                initializeSelectAllCheckbox();
-              }
-            } catch(e) { console.warn('Table reinitialization failed:', e); }
-          }, 50);
+          reinitTable();
           return true;
         }
       }
@@ -6197,6 +6461,25 @@ async function partiallyReloadInvoiceTable() {
   } catch(err) {
     console.warn('Partial reload failed:', err);
   }
+
+  // Fallback: get full /list page and extract #summary-container fragment.
+  try {
+    const listRes = await fetch('/list', { method: 'GET', credentials: 'same-origin' });
+    if (listRes.ok) {
+      const html = await listRes.text();
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const fresh = doc.getElementById('summary-container');
+      const container = document.getElementById('summary-container');
+      if (fresh && container) {
+        container.innerHTML = fresh.innerHTML;
+        reinitTable();
+        return true;
+      }
+    }
+  } catch (err) {
+    console.warn('Fallback partial reload from /list failed:', err);
+  }
+
   return false;
 }
 
@@ -6568,7 +6851,7 @@ if (__rcSummaryForm && !__rcSummaryForm.dataset.rcTotalsGuardBound) {
         window.__RC_SUMMARY_SUBMIT_BYPASS = true;
         try {
           if (typeof __rcSummaryForm.requestSubmit === 'function') __rcSummaryForm.requestSubmit();
-          else __rcSummaryForm.submit();
+          else __rcSummaryForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
         } finally {
           setTimeout(() => { window.__RC_SUMMARY_SUBMIT_BYPASS = false; }, 0);
         }
@@ -6746,12 +7029,17 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
       return;
     }
     try { hideSummaryModal(); } catch(_) {}
+
+    // Καθαρίζει το search box & cache όπως γίνεται στην περίπτωση yellow banner "MARK exists"
+    try { if (typeof clearSearchInputs === 'function') clearSearchInputs(); } catch(_) {}
+    try { if (typeof clearReceiptSearchCacheOnClose === 'function') clearReceiptSearchCacheOnClose(); } catch(_) {}
+
     // Partial reload: ανανέωσε μόνο τον πίνακα αντί για full page reload
     const reloaded = await partiallyReloadInvoiceTable();
     if (reloaded) {
       try { if (typeof showFlash === 'function') showFlash('Παραστατικό αποθηκεύτηκε με επιτυχία!', 'success', 2000); } catch(_) {}
     } else {
-      window.location = window.location.pathname; // fallback to full reload
+      try { if (typeof showFlash === 'function') showFlash('Η αποθήκευση ολοκληρώθηκε, αλλά δεν έγινε ανανέωση πίνακα. Πάτησε αναζήτηση ή ανανέωση λίστας.', 'warning', 4500); } catch(_) {}
     }
   } catch (err) {
     console.error('save_summary AJAX error', err);
@@ -6787,9 +7075,8 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
     } catch(err){
       console.warn('Failed parsing summaryJsonInput for validation', err);
       try { __rc_debug_repeat_log('invoice_submit_invalid_summary_json', { error: String(err && err.message || err || '') }); } catch(_) {}
-      // Άφησε το να προχωρήσει στο server
-      try{ showLoadingOverlay('Αποθήκευση', 'Παρακαλώ περιμένετε - αποστολή στο server...'); }catch(e){}
-      e.target.submit();
+      try { if (typeof showFlash === 'function') showFlash('Σφάλμα: άκυρα δεδομένα παραστατικού. Η αποθήκευση ακυρώθηκε.', 'error', 4500); } catch(_) {}
+      releaseSummarySaveLock();
       return;
     }
     
@@ -7114,7 +7401,7 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
       if (reloaded) {
         try { if (typeof showFlash === 'function') showFlash('Παραστατικό χαρακτηρίστηκε με επιτυχία!', 'success', 2000); } catch(_) {}
       } else {
-        window.location = window.location.pathname;
+        try { if (typeof showFlash === 'function') showFlash('Η αποθήκευση ολοκληρώθηκε, αλλά δεν έγινε ανανέωση πίνακα. Πάτησε αναζήτηση ή ανανέωση λίστας.', 'warning', 4500); } catch(_) {}
       }
       releaseSummarySaveLock();
     } catch (err) {
@@ -7356,7 +7643,7 @@ document.addEventListener("DOMContentLoaded", function(){
         } catch(_) {}
       }
 
-      if (modal) if (!(window.__RC_FLAGS && window.__RC_FLAGS.autoHandled)) { modal.style.display = 'flex'; }
+      if (modal) if (!(window.__RC_FLAGS && window.__RC_FLAGS.autoHandled) && !(typeof rcIsSummaryModalSuppressed === 'function' && rcIsSummaryModalSuppressed())) { modal.style.display = 'flex'; }
     } else {
       // ensure modal remains hidden on load
       if (modal) modal.style.display = 'none';
@@ -7569,7 +7856,10 @@ function readMappingFromUI(){
       }
 
       // proceed with the legacy form submit so the existing save handler runs
-      try { if (typeof legacyForm.requestSubmit === 'function') legacyForm.requestSubmit(); else legacyForm.submit(); } catch(e){ console.warn('legacy form submit fallback failed', e); }
+      try {
+        if (typeof legacyForm.requestSubmit === 'function') legacyForm.requestSubmit();
+        else legacyForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      } catch(e){ console.warn('legacy form submit fallback failed', e); }
     } catch(err) {
       console.warn('defensive modal-save click handler failed', err);
     }
@@ -8245,7 +8535,7 @@ function readMappingFromUI(){
         // if modal is hidden, ensure it's visible when populate invoked by scraper flow
         try {
           if (modal && modal.style.display === 'none') {
-            if (!(window.__RC_FLAGS && window.__RC_FLAGS.autoHandled)) { modal.style.display = 'flex'; }
+            if (!(window.__RC_FLAGS && window.__RC_FLAGS.autoHandled) && !(typeof rcIsSummaryModalSuppressed === 'function' && rcIsSummaryModalSuppressed())) { modal.style.display = 'flex'; }
           }
         } catch(e){}
 
@@ -8398,7 +8688,7 @@ function readMappingFromUI(){
             } else if (typeof populateSummaryModal === 'function') {
               try { populateSummaryModal(obj); } catch(e){ dbg('populateSummaryModal failed', e); }
             }
-            if (!(window.__RC_FLAGS && window.__RC_FLAGS.autoHandled)) { modal.style.display = 'flex'; }
+            if (!(window.__RC_FLAGS && window.__RC_FLAGS.autoHandled) && !(typeof rcIsSummaryModalSuppressed === 'function' && rcIsSummaryModalSuppressed())) { modal.style.display = 'flex'; }
           } catch(e){ dbg('show modal failed', e); }
         } else {
           // keep hidden
@@ -8710,7 +9000,7 @@ document.addEventListener('submit', function(ev){
     if (typeof form.requestSubmit === 'function') {
       form.requestSubmit();
     } else {
-      form.submit();
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     }
   }
 
@@ -9151,7 +9441,8 @@ document.addEventListener('submit', function(ev){
       if (pending) return;
       pending = true;
       try {
-        if (form.requestSubmit) form.requestSubmit(); else form.submit();
+        if (form.requestSubmit) form.requestSubmit();
+        else form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
       } finally {
         setTimeout(()=>{ pending=false; }, 500);
       }
@@ -9237,6 +9528,15 @@ document.addEventListener('submit', function(ev){
     try { return !!{{ 'true' if has_receipt_custom_categories else 'false' }}; }
     catch(_) { return false; }
   })();
+  window.__RC_HAS_RECEIPT_CUSTOM_CATEGORIES = !!hasReceiptCustomCategories;
+  window.__rcReceiptAnalysisAvailable = function(){
+    return !!window.__RC_HAS_RECEIPT_CUSTOM_CATEGORIES;
+  };
+  window.__rcShowReceiptAnalysisUnavailable = function(){
+    if (typeof showFlash === 'function') {
+      showFlash('Για να ενεργοποιήσεις την Ανάλυση πήγαινε: Credentials -> Επεξεργασία ενεργού πελάτη -> Ενεργοποίηση/δημιουργία custom κατηγοριών.', 'warning', 7000);
+    }
+  };
   console.log('initial hasReceiptCustomCategories', hasReceiptCustomCategories);
   console.log('serverReceiptCats', {{ (receipt_custom_categories or []) | tojson | safe }});
   let receiptCustomCheckDone = hasReceiptCustomCategories;
@@ -9245,6 +9545,7 @@ document.addEventListener('submit', function(ev){
       const serverReceiptCats = {{ (receipt_custom_categories or []) | tojson | safe }};
       if (Array.isArray(serverReceiptCats) && serverReceiptCats.length > 0) {
         hasReceiptCustomCategories = true;
+        window.__RC_HAS_RECEIPT_CUSTOM_CATEGORIES = true;
         receiptCustomCheckDone = true;
       }
     } catch(_) {}
@@ -9277,6 +9578,7 @@ document.addEventListener('submit', function(ev){
       console.log('refreshReceiptCustomAvailability: api tags', tags, 'newVal', newVal);
       // keep true if server already said true
       hasReceiptCustomCategories = hasReceiptCustomCategories || newVal;
+      window.__RC_HAS_RECEIPT_CUSTOM_CATEGORIES = !!hasReceiptCustomCategories;
       receiptCustomCheckDone = true;
       // recalc disabled state in case menu already exists
       updateAnalysisOption();
@@ -9286,6 +9588,7 @@ document.addEventListener('submit', function(ev){
       if (!hasReceiptCustomCategories) {
         hasReceiptCustomCategories = false;
       }
+      window.__RC_HAS_RECEIPT_CUSTOM_CATEGORIES = !!hasReceiptCustomCategories;
       receiptCustomCheckDone = true;
     }
   }
@@ -9417,7 +9720,13 @@ document.addEventListener('submit', function(ev){
   }
 
   function applyReceiptMode(mode, fire = true, persist = true){
-    const normalized = String(mode || '').toLowerCase() === 'analysis' ? 'analysis' : 'mixed';
+    let normalized = String(mode || '').toLowerCase() === 'analysis' ? 'analysis' : 'mixed';
+    if (normalized === 'analysis' && !hasReceiptCustomCategories) {
+      normalized = 'mixed';
+      if (fire && typeof showFlash === 'function') {
+        showFlash('Για να ενεργοποιήσεις την Ανάλυση πήγαινε: Credentials -> Επεξεργασία ενεργού πελάτη -> Ενεργοποίηση/δημιουργία custom κατηγοριών.', 'warning', 7000);
+      }
+    }
     logDebug('applyReceiptMode:'+normalized);
     if (persist) {
       try { localStorage.setItem('rc:receiptMode', normalized); } catch(_) {}
@@ -9608,6 +9917,14 @@ function closeReceiptClassModal(){
 }
 
 function openReceiptClassModal(summaryObj){
+    const analysisAvailable = !!(
+      (typeof window.__rcReceiptAnalysisAvailable === 'function' && window.__rcReceiptAnalysisAvailable())
+      || window.__RC_HAS_RECEIPT_CUSTOM_CATEGORIES
+    );
+    if (!analysisAvailable) {
+      if (typeof window.__rcShowReceiptAnalysisUnavailable === 'function') window.__rcShowReceiptAnalysisUnavailable();
+      return;
+    }
     try {
       const summaryModal = document.getElementById('summaryModal');
       const editingNow = rcShouldSuppressModalSwitch();
@@ -10248,7 +10565,7 @@ RC.handleReceiptAfterScrape = async function(summaryObj, scrapeUrl){
     // Partial reload instead of full page reload
     const reloaded = await partiallyReloadInvoiceTable();
     if (!reloaded) {
-      window.location = window.location.pathname;
+      showFlash('Η αποθήκευση ολοκληρώθηκε, αλλά δεν έγινε ανανέωση πίνακα. Πάτησε αναζήτηση ή ανανέωση λίστας.', 'warning', 4500);
     }
     return true;
   } catch (e) {
@@ -10320,7 +10637,8 @@ document.addEventListener('DOMContentLoaded', () => {
     ensureRepeatHidden(form);
     submitted = true;
     hideModal();
-    form.submit();
+    if (typeof form.requestSubmit === 'function') form.requestSubmit();
+    else form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
   };
 
   // Δοκίμασε άμεσα & με μικρό retry
@@ -10542,6 +10860,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 })();</script>
 
+<script>
  (function(){
   function isDetailed(x){
     try{
@@ -10685,7 +11004,8 @@ document.addEventListener('DOMContentLoaded', () => {
       setTimeout(function(){
         if (!saveForm.dataset._autoSubmitted) {
           saveForm.dataset._autoSubmitted = '1';
-          saveForm.requestSubmit ? saveForm.requestSubmit() : saveForm.submit();
+          if (saveForm.requestSubmit) saveForm.requestSubmit();
+          else saveForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
         }
       }, 30);
     }
@@ -10732,8 +11052,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // Submit the server form (keeps server-side logic, excel write etc.)
     // Use a microtask so any last-second JSON sync runs first
     setTimeout(() => {
-      try { form.submit(); } catch(e) {
-        try { form.dispatchEvent(new Event('submit', { cancelable:false })); } catch(_){}
+      try {
+        if (typeof form.requestSubmit === 'function') form.requestSubmit();
+        else form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      } catch(e) {
+        try { form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); } catch(_){}
       }
     }, 30);
     return true;
@@ -10770,16 +11093,18 @@ document.addEventListener('DOMContentLoaded', () => {
     // Always ensure page comes back to a clean state after any save
     const saveForm = document.getElementById('saveSummaryForm');
     if (saveForm) {
-      let reloaded = false;
-      const reloadSoon = () => {
-        if (!reloaded) {
-          reloaded = true;
-          rcRememberSearchClear();
-          setTimeout(() => location.reload(), 300);
-        }
+      let finalized = false;
+      const finalizeWithoutReload = async () => {
+        if (finalized) return;
+        finalized = true;
+        rcRememberSearchClear();
+        try { await partiallyReloadInvoiceTable(); } catch(_) {}
       };
-      saveForm.addEventListener('ajax:done', reloadSoon, { once:true });
-      saveForm.addEventListener('submit', () => setTimeout(reloadSoon, 1200), { once:true });
+      saveForm.addEventListener('ajax:done', () => { void finalizeWithoutReload(); }, { once:true });
+      saveForm.addEventListener('submit', () => {
+        // safety fallback only; main save handlers already perform partial refresh
+        setTimeout(() => { void finalizeWithoutReload(); }, 1800);
+      }, { once:true });
     }
 
     // If receipts + repeat are ON, suppress the "Λήφθηκε..." toast and auto-save
@@ -10886,13 +11211,16 @@ document.addEventListener('DOMContentLoaded', () => {
       setLS('UI:useReceipts', '1');
       // also persist repeat-enabled locally (just in case)
       setLS('REPEAT:enabled', '1');
-      // soft reload to clear form quickly
-      setTimeout(function(){
-        try {
-          const base = location.pathname + '?use_receipts=1';
-          location.replace(base);
-        } catch(_){ location.reload(); }
-      }, 120);
+      // clear state and refresh table fragment without page reload
+      try {
+        document.getElementById('scrapeUrlInput') && (document.getElementById('scrapeUrlInput').value = '');
+        document.getElementById('markInput') && (document.getElementById('markInput').value = '');
+      } catch(_) {}
+      try {
+        if (typeof partiallyReloadInvoiceTable === 'function') {
+          await partiallyReloadInvoiceTable();
+        }
+      } catch(_) {}
     } catch(err){
       console.warn('[RC-AUTOCONFIRM] failed', err);
       // allow another attempt
@@ -11063,6 +11391,9 @@ document.addEventListener('click', function(e){
         hiddenUrl.value = '';
         hiddenUrl.removeAttribute('data-mark');
       }
+    } catch (_) {}
+    try {
+      removeForceEditParamFromUrl();
     } catch (_) {}
   }
 
@@ -11322,52 +11653,101 @@ document.addEventListener('click', function(e){
 </script>
 
 <script>
-// TEMP DEBUG: log MTYPE values when user changes selects or submits the form
-;(function(){
-  try {
-    const logState = (ctx) => {
-      try {
-        const legacy = (function(){ try { return JSON.parse(document.getElementById('summaryJsonInput')?.value || '{}'); } catch(_) { return document.getElementById('summaryJsonInput')?.value || null; } })();
-        const comp = (function(){ try { return JSON.parse(document.getElementById('summaryDataInput')?.value || '{}'); } catch(_) { return document.getElementById('summaryDataInput')?.value || null; } })();
-        console.info('[RC-DEBUG]', ctx, 'legacy.mtype=', legacy && (legacy.mtype||legacy.receipt_mtype||legacy.invoice_mtype), 'comp.mtype=', comp && (comp.mtype||comp.receipt_mtype||comp.invoice_mtype));
-      } catch(e){ console.warn('[RC-DEBUG] logState error', e); }
-    };
-
-    document.addEventListener('change', function(e){
-      const sel = e.target;
-      if (!sel) return;
-      if (sel.id === 'receiptMtypeSelectSummary' || sel.id === 'invoiceMtypeSelect' || sel.name === 'receipt_mtype' || sel.name === 'invoice_mtype' || (sel.tagName === 'SELECT' && sel.classList && sel.classList.contains('line-mtype'))) {
-        // Ensure visible MTYPE selects immediately update both hidden inputs
-        try { if (typeof updateSummaryFromDom === 'function') updateSummaryFromDom(); } catch(_) {}
-        setTimeout(()=> logState('select-change:'+ (sel.id||sel.name)), 0);
-      }
-    }, true);
-
-    const form = document.getElementById('saveSummaryForm');
-    if (form) {
-      form.addEventListener('submit', function(e){
-        logState('form-submit-before');
-        setTimeout(()=> logState('form-submit-after-async'), 200);
-      }, true);
-    }
-  } catch(e) { console.warn('RC-DEBUG init failed', e); }
-})();
-
-// post-initialization guard: always respect LS value for repeat switch
+// Final safety net: keep saveSummaryForm on AJAX + partial refresh and avoid native full reload.
 (function(){
-  function enforceRepeatFromLS(){
+  if (window.__RC_SAVE_NATIVE_BLOCKER_BOUND) return;
+  window.__RC_SAVE_NATIVE_BLOCKER_BOUND = true;
+
+  // Intercept programmatic native submit() calls for this specific form.
+  try {
+    if (!window.__RC_SAVE_SUBMIT_PATCHED && window.HTMLFormElement && window.HTMLFormElement.prototype) {
+      const nativeSubmit = window.HTMLFormElement.prototype.submit;
+      window.HTMLFormElement.prototype.submit = function(){
+        try {
+          if (this && this.id === 'saveSummaryForm') {
+            if (typeof this.requestSubmit === 'function') this.requestSubmit();
+            else this.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+            return;
+          }
+        } catch (_) {}
+        return nativeSubmit.apply(this, arguments);
+      };
+      window.__RC_SAVE_SUBMIT_PATCHED = true;
+    }
+  } catch (_) {}
+
+  document.addEventListener('submit', async function(e){
+    const form = e && e.target && e.target.id === 'saveSummaryForm' ? e.target : null;
+    if (!form || e.defaultPrevented || window.__RC_FORCE_AJAX_SAVE_IN_PROGRESS) return;
+
+    e.preventDefault();
+    window.__RC_FORCE_AJAX_SAVE_IN_PROGRESS = true;
     try {
-      const val = localStorage.getItem('REPEAT:enabled');
-      if (val === '1') {
-        const sw = document.getElementById('repeatEntrySwitch');
-        if (sw && !sw.checked) {
-          console.debug('[RC-DEBUG] enforceRepeatFromLS: setting switch ON');
-          sw.checked = true;
-          try { sw.dispatchEvent(new Event('change',{bubbles:true})); } catch(_){ }
-        }
+      window.__RC_SUPPRESS_SUMMARY_MODAL = true;
+      window.__RC_SUPPRESS_SUMMARY_MODAL_UNTIL = Date.now() + 5000;
+    } catch(_) {}
+    try {
+      const fd = new FormData(form);
+      fd.set('ajax', '1');
+
+      const res = await fetch(form.getAttribute('action') || '/save_summary', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        body: fd,
+      });
+      const j = await res.json().catch(() => null);
+
+      if (!res.ok || (j && j.ok === false)) {
+        const msg = (j && (j.error || j.message)) ? (j.error || j.message) : ('Αποτυχία αποθήκευσης (HTTP ' + res.status + ')');
+        if (typeof showFlash === 'function') showFlash(String(msg), 'error', 5000);
+        return;
       }
-    } catch(e){ console.warn('[RC-DEBUG] enforceRepeatFromLS failed', e); }
-  }
-  document.addEventListener('DOMContentLoaded', enforceRepeatFromLS);
-  setTimeout(enforceRepeatFromLS, 400);
+
+      try { if (typeof hideSummaryModal === 'function') hideSummaryModal(); } catch(_) {}
+      try {
+        const s1 = document.getElementById('summaryJsonInput');
+        if (s1) s1.value = '{}';
+        const s2 = document.getElementById('summaryDataInput');
+        if (s2) s2.value = '{}';
+        window._lastSummaryObj = {};
+        window.__RC_LAST_SUMMARY = {};
+        window.__RC_SERVER_MODAL_SUMMARY = null;
+      } catch(_) {}
+
+      try {
+        if (typeof partiallyReloadInvoiceTable === 'function') {
+          await partiallyReloadInvoiceTable();
+        }
+      } catch(_) {}
+
+      if (typeof showFlash === 'function') {
+        showFlash(String((j && j.message) || 'Η αποθήκευση ολοκληρώθηκε.'), 'success', 2800);
+      }
+
+      // Clear search input + cache after successful save
+      try { if (typeof clearSearchInputs === 'function') clearSearchInputs(); } catch(_) {}
+      try { if (typeof clearReceiptSearchCacheOnClose === 'function') clearReceiptSearchCacheOnClose(); } catch(_) {}
+      try { window.__RC_CLEAR_MARK_AFTER_SAVE = true; } catch(_) {}
+      // second pass to catch any late autofill that runs after save
+      setTimeout(() => { try { if (typeof clearSearchInputs === 'function') clearSearchInputs(); } catch(_) {} }, 120);
+
+      setTimeout(function(){
+        try {
+          if (window.__RC_SUPPRESS_SUMMARY_MODAL_UNTIL && Date.now() < window.__RC_SUPPRESS_SUMMARY_MODAL_UNTIL) return;
+          window.__RC_SUPPRESS_SUMMARY_MODAL = false;
+        } catch(_) {}
+      }, 5200);
+    } catch (err) {
+      try {
+        window.__RC_SUPPRESS_SUMMARY_MODAL = false;
+        window.__RC_SUPPRESS_SUMMARY_MODAL_UNTIL = 0;
+      } catch(_) {}
+      if (typeof showFlash === 'function') showFlash('Σφάλμα δικτύου κατά την αποθήκευση.', 'error', 5000);
+      console.warn('forced ajax save fallback failed', err);
+    } finally {
+      window.__RC_FORCE_AJAX_SAVE_IN_PROGRESS = false;
+    }
+  }, false);
 })();
+</script>

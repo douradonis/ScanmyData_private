@@ -57,7 +57,7 @@
                 <form method="POST" action="{{ url_for('save_summary') }}" id="saveSummaryForm">
                     <input type="hidden" name="summary_json" id="summaryJsonInput" value='{{ modal_summary | tojson | safe if modal_summary else "{}" }}'>
                     <input type="hidden" id="summaryDataInput" name="summary_data" value='{}'>
-                    <button type="submit" class="bg-sky-600 text-white px-3 py-2 rounded">Αποθήκευση στο Cache</button>
+                    <button type="submit" id="saveSummaryBtn" class="bg-sky-600 text-white px-3 py-2 rounded">Αποθήκευση στο Cache</button>
                     <input type="hidden" id="scrapeUrlField" name="scrape_url" value="">
                     <input type="hidden" id="scrapeCategoryField" name="scrape_category" value="">
                     <input type="hidden" id="scrapeForceField" name="scrape_force" value="false">
@@ -68,4 +68,137 @@
 
     </div>
 </div>
+
+<script>
+(function(){
+    if (window.__RC_EARLY_MODAL_AJAX_SAVE_BOUND) return;
+    window.__RC_EARLY_MODAL_AJAX_SAVE_BOUND = true;
+
+    let inFlight = false;
+
+    async function forceAjaxSave(form){
+        if (!form || inFlight) return;
+        inFlight = true;
+        try {
+            // Prevent modal watchers from re-opening summary while save is in progress.
+            window.__RC_SUPPRESS_SUMMARY_MODAL = true;
+            window.__RC_SUPPRESS_SUMMARY_MODAL_UNTIL = Date.now() + 5000;
+        } catch(_) {}
+        try {
+            const fd = new FormData(form);
+            fd.set('ajax', '1');
+
+            const res = await fetch(form.getAttribute('action') || '/save_summary', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'X-Requested-With': 'XMLHttpRequest' },
+                body: fd,
+            });
+            const j = await res.json().catch(() => null);
+            if (!res.ok || (j && j.ok === false)) {
+                const msg = (j && (j.error || j.message)) ? (j.error || j.message) : ('Αποτυχία αποθήκευσης (HTTP ' + res.status + ')');
+                if (typeof showFlash === 'function') showFlash(String(msg), 'error', 5000);
+                return;
+            }
+
+            try {
+                const modal = document.getElementById('summaryModal');
+                if (modal) modal.style.display = 'none';
+            } catch(_) {}
+
+            try {
+                const s1 = document.getElementById('summaryJsonInput');
+                if (s1) s1.value = '{}';
+                const s2 = document.getElementById('summaryDataInput');
+                if (s2) s2.value = '{}';
+                window._lastSummaryObj = {};
+                window.__RC_LAST_SUMMARY = {};
+                window.__RC_SERVER_MODAL_SUMMARY = null;
+            } catch(_) {}
+
+            try {
+                let reloaded = false;
+                if (typeof partiallyReloadInvoiceTable === 'function') {
+                    reloaded = !!(await partiallyReloadInvoiceTable());
+                }
+                if (!reloaded) {
+                    const tableRes = await fetch('/list/fragment', { method: 'GET', credentials: 'same-origin' });
+                    if (tableRes.ok) {
+                        const data = await tableRes.json().catch(() => null);
+                        const container = document.getElementById('summary-container');
+                        if (data && data.ok && data.table_html && container) {
+                            container.innerHTML = data.table_html;
+                            if (typeof window.FBP_INIT_TABULATOR === 'function') window.FBP_INIT_TABULATOR();
+                            else if (typeof window.FBP_INIT_TABLE === 'function') window.FBP_INIT_TABLE();
+                        }
+                    }
+                }
+            } catch(_) {}
+
+            if (typeof showFlash === 'function') {
+                showFlash(String((j && j.message) || 'Η αποθήκευση ολοκληρώθηκε.'), 'success', 3000);
+            }
+
+            // Keep suppression briefly after success to avoid accidental second modal.
+            setTimeout(function(){
+                try {
+                    if (window.__RC_SUPPRESS_SUMMARY_MODAL_UNTIL && Date.now() < window.__RC_SUPPRESS_SUMMARY_MODAL_UNTIL) return;
+                    window.__RC_SUPPRESS_SUMMARY_MODAL = false;
+                } catch(_) {}
+            }, 5200);
+
+            // Clear search input + cache after successful save
+            try { if (typeof clearSearchInputs === 'function') clearSearchInputs(); } catch(_) {}
+            try { if (typeof clearReceiptSearchCacheOnClose === 'function') clearReceiptSearchCacheOnClose(); } catch(_) {}
+            try { window.__RC_CLEAR_MARK_AFTER_SAVE = true; } catch(_) {}
+            // second pass to catch any late autofill that runs after save
+            setTimeout(() => { try { if (typeof clearSearchInputs === 'function') clearSearchInputs(); } catch(_) {} }, 120);
+        } catch (err) {
+            try {
+                window.__RC_SUPPRESS_SUMMARY_MODAL = false;
+                window.__RC_SUPPRESS_SUMMARY_MODAL_UNTIL = 0;
+            } catch(_) {}
+            if (typeof showFlash === 'function') showFlash('Σφάλμα δικτύου κατά την αποθήκευση.', 'error', 5000);
+            try { console.warn('early modal ajax save failed', err); } catch(_) {}
+        } finally {
+            inFlight = false;
+        }
+    }
+
+    try {
+        if (!window.__RC_EARLY_MODAL_SUBMIT_PATCHED && window.HTMLFormElement && window.HTMLFormElement.prototype) {
+            const nativeSubmit = window.HTMLFormElement.prototype.submit;
+            window.HTMLFormElement.prototype.submit = function(){
+                try {
+                    if (this && this.id === 'saveSummaryForm') {
+                        if (typeof this.requestSubmit === 'function') this.requestSubmit();
+                        else this.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+                        return;
+                    }
+                } catch(_) {}
+                return nativeSubmit.apply(this, arguments);
+            };
+            window.__RC_EARLY_MODAL_SUBMIT_PATCHED = true;
+        }
+    } catch(_) {}
+
+    document.addEventListener('click', function(e){
+        const trigger = e.target && e.target.closest ? e.target.closest('#saveSummaryBtn, #saveSummaryForm button[type="submit"]') : null;
+        if (!trigger) return;
+        const form = document.getElementById('saveSummaryForm');
+        if (!form) return;
+        e.preventDefault();
+        e.stopPropagation();
+        void forceAjaxSave(form);
+    }, true);
+
+    document.addEventListener('submit', function(e){
+        const form = e && e.target && e.target.id === 'saveSummaryForm' ? e.target : null;
+        if (!form) return;
+        e.preventDefault();
+        e.stopPropagation();
+        void forceAjaxSave(form);
+    }, true);
+})();
+</script>
 

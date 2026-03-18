@@ -56,7 +56,7 @@
     if (!form || !mark) return false;
     mark.value = u;
     if (typeof form.requestSubmit === 'function') form.requestSubmit();
-    else form.submit();
+    else form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     return true;
   }
 

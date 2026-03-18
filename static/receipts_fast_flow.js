@@ -252,8 +252,12 @@
       showFlash('✓ Αποθηκεύτηκε η απόδειξη', 'success', 2500);
       hideModal();
 
-      // Optionally reload to show new entry in table
-      setTimeout(() => location.reload(), 800);
+      // Refresh table fragment without full page reload.
+      if (typeof window.partiallyReloadInvoiceTable === 'function') {
+        setTimeout(() => {
+          try { window.partiallyReloadInvoiceTable(); } catch(_) {}
+        }, 120);
+      }
 
       return true;
     } catch (err) {

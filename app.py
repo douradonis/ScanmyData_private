@@ -8562,6 +8562,13 @@ def search():
     modal_warning = None
     fiscal_mismatch_block = False
     scrape_url_is_receipt = False
+    classified_flag = False
+    classified_message = ""
+    is_ajax_search = (
+        (request.headers.get("X-Requested-With", "").lower() == "xmlhttprequest")
+        or (request.args.get("ajax") == "1")
+        or (request.form.get("ajax") == "1")
+    )
 
     # active year for template (used by receipts fiscal check)
     try:
@@ -8985,10 +8992,11 @@ def search():
             docs_for_mark = [d for d in cache if str(d.get("mark", "")).strip() == mark]
 
             # flag for already classified docs
-            classified_flag = False
             classified_docs = [d for d in docs_for_mark if str(d.get("classification", "")).strip().lower() == "χαρακτηρισμενο"]
             if classified_docs:
-                flash(f"Το MARK {mark} είναι ήδη χαρακτηρισμένο στο invoices.json.", "warning")
+                classified_message = f"Το MARK {mark} είναι ήδη χαρακτηρισμένο στο invoices.json."
+                if not is_ajax_search:
+                    flash(classified_message, "warning")
                 classified_flag = True
 
             # check duplicate in excel
@@ -9026,7 +9034,11 @@ def search():
             if not docs_for_mark:
                 # ΜΗ βγάζεις error αν υπάρχει modal_warning — αφήνουμε το warning modal να εμφανιστεί
                 if not modal_warning:
-                    flash(f"MARK {mark} όχι στην cache του πελάτη {vat}. Κάνε πρώτα Fetch.", "error")
+                    not_found_msg = f"MARK {mark} όχι στην cache του πελάτη {vat}. Κάνε πρώτα Fetch."
+                    if is_ajax_search:
+                        error = not_found_msg
+                    else:
+                        flash(not_found_msg, "error")
             else:
                 if not classified_flag:
                     try:
@@ -9583,6 +9595,25 @@ def search():
         allow_edit_existing=allow_edit_existing,
         force_edit_active=force_edit_active,
     )
+
+    if is_ajax_search and (request.method == "POST" or emulate_post):
+        return jsonify({
+            "ok": not bool(error),
+            "error": error,
+            "mark": mark,
+            "modal_summary": modal_summary,
+            "modal_warning": modal_warning,
+            "classified": bool(classified_flag),
+            "classified_message": classified_message,
+            "allow_edit_existing": bool(allow_edit_existing),
+            "customer_categories": customer_categories or [],
+            "customer_category_labels": customer_category_labels or {},
+            "category_vat_constraints": customer_vat_constraints or {},
+            "fiscal_mismatch_block": bool(fiscal_mismatch_block),
+            "scrape_url_is_receipt": bool(scrape_url_is_receipt),
+            "receipt_custom_categories": receipt_custom_categories or [],
+            "has_receipt_custom_categories": bool(has_receipt_custom_categories),
+        }), (400 if error else 200)
 
     return safe_render(
         "search.html",
@@ -10582,6 +10613,25 @@ def save_summary():
     """
     import os, json, re
 
+    is_ajax_save = (
+        request.is_json
+        or (request.headers.get("X-Requested-With", "").lower() == "xmlhttprequest")
+        or (request.args.get("ajax") == "1")
+        or (request.form.get("ajax") == "1")
+    )
+
+    def _save_summary_response(ok=True, message=None, error=None, status=200, **extra):
+        if is_ajax_save:
+            payload = {"ok": bool(ok)}
+            if message:
+                payload["message"] = message
+            if error:
+                payload["error"] = error
+            if extra:
+                payload.update(extra)
+            return jsonify(payload), status
+        return redirect(url_for("search"))
+
     _signal_remote_processing_start()
 
     @after_this_request
@@ -10951,8 +11001,9 @@ def save_summary():
                 pass
     except Exception:
         log.exception("save_summary: cannot parse payload")
-        flash("Μη έγκυρα δεδομένα περίληψης", "error")
-        return redirect(url_for("search"))
+        if not is_ajax_save:
+            flash("Μη έγκυρα δεδομένα περίληψης", "error")
+        return _save_summary_response(ok=False, error="Μη έγκυρα δεδομένα περίληψης", status=400)
 
     # Normalize possible camelCase keys produced by the component UI so the
     # server consistently finds `receipt_mtype` / `invoice_mtype` / `mtype`.
@@ -10973,8 +11024,9 @@ def save_summary():
     vat = (active.get("vat") if active else None) or summary.get("AFM") or summary.get("AFM_issuer") or summary.get("AFM")
     if not vat:
         log.error("save_summary: missing vat - active=%s summary_afm=%s", bool(active), summary.get("AFM"))
-        flash("Δεν έχει επιλεγεί ενεργός πελάτης (ΑΦΜ)", "error")
-        return redirect(url_for("search"))
+        if not is_ajax_save:
+            flash("Δεν έχει επιλεγεί ενεργός πελάτης (ΑΦΜ)", "error")
+        return _save_summary_response(ok=False, error="Δεν έχει επιλεγεί ενεργός πελάτης (ΑΦΜ)", status=400)
     
     # If active credential is not set (or missing book_category), try to load from vat
     if not active or not active.get("book_category"):
@@ -11191,18 +11243,18 @@ def save_summary():
     try:
         if not _meaningful_summary(summary):
             log.info("save_summary: blocked empty/invalid summary (no 15-digit MARK or no meaningful lines/totals)")
-            if request.is_json:
+            if is_ajax_save:
                 return jsonify({"ok": False, "error": "Empty or invalid summary"}), 400
             try:
                 flash("Δεν υπάρχουν δεδομένα για αποθήκευση.", "error")
             except Exception:
                 pass
-            return redirect(url_for("search"))
+            return _save_summary_response(ok=False, error="Δεν υπάρχουν δεδομένα για αποθήκευση.", status=400)
     except Exception:
         log.exception("save_summary: validation failed")
-        if request.is_json:
+        if is_ajax_save:
             return jsonify({"ok": False, "error": "Validation error"}), 400
-        return redirect(url_for("search"))
+        return _save_summary_response(ok=False, error="Validation error", status=400)
 
     # ---------------- best-effort append στο per-customer JSON ----------------
     try:
@@ -11367,19 +11419,24 @@ def save_summary():
                     log.exception("save_summary: ensure/create excel failed")
 
                 if mirror_created:
-                    flash("Ενημερώθηκε το epsilon και δημιουργήθηκε ταμειακή εγγραφή.", "success")
+                    msg = "Ενημερώθηκε το epsilon και δημιουργήθηκε ταμειακή εγγραφή."
                 elif mirror_removed:
-                    flash("Ενημερώθηκε το epsilon και αφαιρέθηκε παλιά ταμειακή εγγραφή.", "success")
+                    msg = "Ενημερώθηκε το epsilon και αφαιρέθηκε παλιά ταμειακή εγγραφή."
                 else:
-                    flash("Ενημερώθηκε ο χαρακτηρισμός στο cache (epsilon).", "success")
-                return redirect(url_for("search"))
+                    msg = "Ενημερώθηκε ο χαρακτηρισμός στο cache (epsilon)."
+                if not is_ajax_save:
+                    flash(msg, "success")
+                return _save_summary_response(ok=True, message=msg)
             else:
-                flash("Δεν υπήρξε αλλαγή στις κατηγορίες.", "info")
-                return redirect(url_for("search"))
+                msg = "Δεν υπήρξε αλλαγή στις κατηγορίες."
+                if not is_ajax_save:
+                    flash(msg, "info")
+                return _save_summary_response(ok=True, message=msg)
         except Exception:
             log.exception("save_summary: error processing existing detailed epsilon entry")
-            flash("Σφάλμα διακομιστή κατά την επεξεργασία ενημέρωσης", "error")
-            return redirect(url_for("search"))
+            if not is_ajax_save:
+                flash("Σφάλμα διακομιστή κατά την επεξεργασία ενημέρωσης", "error")
+            return _save_summary_response(ok=False, error="Σφάλμα διακομιστή κατά την επεξεργασία ενημέρωσης", status=500)
 
     # ---------------- create/write excel + append epsilon entry ----------------
     excel_path = excel_path_for(vat=vat)
@@ -11554,14 +11611,16 @@ def save_summary():
                 "save_summary: skip epsilon append due to empty payload (mk_ok=%s, has_lines=%s, receipt_header_ok=%s, is_receipt=%s)",
                 _mk_ok, _has_lines, _receipt_header_ok, is_receipt
             )
-            return redirect(url_for("search"))
+            return _save_summary_response(ok=True, message="Δεν υπήρχαν επαρκή δεδομένα για νέα εγγραφή epsilon.")
 
         try:
             epsilon_cache.append(epsilon_entry)
             _maybe_append_cash_mirror(epsilon_cache, epsilon_entry, mark)
             
             _safe_save_epsilon_cache(vat, epsilon_cache)
-            flash("Η περίληψη αποθηκεύτηκε και προστέθηκε νέα εγγραφή epsilon.", "success")
+            msg = "Η περίληψη αποθηκεύτηκε και προστέθηκε νέα εγγραφή epsilon."
+            if not is_ajax_save:
+                flash(msg, "success")
             try:
                 from utils import log_user_activity
                 from flask_login import current_user
@@ -11584,12 +11643,16 @@ def save_summary():
                 log.exception("save_summary: failed to log activity")
         except Exception:
             log.exception("save_summary: failed saving new epsilon cache")
-            flash("Αποτυχία ενημέρωσης cache epsilon (δείτε τα logs του διακομιστή)", "error")
+            if not is_ajax_save:
+                flash("Αποτυχία ενημέρωσης cache epsilon (δείτε τα logs του διακομιστή)", "error")
+            return _save_summary_response(ok=False, error="Αποτυχία ενημέρωσης cache epsilon", status=500)
     except Exception:
         log.exception("save_summary: failed building/appending epsilon entry")
-        flash("Αποτυχία ενημέρωσης cache epsilon", "error")
+        if not is_ajax_save:
+            flash("Αποτυχία ενημέρωσης cache epsilon", "error")
+        return _save_summary_response(ok=False, error="Αποτυχία ενημέρωσης cache epsilon", status=500)
 
-    return redirect(url_for("search"))
+    return _save_summary_response(ok=True, message=msg if 'msg' in locals() else "Η αποθήκευση ολοκληρώθηκε.")
 # --- END PATCH v3 ---
 
 
@@ -14126,6 +14189,12 @@ def delete_invoices():
     except Exception:
         pass
 
+    is_ajax_request = (
+        (request.headers.get("X-Requested-With", "").lower() == "xmlhttprequest")
+        or (request.args.get("ajax") == "1")
+        or (request.form.get("ajax") == "1")
+    )
+
     # collect and normalize marks (primary)
     marks_to_delete = request.form.getlist("delete_mark") or []
     # fallback: maybe frontend sent JSON or comma-separated
@@ -14147,7 +14216,10 @@ def delete_invoices():
     log.info("delete_invoices: marks_to_delete resolved = %s", marks_to_delete)
 
     if not marks_to_delete:
-        flash("Δεν επιλέχθηκε κανένα MARK για διαγραφή.", "error")
+        msg = "Δεν επιλέχθηκε κανένα MARK για διαγραφή."
+        if is_ajax_request:
+            return jsonify({"ok": False, "error": msg}), 400
+        flash(msg, "error")
         return redirect(url_for("search"))
 
     # determine active customer's excel file
@@ -14300,7 +14372,8 @@ def delete_invoices():
 
     # Final summary
     total_requested = len(marks_to_delete)
-    flash(f"Διαγράφηκαν {total_requested} επιλεγμένα mark(s). Αφαιρέθηκαν από Excel: {deleted_from_excel}, από Epsilon cache: {deleted_from_epsilon}", "success")
+    summary_msg = f"Διαγράφηκαν {total_requested} επιλεγμένα mark(s). Αφαιρέθηκαν από Excel: {deleted_from_excel}, από Epsilon cache: {deleted_from_epsilon}"
+    flash(summary_msg, "success")
     log.info("delete_invoices: finished request. requested=%d excel=%d epsilon=%d", total_requested, deleted_from_excel, deleted_from_epsilon)
 
     # Log deletion with enhanced details
@@ -14326,6 +14399,16 @@ def delete_invoices():
         )
     except Exception as e:
         log.error(f"Failed to log delete activity: {e}")
+
+    if is_ajax_request:
+        return jsonify({
+            "ok": True,
+            "message": summary_msg,
+            "requested": total_requested,
+            "deleted_from_excel": deleted_from_excel,
+            "deleted_from_epsilon": deleted_from_epsilon,
+            "marks": marks_to_delete,
+        }), 200
 
     return redirect(url_for("search"))
 

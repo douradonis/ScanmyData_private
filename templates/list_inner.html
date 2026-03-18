@@ -901,7 +901,7 @@ document.addEventListener('click', function(e){
       }
 
       // override τυχόν προηγούμενα handlers για να μη διπλοστέλνει
-      confirmBtn.onclick = ()=>{
+      confirmBtn.onclick = async ()=>{
         // Re-collect marks at confirmation time (in case selection changed)
         const tdelete = collectCheckedMarks() || [];
         if(!tdelete.length){
@@ -917,37 +917,80 @@ document.addEventListener('click', function(e){
         confirmBtn.disabled = true;
         if (spinner) spinner.classList.remove('hidden');
 
-        const form = document.createElement('form');
-        form.method = 'POST';
-        form.action = (window.DELETE_ENDPOINT || "{{ url_for('delete_invoices') }}");
+        try{
+          const endpoint = (window.DELETE_ENDPOINT || "{{ url_for('delete_invoices') }}");
+          const body = new URLSearchParams();
 
-        // CSRF αν υπάρχει
-        const existingCsrf = document.querySelector('input[name="csrf_token"]'); 
-        if(existingCsrf){
-          const t = document.createElement('input');
-          t.type  = 'hidden';
-          t.name  = 'csrf_token';
-          t.value = existingCsrf.value;
-          form.appendChild(t);
+          const existingCsrf = document.querySelector('input[name="csrf_token"]');
+          if (existingCsrf && existingCsrf.value) {
+            body.append('csrf_token', existingCsrf.value);
+          }
+
+          tdelete.forEach(v => {
+            body.append('delete_mark', v);
+            body.append('delete_mark[]', v);
+          });
+          body.append('delete_mark_json', JSON.stringify(tdelete));
+          body.append('delete_marks_json', JSON.stringify(tdelete));
+          body.append('delete_marks', tdelete.join(','));
+          body.append('marks', tdelete.join(','));
+          body.append('client_submitted_marks', JSON.stringify(tdelete));
+          body.append('ajax', '1');
+
+          const res = await fetch(endpoint, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+              'X-Requested-With': 'XMLHttpRequest'
+            },
+            body: body.toString()
+          });
+
+          const payload = await res.json().catch(() => null);
+          if(!res.ok || !payload || payload.ok === false){
+            const msg = (payload && (payload.error || payload.message)) ? (payload.error || payload.message) : ('Αποτυχία διαγραφής (HTTP ' + res.status + ')');
+            if (typeof showFlash === 'function') showFlash(msg, 'error', 5000);
+            else if (typeof showModalAlert === 'function') await showModalAlert('Σφάλμα', msg);
+            return;
+          }
+
+          const frag = await fetch('/list/fragment', { method: 'GET', credentials: 'same-origin' });
+          if (frag.ok) {
+            const j = await frag.json().catch(() => null);
+            if (j && j.ok && j.table_html) {
+              const container = document.getElementById('summary-container');
+              if (container) {
+                container.innerHTML = j.table_html;
+                setTimeout(() => {
+                  try {
+                    if (typeof window.FBP_INIT_TABULATOR === 'function') window.FBP_INIT_TABULATOR();
+                    else if (typeof window.FBP_REINIT === 'function') window.FBP_REINIT();
+                  } catch(_){ }
+                }, 40);
+              }
+            }
+          }
+
+          if(window.FBP_DELETE && typeof window.FBP_DELETE.closeModal === 'function'){
+            window.FBP_DELETE.closeModal();
+          } else if(modal){
+            modal.style.display='none';
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+          }
+
+          const okMsg = payload.message || 'Οι επιλεγμένες εγγραφές διαγράφηκαν.';
+          if (typeof showFlash === 'function') showFlash(okMsg, 'success', 3000);
+        } catch(err){
+          console.warn('delete ajax failed', err);
+          const msg = 'Σφάλμα δικτύου κατά τη διαγραφή.';
+          if (typeof showFlash === 'function') showFlash(msg, 'error', 5000);
+          else if (typeof showModalAlert === 'function') await showModalAlert('Σφάλμα', msg);
+        } finally {
+          confirmBtn.disabled = false;
+          if (spinner) spinner.classList.add('hidden');
         }
-
-        // Προσθέτουμε ΟΛΑ τα IDs με τρεις safe τρόπους
-        tdelete.forEach(v=>{
-          const a = document.createElement('input'); a.type='hidden'; a.name='delete_mark';   a.value=v; form.appendChild(a);
-          const b = document.createElement('input'); b.type='hidden'; b.name='delete_mark[]'; b.value=v; form.appendChild(b);
-        });
-        // Provide multiple fallback payloads so server-side handlers accept the data
-        const blobA = document.createElement('input'); blobA.type='hidden'; blobA.name='delete_mark_json'; blobA.value = JSON.stringify(tdelete); form.appendChild(blobA);
-        const blobB = document.createElement('input'); blobB.type='hidden'; blobB.name='delete_marks_json'; blobB.value = JSON.stringify(tdelete); form.appendChild(blobB);
-        const blobC = document.createElement('input'); blobC.type='hidden'; blobC.name='delete_marks'; blobC.value = tdelete.join(','); form.appendChild(blobC);
-        const blobD = document.createElement('input'); blobD.type='hidden'; blobD.name='marks'; blobD.value = tdelete.join(','); form.appendChild(blobD);
-        // Debug field: server logs will include this exact JSON payload
-        const dbg = document.createElement('input'); dbg.type='hidden'; dbg.name='client_submitted_marks'; dbg.value = JSON.stringify(tdelete); form.appendChild(dbg);
-        // Log to console for developer visibility before submit
-        try{ console.info('delete submit, client marks=', JSON.stringify(tdelete)); }catch(_){ }
-
-        document.body.appendChild(form);
-        form.submit();
       };
     });
 
@@ -968,114 +1011,19 @@ document.addEventListener('click', function(e){
 
 
 <script>
-// ======= Μόνιμη αποθήκευση page length + Δυναμικά σύνολα =======
+// Απλή και ασφαλής αποθήκευση της επιλογής "Εγγραφές/σελίδα".
 (function(){
-  const $ = window.jQuery;
-  function pickTable(){
-    let $t = $('.summary-table:visible').first();
-    if(!$t.length) $t = $('table.dataTable:visible').first();
-    if(!$t.length) $t = $('table:visible').first();
-    return $t;
-  }
-
-  function parseNum(v){
-    if (v == null) return 0;
-    if (typeof v === 'number') return v;
-    v = String(v)
-        .replace(/\s+/g,'')
-        .replace(/[€%]/g,'')
-        .replace(/\./g,'')   // χιλιάδες
-        .replace(/,/g,'.');  // δεκαδικά
-    const n = parseFloat(v);
-    return isNaN(n) ? 0 : n;
-  }
-
-  function ensureFooter($t){
-    if ($t.find('tfoot').length) return;
-    const colCount = $t.find('thead th').length || 0;
-    if (!colCount) return;
-    const $tfoot = $('<tfoot><tr></tr></tfoot>');
-    for(let i=0;i<colCount;i++){
-      $tfoot.find('tr').append('<th></th>');
-    }
-    $t.append($tfoot);
-    $t.addClass('has-tfoot');
-  }
-
-  function updateTotals($t){
-    try{
-      if (!$.fn || !$.fn.dataTable) return;
-      const dt = $t.DataTable();
-      const tr = ensureFooter(table);
-      const tds = tr.querySelectorAll('td');
-
-      // If DataTables is present, we may have computed totals using visible
-      // column order (colReorder). Populate both the raw tfoot (DOM order)
-      // and the DataTables cloned scrollFoot (visible order) so alignment
-      // and the pseudo-element 'ΣΥΝΟΛΑ' work correctly.
-      if ($ && $.fn && $.fn.dataTable && $.fn.dataTable.isDataTable(table)){
-        try{
-          const $tbl = $(table);
-          const dt = $tbl.DataTable();
-
-          // Visible headers (current order)
-          const visHeaders = dt.columns().header().toArray().map(h => greekNorm((h.innerText||h.textContent||'')));
-
-          function findVisIdx(keys){
-            for(let i=0;i<visHeaders.length;i++){
-              for(let k=0;k<keys.length;k++) if(visHeaders[i].includes(greekNorm(keys[k]))) return i;
-            }
-            return -1;
-          }
-
-          const visNet = findVisIdx(['καθαρη αξια','καθαρη','καθαρή','net','netvalue','totalnet']);
-          const visVat = findVisIdx(['φπα','vat']);
-          const visTotal = findVisIdx(['συνολο','total','totalvalue','sum']);
-
-          // Update cloned footer cells (visible order)
-          const $wrap = $tbl.closest('.dataTables_wrapper');
-          const $clone = $wrap.find('.dataTables_scrollFoot table tfoot tr[data-totals="1"]');
-          if($clone.length){
-            const $cells = $clone.children();
-            if(visNet>=0) $cells.eq(visNet).text(formatGreekNumber(net));
-            if(visVat>=0) $cells.eq(visVat).text(formatGreekNumber(vat));
-            if(visTotal>=0) $cells.eq(visTotal).text(formatGreekNumber(total));
-          }
-
-          // Also update the raw tfoot by matching header texts in DOM order
-          const rawThs = Array.from(table.querySelectorAll('thead th')).map(h=>greekNorm(h.innerText||h.textContent||''));
-          function findRawIdx(keys){ for(let i=0;i<rawThs.length;i++){ for(let k=0;k<keys.length;k++) if(rawThs[i].includes(greekNorm(keys[k]))) return i; } return -1; }
-          const rawNet = findRawIdx(['καθαρη αξια','καθαρη','καθαρή','net','netvalue','totalnet']);
-          const rawVat = findRawIdx(['φπα','vat']);
-          const rawTotal = findRawIdx(['συνολο','total','totalvalue','sum']);
-          if(rawNet>=0 && tds[rawNet]) tds[rawNet].textContent = formatGreekNumber(net);
-          if(rawVat>=0 && tds[rawVat]) tds[rawVat].textContent = formatGreekNumber(vat);
-          if(rawTotal>=0 && tds[rawTotal]) tds[rawTotal].textContent = formatGreekNumber(total);
-
-          // Ensure the tr has the data-totals marker so CSS ::before shows 'ΣΥΝΟΛΑ'
-          tr.setAttribute('data-totals','1');
-
-          // sync widths as before
-          syncCloneFooter(table);
-          return;
-        }catch(_){ /* fall through to DOM-only path */ }
-      }
-
-      // Non-DataTables path (or fallback): place totals into raw tfoot cells
-      if (idxs.net  >= 0 && tds[idxs.net])   tds[idxs.net].textContent   = formatGreekNumber(net);
-      if (idxs.vat  >= 0 && tds[idxs.vat])   tds[idxs.vat].textContent   = formatGreekNumber(vat);
-      if (idxs.total>= 0 && tds[idxs.total]) tds[idxs.total].textContent = formatGreekNumber(total);
-
-      syncCloneFooter(table);
-        ensureFooter($t);
-        applySavedLen();
-        updateTotals($t);
-      });
-      $t.off('draw.dt._totals').on('draw.dt._totals', function(){ updateTotals($t); });
-      $t.off('length.dt._persist').on('length.dt._persist', function(e, settings, len){
-        try{ localStorage.setItem(LEN_KEY, String(len)); }catch(_){}
-      });
-    }
+  const KEY = 'fbp_tab_page_len';
+  document.addEventListener('DOMContentLoaded', function(){
+    const sel = document.getElementById('pageLengthSelect');
+    if(!sel) return;
+    try {
+      const saved = parseInt(localStorage.getItem(KEY) || '', 10);
+      if (Number.isFinite(saved) && saved > 0) sel.value = String(saved);
+    } catch(_) {}
+    sel.addEventListener('change', function(){
+      try { localStorage.setItem(KEY, String(parseInt(sel.value, 10) || 10)); } catch(_) {}
+    });
   });
 })();
 </script>

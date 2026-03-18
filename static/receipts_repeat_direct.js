@@ -355,7 +355,8 @@
     var input=$id('summaryJsonInput');
     if(form && input){
       input.value=JSON.stringify(s);
-      if(typeof form.requestSubmit==='function') form.requestSubmit(); else form.submit();
+      if(typeof form.requestSubmit==='function') form.requestSubmit();
+      else form.dispatchEvent(new Event('submit', { bubbles:true, cancelable:true }));
       return true;
     }
     return false;
@@ -410,9 +411,16 @@
       if (window.persistReceiptFlash) window.persistReceiptFlash(successMsg, 'success');
     }catch(_){ }
     try{
-      var url=location.pathname+'?use_receipts=1';
-      location.replace(url);
-    }catch(_){ location.reload(); }
+      var urlInput = $id('scrapeUrlInput');
+      if (urlInput) urlInput.value = '';
+      var markInput = $id('markInput');
+      if (markInput) markInput.value = '';
+      var modal = $id('summaryModal');
+      if (modal) modal.style.display = 'none';
+      if (typeof window.partiallyReloadInvoiceTable === 'function') {
+        Promise.resolve(window.partiallyReloadInvoiceTable()).catch(function(){});
+      }
+    }catch(_){ }
   }
   var trying=false;
   async function tryDirect(){

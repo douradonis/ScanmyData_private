@@ -130,8 +130,15 @@
     const form = byId('saveSummaryForm');
     if (!form) return false;
     autoSaveInProgress = true;
-    try { form.submit(); } catch(_) { autoSaveInProgress = false; return false; }
-    // do not reset the flag here; the page will reload
+    try {
+      if (typeof form.requestSubmit === 'function') {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    } catch(_) { autoSaveInProgress = false; return false; }
+    // release guard soon after submit pipeline starts
+    setTimeout(() => { autoSaveInProgress = false; }, 1200);
     return true;
   }
 
