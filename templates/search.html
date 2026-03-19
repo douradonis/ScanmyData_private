@@ -2124,7 +2124,13 @@ const SEARCH_BASE_URL = "{{ url_for('search') }}";
 const VAT = "{{ vat or '' }}"; // active vat from server
 const INITIAL_MARK = "{{ mark|e }}"; // αρχική τιμή mark (αν υπήρχε)
 const RC_CLEAR_FLAG_KEY = 'rc:clearSearchAfterReload';
-  window.__RC_CLEAR_MARK_AFTER_SAVE = false;
+
+// Persistent state used to control mark clearing and yellow box behavior.
+window.__RC_MARK_STATE = window.__RC_MARK_STATE || {
+  yellowBoxActive: false,
+  transactionInProgress: false,
+  storedYellowBoxMark: ''
+};
 
 function rcConsumeSearchClear(){
   try {
@@ -5454,6 +5460,8 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
     }
     const strong = banner.querySelector('strong');
     if (strong) strong.textContent = String(markText || '').trim();
+    // Store the mark value for later retrieval during confirmation
+    window.__RC_MARK_STATE.storedYellowBoxMark = String(markText || '').trim();
     banner.style.display = '';
     rcBindExistingBannerButtons();
     return banner;
@@ -5511,11 +5519,13 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
     if (form.dataset.invoiceSubmitting === '1') return;
 
     const typedMark = (document.getElementById('markInput')?.value || '').trim();
+    const markInput = document.getElementById('markInput');
     if (!typedMark) {
       if (typeof showFlash === 'function') showFlash('Συμπλήρωσε MARK ή URL.', 'error', 3500);
       return;
     }
 
+    window.__RC_MARK_STATE.transactionInProgress = true;
     form.dataset.invoiceSubmitting = '1';
     try {
       const payload = new FormData(form);
@@ -5538,16 +5548,13 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
       }
 
       const resolvedMark = String((j.mark || typedMark) || '').trim();
-      if (window.__RC_CLEAR_MARK_AFTER_SAVE) {
-        if (markInput) {
-          markInput.value = '';
-          try { markInput.dispatchEvent(new Event('input', { bubbles: true })); } catch(_){ }
-        }
-        window.__RC_CLEAR_MARK_AFTER_SAVE = false;
-      } else if (resolvedMark && markInput) {
+      // Don't clear the mark if the response doesn't provide a mark.
+      // Keep the user's input intact so they can retry.
+      if (resolvedMark && markInput) {
         markInput.value = resolvedMark;
         try { markInput.dispatchEvent(new Event('input', { bubbles: true })); } catch(_){ }
       }
+      window.__RC_MARK_STATE.transactionInProgress = false;
 
       try {
         if (Array.isArray(j.customer_categories)) {
@@ -5633,15 +5640,19 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
         if (typeof showFlash === 'function') showFlash('Δεν βρέθηκε παραστατικό για το MARK.', 'warning', 4000);
       }
     } catch (err) {
-      if (typeof showFlash === 'function') showFlash('Σφάλμα δικτύου κατά την αναζήτηση.', 'error', 5000);
+      // Ensure we allow future searches even if there was an error
+      window.__RC_MARK_STATE.transactionInProgress = false;
+      if (typeof showFlash === 'function') showFlash('Σφάλμα δικτύου κατά την αναζήτηση: ' + (err && err.message ? err.message : ''), 'error', 6000);
       console.warn('invoice search ajax failed', err);
     } finally {
       form.dataset.invoiceSubmitting = '';
+      window.__RC_MARK_STATE.transactionInProgress = false;
     }
   }
 
   async function rcHandleForceEditClick(){
-    const markValRaw = (document.getElementById('markInput')?.value || '{{ mark or "" }}').trim();
+    // Try to get mark from stored value (when yellow box is active), then from input, then from server template
+    let markValRaw = (window.__RC_MARK_STATE?.storedYellowBoxMark || document.getElementById('markInput')?.value || '{{ mark or "" }}').trim();
     const markVal = encodeURIComponent(markValRaw || '');
     if (!markVal){ await showModalAlert('Σφάλμα', 'Δεν δόθηκε MARK για επιβεβαίωση.'); return; }
     const b = document.getElementById('existingBanner');
@@ -6000,11 +6011,20 @@ document.addEventListener('DOMContentLoaded', function(){
       clearTimeout(t);
       t = setTimeout(()=>{
         try {
+          // If another module cleared the mark programmatically, do not restore it.
+          // This prevents race conditions where we clear, but the value comes back instantly.
+          if (window.__RC_MARK_CLEAR_REQUESTED) {
+            lastVal = '';
+            window.__RC_MARK_CLEAR_REQUESTED = false;
+            return;
+          }
+
           const v = (mi.value || '').trim();
           if (v === '' && (lastVal && lastVal.trim() !== '')) {
             try {
-              if (window.__RC_CLEAR_MARK_AFTER_SAVE) {
-                // Keep it cleared after save; do not restore from URL
+              // Never restore the mark if the yellow box is active
+              if (window.__RC_MARK_STATE?.yellowBoxActive) {
+                // Keep it cleared while yellow box is shown
                 lastVal = v;
                 return;
               }
@@ -7031,6 +7051,16 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
     try { hideSummaryModal(); } catch(_) {}
 
     // Καθαρίζει το search box & cache όπως γίνεται στην περίπτωση yellow banner "MARK exists"
+    // Skip clearing markInput if yellow box is active
+    if (!isYellowBoxScenario()) {
+      const markInput = document.getElementById('markInput');
+      if (markInput) {
+        markInput.value = '';
+        safeLog('markInput cleared after submit');
+      }
+    } else {
+      safeLog('markInput not cleared due to yellow box scenario');
+    }
     try { if (typeof clearSearchInputs === 'function') clearSearchInputs(); } catch(_) {}
     try { if (typeof clearReceiptSearchCacheOnClose === 'function') clearReceiptSearchCacheOnClose(); } catch(_) {}
 
@@ -7692,7 +7722,7 @@ function readMappingFromUI(){
     safeLog('Unhandled promise rejection', ev.reason);
   });
 
-  // Watch important DOM elements existence
+  // Watch important DOM elements existence + yellow box state
   function checkDom(){
     const names = [
       'markSearchForm','useReceiptsSwitch','scrapeUrlInput',
@@ -7705,6 +7735,15 @@ function readMappingFromUI(){
   }
   document.addEventListener('DOMContentLoaded', function(){ checkDom(); });
 
+  // Monitor yellow box state
+  setInterval(() => {
+    try {
+      const banner = document.getElementById('existingBanner');
+      const isYellowBoxVisible = !!(banner && banner.style.display !== 'none');
+      window.__RC_MARK_STATE.yellowBoxActive = isYellowBoxVisible;
+    } catch(_){}
+  }, 100);
+
   // Hook markSearchForm submit
   const msf = document.getElementById('markSearchForm');
   if(msf){
@@ -7712,6 +7751,7 @@ function readMappingFromUI(){
       try{
         const useReceipts = !!(document.getElementById('useReceiptsSwitch') && document.getElementById('useReceiptsSwitch').checked);
         safeLog('markSearchForm.submit fired', 'useReceipts=', useReceipts, 'mark=', (document.getElementById('markInput')?.value||''), 'urlInput=', (document.getElementById('scrapeUrlInput')?.value||''));
+        window.__RC_MARK_STATE.transactionInProgress = true;
       }catch(err){ safeLog('submit hook error', err); }
     }, true);
   } else safeLog('markSearchForm NOT FOUND');
@@ -11370,12 +11410,71 @@ document.addEventListener('click', function(e){
 <script>
 /* Reset & reload όταν εμφανίζονται warning modals στη σελίδα αναζήτησης */
 (function(){
-  function clearSearchInputs(){
+  // === NEW CLEARING SYSTEM: State-Based, Yellow-Box Aware ===
+  window.__RC_MARK_STATE = {
+    lastClearedMark: null,
+    yellowBoxActive: false,
+    transactionInProgress: false
+  };
+
+  function canClearMarkNow() {
+    // Never clear if yellow box is active or transaction in progress
+    return !window.__RC_MARK_STATE.yellowBoxActive && !window.__RC_MARK_STATE.transactionInProgress;
+  }
+
+  function watchAndClearMark(durationMs = 2000) {
+    const markEl = document.getElementById('markInput');
+    if (!markEl) return;
+
+    const clearMarkNow = () => {
+      try {
+        if (markEl.value !== '') {
+          markEl.value = '';
+          markEl.setAttribute('value', '');
+          try { markEl.dispatchEvent(new Event('input', { bubbles: true })); } catch(_){}
+        }
+      } catch(_){}
+    };
+
+    const obs = new MutationObserver(() => {
+      clearMarkNow();
+    });
+    obs.observe(markEl, { attributes: true, attributeFilter: ['value'], attributeOldValue: true });
+
+    const inputListener = () => clearMarkNow();
+    markEl.addEventListener('input', inputListener, true);
+
+    setTimeout(() => {
+      try { obs.disconnect(); } catch(_){}
+      try { markEl.removeEventListener('input', inputListener, true); } catch(_){}
+    }, durationMs);
+
+    // Initial clear
+    clearMarkNow();
+  }
+
+  function clearSearchInputs(opts){
+    const force = opts && opts.force;
     try {
+      // Do not clear while a transaction is in progress or yellow box is active,
+      // unless we explicitly force a clear.
+      if (!force && !canClearMarkNow()) {
+        safeLog('clearSearchInputs skipped: transaction in progress or yellow box active', window.__RC_MARK_STATE);
+        return;
+      }
+
       const markEl = document.getElementById('markInput');
       if (markEl){
+        // Signal the restore watcher to stay quiet (avoid race that re-fills mark)
+        try { window.__RC_MARK_CLEAR_REQUESTED = true; } catch(_){}
+        try { markEl.autocomplete = 'off'; } catch(_){}
+        try { markEl.defaultValue = ''; } catch(_){}
         markEl.value = '';
-        markEl.dispatchEvent(new Event('input', { bubbles: true }));
+        markEl.setAttribute('value', '');
+        try { markEl.dispatchEvent(new Event('input', { bubbles: true })); } catch(_){}
+        console.debug('RC-DEBUG clearSearchInputs: mark cleared');
+
+        try { watchAndClearMark(2000); } catch(_){}
       }
     } catch (_) {}
     try {
@@ -11395,6 +11494,25 @@ document.addEventListener('click', function(e){
     try {
       removeForceEditParamFromUrl();
     } catch (_) {}
+  }
+
+  function forceClearMarkWithRetries(retries = 12, intervalMs = 80) {
+    const markEl = document.getElementById('markInput');
+    if (!markEl) return;
+
+    let attempts = 0;
+    const id = setInterval(() => {
+      try {
+        attempts += 1;
+        if (markEl.value !== '') {
+          markEl.value = '';
+          try { markEl.dispatchEvent(new Event('input', { bubbles: true })); } catch(_){}
+        }
+        if (attempts >= retries) {
+          clearInterval(id);
+        }
+      } catch (_) { clearInterval(id); }
+    }, intervalMs);
   }
 
   function buildCleanUrl(){
@@ -11726,12 +11844,17 @@ document.addEventListener('click', function(e){
       }
 
       // Clear search input + cache after successful save
-      try { if (typeof clearSearchInputs === 'function') clearSearchInputs(); } catch(_) {}
-      try { if (typeof clearReceiptSearchCacheOnClose === 'function') clearReceiptSearchCacheOnClose(); } catch(_) {}
-      try { window.__RC_CLEAR_MARK_AFTER_SAVE = true; } catch(_) {}
-      // second pass to catch any late autofill that runs after save
-      setTimeout(() => { try { if (typeof clearSearchInputs === 'function') clearSearchInputs(); } catch(_) {} }, 120);
-
+    try {
+      window.__RC_MARK_STATE.yellowBoxActive = false;
+      window.__RC_MARK_STATE.storedYellowBoxMark = '';
+      window.__RC_MARK_STATE.transactionInProgress = false;
+    } catch(_) {}
+    try { if (typeof forceClearMarkWithRetries === 'function') forceClearMarkWithRetries(); } catch(_) {}
+    try { if (typeof clearSearchInputs === 'function') clearSearchInputs({force:true}); } catch(_) {}
+    try { if (typeof clearReceiptSearchCacheOnClose === 'function') clearReceiptSearchCacheOnClose(); } catch(_) {}
+    // second pass to catch any late autofill that runs after save
+    setTimeout(() => { try { if (typeof forceClearMarkWithRetries === 'function') forceClearMarkWithRetries(); } catch(_) {} }, 120);
+    setTimeout(() => { try { if (typeof clearSearchInputs === 'function') clearSearchInputs({force:true}); } catch(_) {} }, 120);
       setTimeout(function(){
         try {
           if (window.__RC_SUPPRESS_SUMMARY_MODAL_UNTIL && Date.now() < window.__RC_SUPPRESS_SUMMARY_MODAL_UNTIL) return;

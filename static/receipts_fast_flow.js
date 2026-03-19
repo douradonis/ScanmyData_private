@@ -247,10 +247,28 @@
       if (urlInput) urlInput.value = '';
 
       const markInput = $id('markInput');
-      if (markInput) markInput.value = '';
+      if (markInput) {
+        // Ensure state is reset and try to keep the input cleared.
+        try {
+          if (window.__RC_MARK_STATE) {
+            window.__RC_MARK_STATE.yellowBoxActive = false;
+            window.__RC_MARK_STATE.transactionInProgress = false;
+            window.__RC_MARK_STATE.storedYellowBoxMark = '';
+          }
+        } catch(_){}
+
+        // Force clear the input in case other scripts re-populate it.
+        try { if (typeof forceClearMarkWithRetries === 'function') forceClearMarkWithRetries(); } catch(_){}
+        try { if (typeof clearSearchInputs === 'function') clearSearchInputs({force:true}); } catch(_){}
+      }
 
       showFlash('✓ Αποθηκεύτηκε η απόδειξη', 'success', 2500);
       hideModal();
+
+      // Clear transaction flag
+      if (window.__RC_MARK_STATE) {
+        window.__RC_MARK_STATE.transactionInProgress = false;
+      }
 
       // Refresh table fragment without full page reload.
       if (typeof window.partiallyReloadInvoiceTable === 'function') {
