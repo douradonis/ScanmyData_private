@@ -7808,12 +7808,9 @@ def credentials_edit(name):
 
         save_credentials(creds)
 
-        # Αν το credential που επεξεργάστηκε ήταν ενεργό — ενημέρωσε session
-        if session.get("active_credential") == name:
-            session["active_credential"] = new_name
-            flash(f"Το ενεργό credential ενημερώθηκε σε '{new_name}'", "success")
-        else:
-            flash(f"Το credential '{new_name}' ενημερώθηκε επιτυχώς", "success")
+        # Όταν ο χρήστης αποθηκεύει την επεξεργασία, ορίζουμε το credential ως ενεργό
+        session["active_credential"] = new_name
+        flash(f"Το credential '{new_name}' αποθηκεύτηκε και ορίστηκε ως ενεργό", "success")
 
         return redirect(url_for("credentials"))
 
