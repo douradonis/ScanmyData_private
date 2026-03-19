@@ -657,8 +657,38 @@ def build_preview_rows_for_ui(
             if apod_supplier_id is not None and apod_supplier_id in (client_map["by_id"] or set()):
                 custid_val = apod_supplier_id
             else:
-                issues.append({"code":"apodeixakia_supplier_not_in_client_db","modal":True,
-                               "message": f"Απόδειξη AA={aa}: apodeixakia_supplier={apod_supplier_id} δεν υπάρχει στο client_db."})
+                # Do not hard-block export when supplier setting points to missing CUSTID.
+                # Fallback to issuer AFM mapping (or auto-create supplier) and keep a non-fatal issue.
+                custid_val = client_map["by_afm"].get(afm_norm)
+                if custid_val is None:
+                    if afm_norm in new_suppliers:
+                        custid_val = new_suppliers[afm_norm]["custid"]
+                    else:
+                        custid_val = next_custid
+                        counterpart_name = str(
+                            rec.get("Name_issuer")
+                            or rec.get("issuerName")
+                            or rec.get("issuer_name")
+                            or rec.get("Name")
+                            or rec.get("name")
+                            or f"Συναλλασσόμενος {afm_norm}"
+                        ).strip()
+                        new_suppliers[afm_norm] = {
+                            "custid": custid_val,
+                            "name": counterpart_name,
+                        }
+                        next_custid += 1
+                        issues.append({
+                            "code": "auto_created_supplier",
+                            "modal": False,
+                            "message": f"Δημιουργήθηκε αυτόματα νέος συναλλασσόμενος: CUSTID={custid_val}, AFM={afm_norm}, NAME={counterpart_name}",
+                        })
+
+                issues.append({
+                    "code":"apodeixakia_supplier_not_in_client_db_fallback",
+                    "modal":False,
+                    "message": f"Απόδειξη AA={aa}: apodeixakia_supplier={apod_supplier_id} δεν υπάρχει στο client_db. Χρησιμοποιήθηκε fallback CUSTID={custid_val}."
+                })
         else:
             custid_val = client_map["by_afm"].get(afm_norm)
             if custid_val is None:
@@ -816,7 +846,7 @@ def export_multiclient_strict(
         client_db=client_db,
         base_invoices_dir=base_invoices_dir,
         fiscal_year=fiscal_year)
-    nonfatal_codes = {"filtered_out_by_year", "auto_created_supplier"}
+    nonfatal_codes = {"filtered_out_by_year", "auto_created_supplier", "apodeixakia_supplier_not_in_client_db_fallback"}
     fatals = [i for i in preview["issues"] if str(i.get("code","")) not in nonfatal_codes]
     if fatals:
         return False, "", fatals

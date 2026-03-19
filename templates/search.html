@@ -5591,6 +5591,17 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
         } else if (typeof showFlash === 'function') {
           showFlash(String(j.modal_warning), 'warning', 7000);
         }
+
+        // Keep MARK for yellow-box reclassification flow; clear only for receipt warnings.
+        const warningText = String(j.modal_warning || '').toLowerCase();
+        const receiptWarning = !!(
+          (j.modal_summary && (j.modal_summary.is_receipt === true || /αποδει/i.test(String(j.modal_summary.type_name || ''))))
+          || /αποδει/i.test(warningText)
+        );
+        if (receiptWarning && !j.allow_edit_existing) {
+          try { if (typeof clearSearchInputs === 'function') clearSearchInputs(); } catch(_) {}
+          try { if (typeof clearReceiptSearchCacheOnClose === 'function') clearReceiptSearchCacheOnClose(); } catch(_) {}
+        }
         return;
       }
 
@@ -7395,7 +7406,34 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
         window.__RC_SUPPRESS_SUMMARY_MODAL = true;
         setTimeout(() => { window.__RC_SUPPRESS_SUMMARY_MODAL = false; }, 1200);
       } catch(_) {}
-      
+
+      // After successful invoice save, clear MARK/URL search state and receipt cache.
+      try { window.__RC_CLEAR_MARK_AFTER_SAVE = true; } catch(_) {}
+      try {
+        const markEl = document.getElementById('markInput');
+        if (markEl) {
+          markEl.value = '';
+          markEl.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      } catch(_) {}
+      try {
+        const urlEl = document.getElementById('scrapeUrlInput');
+        if (urlEl) {
+          urlEl.value = '';
+          urlEl.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      } catch(_) {}
+      try { if (typeof clearSearchInputs === 'function') clearSearchInputs(); } catch(_) {}
+      try { if (typeof clearReceiptSearchCacheOnClose === 'function') clearReceiptSearchCacheOnClose(); } catch(_) {}
+      try { window.__RC_PENDING_FORCE_SUMMARY = null; } catch(_) {}
+      try {
+        if (window.history && typeof window.history.replaceState === 'function') {
+          const u = new URL(window.location.href);
+          ['mark','url','payload','scrape_url','mark_id','force_edit','allow_edit_existing'].forEach(k => u.searchParams.delete(k));
+          window.history.replaceState({}, document.title, u.pathname + (u.search ? u.search : '') + u.hash);
+        }
+      } catch(_) {}
+
       // Successful save - partial reload
       const reloaded = await partiallyReloadInvoiceTable();
       if (reloaded) {
@@ -7557,9 +7595,28 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
       return;
     }
     const successMsg = 'Αποθηκεύτηκε η απόδειξη (excel + json).';
-    showFlash(successMsg, 'success');
-    persistReceiptFlash(successMsg, 'success');
     hideSummaryModal();
+
+    try { window.__RC_CLEAR_MARK_AFTER_SAVE = true; } catch(_) {}
+    try {
+      const markEl = document.getElementById('markInput');
+      if (markEl) {
+        markEl.value = '';
+        markEl.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    } catch(_) {}
+    try { if (typeof clearSearchInputs === 'function') clearSearchInputs(); } catch(_) {}
+    try { if (typeof clearReceiptSearchCacheOnClose === 'function') clearReceiptSearchCacheOnClose(); } catch(_) {}
+
+    const reloaded = await partiallyReloadInvoiceTable();
+    if (reloaded) {
+      showFlash(successMsg, 'success');
+      persistReceiptFlash(successMsg, 'success');
+    } else {
+      showFlash('Η αποθήκευση ολοκληρώθηκε, αλλά δεν έγινε ανανέωση πίνακα. Πάτησε αναζήτηση ή ανανέωση λίστας.', 'warning', 4500);
+      persistReceiptFlash(successMsg, 'success');
+    }
+
     // clean hidden fields
     document.getElementById('scrapeUrlField').value = '';
     document.getElementById('scrapeForceField').value = 'false';
@@ -11572,7 +11629,7 @@ document.addEventListener('click', function(e){
 <!-- === /QR WaitOverlay suppressor === -->
 
 <!-- === Fast Flow (seamless AJAX mode - auto-enabled with repeat mode) === -->
-<script src="{{ url_for('static', filename='receipts_fast_flow.js') }}"></script>
+<script src="{{ url_for('static', filename='receipts_fast_flow.js') }}?v=20260319d"></script>
 
 <script>
 // Final safety merge: ensure component `summaryDataInput` MTYPEs are copied

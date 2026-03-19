@@ -1527,15 +1527,26 @@ if not log.handlers:
     fh.setFormatter(GreeceTZFormatter(fmt=fmt, datefmt=datefmt, tz=GREECE_TZ))
     log.addHandler(fh)
 
-# (προαιρετικά) συντόνισε και τον werkzeug logger να γράφει με το ίδιο formatter
+# (προαιρετικά) συντόνισε και τον werkzeug logger να γράφει με ασφαλή formatter.
+# Σε ορισμένα περιβάλλοντα (π.χ. Python 3.14) ο default handler chain μπορεί
+# να πετάει logging-format exceptions σε request logs.
 try:
     wlog = logging.getLogger("werkzeug")
     wlog.setLevel(logging.INFO)
-    if not wlog.handlers:
-        wsh = logging.StreamHandler(sys.stdout)
-        wsh.setLevel(logging.INFO)
-        wsh.setFormatter(GreeceTZFormatter(fmt=fmt, datefmt=datefmt, tz=GREECE_TZ))
-        wlog.addHandler(wsh)
+    wlog.propagate = False
+
+    for existing in list(wlog.handlers):
+        try:
+            wlog.removeHandler(existing)
+        except Exception:
+            pass
+
+    wz_fmt = "%(asctime)s %(levelname)s %(message)s"
+    wz_datefmt = "%Y-%m-%d %H:%M:%S%z"
+    wsh = logging.StreamHandler(sys.stdout)
+    wsh.setLevel(logging.INFO)
+    wsh.setFormatter(GreeceTZFormatter(fmt=wz_fmt, datefmt=wz_datefmt, tz=GREECE_TZ))
+    wlog.addHandler(wsh)
 except Exception:
     pass
 
@@ -4812,12 +4823,32 @@ def _pfloat_any(v) -> float:
         return 0.0
 
 
-def _build_table_rows_from_epsilon(vat: str) -> List[Dict[str, str]]:
+def _build_table_rows_from_epsilon(vat: str, fiscal_year: Optional[int] = None) -> List[Dict[str, str]]:
     rows: List[Dict[str, str]] = []
     eps = load_epsilon_cache_for_vat(str(vat or '')) or []
+    selected_year = None
+    try:
+        if fiscal_year is not None:
+            selected_year = int(fiscal_year)
+    except Exception:
+        selected_year = None
+
     for rec in eps:
         if not isinstance(rec, dict):
             continue
+
+        # Apply active fiscal-year filtering to list rows (same UX as expenses export).
+        if selected_year is not None:
+            issue_date_raw = str(rec.get('issueDate') or rec.get('issue_date') or '').strip()
+            issue_year = parse_year_from_date_string(issue_date_raw)
+            if issue_year is None:
+                try:
+                    issue_year = int(str(rec.get('issue_year') or '').strip())
+                except Exception:
+                    issue_year = None
+            if issue_year != selected_year:
+                continue
+
         lines = rec.get('lines') if isinstance(rec.get('lines'), list) else []
         net = _pfloat_any(rec.get('totalNetValue') or rec.get('net') or rec.get('total_net'))
         vat_val = _pfloat_any(rec.get('totalVatAmount') or rec.get('vat') or rec.get('total_vat'))
@@ -4835,7 +4866,36 @@ def _build_table_rows_from_epsilon(vat: str) -> List[Dict[str, str]]:
 
         mark = str(rec.get('mark') or rec.get('MARK') or '').strip()
         issue_type = str(rec.get('type_name') or rec.get('type') or '').strip()
-        is_receipt = bool(rec.get('is_receipt')) or ('αποδ' in issue_type.lower()) or ('receipt' in issue_type.lower())
+        issue_type_l = issue_type.lower()
+        is_receipt = bool(rec.get('is_receipt')) or ('αποδ' in issue_type_l) or ('receipt' in issue_type_l)
+
+        mtype = str(rec.get('mtype') or rec.get('invoice_mtype') or rec.get('receipt_mtype') or '').strip()
+        auto_cash_payment = bool(rec.get('_auto_cash_payment'))
+
+        line_categories = set()
+        for ln in lines:
+            if not isinstance(ln, dict):
+                continue
+            cat = str(ln.get('category') or '').strip().lower()
+            if cat:
+                line_categories.add(cat)
+
+        has_supplier_cash_mirror = (
+            ('προμηθευτής_λιανικής' in line_categories and 'ταμείο' in line_categories)
+            or ('προμηθευτης_λιανικης' in line_categories and 'ταμειο' in line_categories)
+        )
+
+        # Hide cash movements from list_inner for both receipts and invoices.
+        is_cash_movement = (
+            auto_cash_payment
+            or has_supplier_cash_mirror
+            or issue_type in {'9.3'}
+            or 'ταμεια' in issue_type_l
+            or 'ταμει' in issue_type_l
+            or mtype == '14'
+        )
+        if is_cash_movement:
+            continue
         tipo_excel = 'ΑΠΟΔΕΙΞΗ' if is_receipt else (issue_type or 'ΤΙΜΟΛΟΓΙΟ')
 
         row = {
@@ -4858,7 +4918,7 @@ def _build_table_rows_from_epsilon(vat: str) -> List[Dict[str, str]]:
 
 def _render_table_html_for_vat(vat: str, with_checkbox_value: bool = True):
     import pandas as pd
-    rows = _build_table_rows_from_epsilon(vat)
+    rows = _build_table_rows_from_epsilon(vat, fiscal_year=get_active_fiscal_year())
     if not rows:
         return "", False, ""
 

@@ -71,6 +71,8 @@
 
 <script>
 (function(){
+    // Skip if guard explicitly disables this, or if already bound.
+    if (window.__RC_DISABLE_EARLY_MODAL_AJAX_SAVE) return;
     if (window.__RC_EARLY_MODAL_AJAX_SAVE_BOUND) return;
     window.__RC_EARLY_MODAL_AJAX_SAVE_BOUND = true;
 
@@ -98,6 +100,8 @@
             if (!res.ok || (j && j.ok === false)) {
                 const msg = (j && (j.error || j.message)) ? (j.error || j.message) : ('Αποτυχία αποθήκευσης (HTTP ' + res.status + ')');
                 if (typeof showFlash === 'function') showFlash(String(msg), 'error', 5000);
+                try { if (typeof clearSearchInputs === 'function') clearSearchInputs(); } catch(_) {}
+                try { if (typeof clearReceiptSearchCacheOnClose === 'function') clearReceiptSearchCacheOnClose(); } catch(_) {}
                 return;
             }
 
@@ -199,6 +203,59 @@
         e.stopPropagation();
         void forceAjaxSave(form);
     }, true);
+})();
+
+// ===== mtype guard: disable save button when invoiceMtypeContainer is visible but no mtype selected =====
+(function setupMtypeGuard() {
+    function updateSaveBtnState() {
+        try {
+            const btn = document.getElementById('saveSummaryBtn');
+            if (!btn) return;
+            const invContainer = document.getElementById('invoiceMtypeContainer');
+            const invSelect = document.getElementById('invoiceMtypeSelect');
+            const recContainer = document.getElementById('receiptMtypeContainerSummary');
+            const recSelect = document.getElementById('receiptMtypeSelectSummary');
+            const invVisible = invContainer && window.getComputedStyle(invContainer).display !== 'none';
+            const recVisible = recContainer && window.getComputedStyle(recContainer).display !== 'none';
+            const invMissing = invVisible && (!invSelect || !String(invSelect.value || '').trim());
+            const recMissing = recVisible && (!recSelect || !String(recSelect.value || '').trim());
+            if (invMissing || recMissing) {
+                btn.disabled = true;
+                btn.title = 'Επίλεξε Είδος Κίνησης (MTYPE) για να ενεργοποιηθεί η αποθήκευση';
+                btn.classList.add('opacity-50', 'cursor-not-allowed');
+            } else {
+                btn.disabled = false;
+                btn.title = '';
+                btn.classList.remove('opacity-50', 'cursor-not-allowed');
+            }
+        } catch(_) {}
+    }
+
+    // Update on mtype select change
+    document.addEventListener('change', function(e) {
+        if (!e.target) return;
+        if (e.target.id === 'invoiceMtypeSelect' || e.target.id === 'receiptMtypeSelectSummary') updateSaveBtnState();
+    });
+
+    // Update whenever summaryModal or invoiceMtypeContainer visibility changes
+    function observeVisibility() {
+        try {
+            const obs = new MutationObserver(function() { updateSaveBtnState(); });
+            const modal = document.getElementById('summaryModal');
+            if (modal) obs.observe(modal, { attributes: true, attributeFilter: ['style'] });
+            const cont = document.getElementById('invoiceMtypeContainer');
+            if (cont) obs.observe(cont, { attributes: true, attributeFilter: ['style'] });
+            const recCont = document.getElementById('receiptMtypeContainerSummary');
+            if (recCont) obs.observe(recCont, { attributes: true, attributeFilter: ['style'] });
+        } catch(_) {}
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function() { observeVisibility(); updateSaveBtnState(); });
+    } else {
+        observeVisibility();
+        updateSaveBtnState();
+    }
 })();
 </script>
 

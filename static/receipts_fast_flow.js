@@ -213,51 +213,92 @@
       // debug: ensure payload.mtype present when user selected one
       try { console.debug('[fast-flow] submitting summary.mtype=', payload.mtype || payload.receipt_mtype || payload.invoice_mtype || ''); } catch(_){}
 
+      // Guard: if a visible MTYPE selector exists in modal, require selection before autosave.
+      try {
+        const invCont = document.getElementById('invoiceMtypeContainer');
+        const invSel = document.getElementById('invoiceMtypeSelect');
+        const recCont = document.getElementById('receiptMtypeContainerSummary');
+        const recSel = document.getElementById('receiptMtypeSelectSummary');
+        const invVisible = !!(invCont && window.getComputedStyle(invCont).display !== 'none');
+        const recVisible = !!(recCont && window.getComputedStyle(recCont).display !== 'none');
+        const invMissing = invVisible && (!invSel || !String(invSel.value || '').trim());
+        const recMissing = recVisible && (!recSel || !String(recSel.value || '').trim());
+        if (invMissing || recMissing) {
+          hideLoadingOverlay();
+          const msg = invMissing
+            ? 'Συμπλήρωσε το Είδος Κίνησης (MTYPE) πριν την αποθήκευση.'
+            : 'Συμπλήρωσε το Είδος Κίνησης για τις αποδείξεις πριν την αποθήκευση.';
+          if (typeof window.showModalAlert === 'function') await window.showModalAlert('Ελλιπή πεδία', msg);
+          else showFlash(msg, 'warning', 3500);
+          try { if (typeof window.clearSearchInputs === 'function') window.clearSearchInputs(); } catch(_) {}
+          try { if (typeof window.clearReceiptSearchCacheOnClose === 'function') window.clearReceiptSearchCacheOnClose(); } catch(_) {}
+          return false;
+        }
+      } catch(_) {}
+
       formData.append('summary_json', JSON.stringify(payload));
+      formData.append('ajax', '1'); // Force JSON response; prevents server redirect
 
       const res = await fetch('/save_summary', {
         method: 'POST',
         body: formData,
-        credentials: 'same-origin'
+        credentials: 'same-origin',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' }
       });
-
-      // Server may return:
-      // - 302 redirect if existing MARK (Location header points to /search?allow_edit_existing=1)
-      // - 200 if success
-      // - Other status if error
 
       hideLoadingOverlay();
 
-      // Check if server redirected (existing MARK)
-      if (res.redirected || res.status === 302 || res.url.includes('allow_edit_existing')) {
-        // Show the existing banner instead of error
-        const mark = receipt.mark || receipt.MARK || '?';
-        showFlash('Το MARK ' + mark + ' υπάρχει ήδη στο Excel', 'warning', 4000);
-        showExistingBanner(mark);
+      const j = await res.json().catch(() => null);
+      if (!res.ok || !j || !j.ok) {
+        const errMsg = (j && (j.error || j.message)) ? String(j.error || j.message) : ('Σφάλμα αποθήκευσης (HTTP ' + res.status + ')');
+        showFlash('❌ ' + errMsg, 'error', 5000);
         return false;
       }
 
-      if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        throw new Error(`Save failed: ${res.status}`);
-      }
+      // Success: clear search inputs/cache and refresh table fragment.
+      try { window.__RC_CLEAR_MARK_AFTER_SAVE = true; } catch(_) {}
 
-      // Success - update table optimistically
       const urlInput = $id('scrapeUrlInput');
-      if (urlInput) urlInput.value = '';
+      if (urlInput) {
+        urlInput.value = '';
+        try { urlInput.dispatchEvent(new Event('input', { bubbles: true })); } catch(_) {}
+      }
 
       const markInput = $id('markInput');
-      if (markInput) markInput.value = '';
+      if (markInput) {
+        markInput.value = '';
+        try { markInput.dispatchEvent(new Event('input', { bubbles: true })); } catch(_) {}
+      }
 
-      showFlash('✓ Αποθηκεύτηκε η απόδειξη', 'success', 2500);
+      try { if (typeof window.clearSearchInputs === 'function') window.clearSearchInputs(); } catch(_) {}
+      try { if (typeof window.clearReceiptSearchCacheOnClose === 'function') window.clearReceiptSearchCacheOnClose(); } catch(_) {}
+
       hideModal();
 
-      // Refresh table fragment without full page reload.
+      let reloaded = false;
       if (typeof window.partiallyReloadInvoiceTable === 'function') {
-        setTimeout(() => {
-          try { window.partiallyReloadInvoiceTable(); } catch(_) {}
-        }, 120);
+        try { reloaded = !!(await window.partiallyReloadInvoiceTable()); } catch(_) { reloaded = false; }
       }
+
+      // Fallback for repeat mode: force-refresh table fragment even if helper returns false.
+      if (!reloaded) {
+        try {
+          const tableRes = await fetch('/list/fragment', { method: 'GET', credentials: 'same-origin' });
+          if (tableRes.ok) {
+            const data = await tableRes.json().catch(() => null);
+            const container = document.getElementById('summary-container');
+            if (data && data.ok && data.table_html && container) {
+              container.innerHTML = data.table_html;
+              if (typeof window.FBP_INIT_TABULATOR === 'function') window.FBP_INIT_TABULATOR();
+              else if (typeof window.FBP_INIT_TABLE === 'function') window.FBP_INIT_TABLE();
+              reloaded = true;
+            }
+          }
+        } catch(_) {}
+      }
+
+      if (reloaded) showFlash('✓ Αποθηκεύτηκε η απόδειξη', 'success', 2500);
+      else showFlash('Η αποθήκευση ολοκληρώθηκε, αλλά δεν έγινε ανανέωση πίνακα. Πάτησε αναζήτηση ή ανανέωση λίστας.', 'warning', 4500);
 
       return true;
     } catch (err) {
