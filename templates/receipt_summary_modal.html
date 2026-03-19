@@ -148,17 +148,11 @@
             }, 5200);
 
             // Clear search input + cache after successful save
-            try {
-                window.__RC_MARK_STATE.yellowBoxActive = false;
-                window.__RC_MARK_STATE.storedYellowBoxMark = '';
-                window.__RC_MARK_STATE.transactionInProgress = false;
-            } catch(_) {}
-            try { if (typeof forceClearMarkWithRetries === 'function') forceClearMarkWithRetries(); } catch(_) {}
-            try { if (typeof clearSearchInputs === 'function') clearSearchInputs({force:true}); } catch(_) {}
+            try { if (typeof clearSearchInputs === 'function') clearSearchInputs(); } catch(_) {}
             try { if (typeof clearReceiptSearchCacheOnClose === 'function') clearReceiptSearchCacheOnClose(); } catch(_) {}
+            try { window.__RC_CLEAR_MARK_AFTER_SAVE = true; } catch(_) {}
             // second pass to catch any late autofill that runs after save
-            setTimeout(() => { try { if (typeof forceClearMarkWithRetries === 'function') forceClearMarkWithRetries(); } catch(_) {} }, 120);
-            setTimeout(() => { try { if (typeof clearSearchInputs === 'function') clearSearchInputs({force:true}); } catch(_) {} }, 120);
+            setTimeout(() => { try { if (typeof clearSearchInputs === 'function') clearSearchInputs(); } catch(_) {} }, 120);
         } catch (err) {
             try {
                 window.__RC_SUPPRESS_SUMMARY_MODAL = false;
