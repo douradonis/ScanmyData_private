@@ -171,27 +171,15 @@ def signup():
             if firebase_uid:
                 ok, link_or_err = FirebaseAuthHandler.generate_email_verification_link(user.email)
                 if ok:
-                    # Try to send verification email via SMTP; fallback to logging
-                    verify_link = link_or_err
-                    app_url = os.getenv('APP_URL', 'http://localhost:5001')
-                    from email_utils import make_email_html
-                    html_body = make_email_html(
-                        greeting=f"Γεια σου {user.username},",
-                        body_html=(
-                            "<p style='margin:0 0 14px;'>Σε ευχαριστούμε που εγγράφηκες στο <strong>ScanmyData</strong>!"
-                            " Για να ενεργοποιήσεις τον λογαριασμό σου,"
-                            " παρακαλώ επαλήθευσε τη διεύθυνσή σου:</p>"
-                        ),
-                        cta_url=verify_link,
-                        cta_text="Επαλήθευση Email",
-                        security_note="Εάν δεν δημιούργησες αυτόν τον λογαριασμό, αγνόησε αυτό το email.",
-                        logo_url=f"{app_url}/icons/scanmydata_logo_3000w.png",
-                    )
-                    sent = email_utils.send_email(user.email, 'Επαλήθευση Email - ScanmyData', html_body)
+                    try:
+                        from firebed_email_verification import FirebedEmailVerification
+                        sent = FirebedEmailVerification.send_signup_verification_email(user.email, user.username)
+                    except Exception:
+                        sent = False
                     if sent:
                         flash('Ο λογαριασμός δημιουργήθηκε! Ένα email επαλήθευσης έχει σταλεί στα εισερχόμενά σας.', 'success')
                     else:
-                        current_app.logger.info(f"Firebase verification link for {user.email}: {verify_link}")
+                        current_app.logger.info(f"Firebase verification link for {user.email}: {link_or_err}")
                         flash('Ο λογαριασμός δημιουργήθηκε! Ο σύνδεσμος επαλήθευσης έχει καταγραφεί (ανάπτυξη).', 'success')
                 else:
                     current_app.logger.warning(f"Could not generate Firebase verification link: {link_or_err}")
@@ -1297,22 +1285,11 @@ def forgot_password():
             # Use Firebase to generate password reset link and let Firebase handle sending.
             ok, link_or_err = FirebaseAuthHandler.generate_password_reset_link(email)
             if ok:
-                reset_link = link_or_err
-                app_url = os.getenv('APP_URL', 'http://localhost:5001')
-                from email_utils import make_email_html
-                html_body = make_email_html(
-                    greeting="Γεια σας,",
-                    body_html=(
-                        "<p style='margin:0 0 14px;'>Λάβαμε αίτημα για επαναφορά του κωδικού πρόσβασής σας στο"
-                        " <strong>ScanmyData</strong>. Κάντε κλικ στον παρακάτω σύνδεσμο για να ορίσετε νέο κωδικό:</p>"
-                    ),
-                    cta_url=reset_link,
-                    cta_text="Επαναφορά Κωδικού",
-                    expiry_note="Ο σύνδεσμος λήγει σε 1 ώρα για λόγους ασφαλείας.",
-                    security_note="Εάν δεν ζητήσατε αυτήν την αλλαγή, αγνοήστε αυτό το email.",
-                    logo_url=f"{app_url}/icons/scanmydata_logo_3000w.png",
-                )
-                sent = email_utils.send_email(email, '🔐 Επαναφορά Κωδικού - ScanmyData', html_body)
+                try:
+                    from firebed_email_verification import FirebedEmailVerification
+                    sent = FirebedEmailVerification.send_password_reset_email(email)
+                except Exception:
+                    sent = False
                 if sent:
                     flash('Εάν το email υπάρχει στο σύστημά μας, θα λάβετε σύνδεσμο επαναφοράς κωδικού (ελέγξτε τα εισερχόμενά σας).', 'info')
                     try:
@@ -1328,7 +1305,7 @@ def forgot_password():
                     except Exception:
                         pass
                 else:
-                    current_app.logger.info(f"Firebase password reset link for {email}: {reset_link}")
+                    current_app.logger.info(f"Firebase password reset link for {email}: {link_or_err}")
                     flash('Εάν το email υπάρχει στο σύστημά μας, θα λάβετε σύνδεσμο επαναφοράς κωδικού (ελέγξτε τα εισερχόμενά σας).', 'info')
                     try:
                         from utils import log_user_activity

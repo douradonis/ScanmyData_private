@@ -1320,85 +1320,94 @@ def api_get_group_detail(group_id):
 @login_required
 @_require_admin
 def api_send_email():
-    """Send email to selected users"""
-    try:
-        subject = request.form.get('subject', '').strip()
-        message = request.form.get('message', '').strip()
-        user_ids_str = request.form.get('user_ids', '')
-        
-        if not subject or not message or not user_ids_str:
-            return jsonify({'success': False, 'error': 'Subject, message, and users are required'}), 400
-        
-        # Parse user IDs
+        """Send email to selected users"""
         try:
-            user_ids = [int(uid.strip()) for uid in user_ids_str.split(',') if uid.strip()]
-        except ValueError:
-            return jsonify({'success': False, 'error': 'Invalid user IDs format'}), 400
-        
-        if not user_ids:
-            return jsonify({'success': False, 'error': 'No valid user IDs provided'}), 400
-        
-        # Create HTML email body
-        import os
-        app_url = os.getenv('APP_URL', 'http://localhost:5001')
-        logo_url = f"{app_url}/icons/scanmydata_logo_3000w.png"
-        # Simple transactional-style HTML (minimal styling to avoid being treated as “promotions”)
-        html_body = f"""
+                subject = request.form.get('subject', '').strip()
+                message = request.form.get('message', '').strip()
+                user_ids_str = request.form.get('user_ids', '')
+
+                if not subject or not message or not user_ids_str:
+                        return jsonify({'success': False, 'error': 'Subject, message, and users are required'}), 400
+
+                # Parse user IDs
+                try:
+                        user_ids = [int(uid.strip()) for uid in user_ids_str.split(',') if uid.strip()]
+                except ValueError:
+                        return jsonify({'success': False, 'error': 'Invalid user IDs format'}), 400
+
+                if not user_ids:
+                        return jsonify({'success': False, 'error': 'No valid user IDs provided'}), 400
+
+                from email_utils import send_bulk_email_to_users
+
+                # Build HTML body using the admin template requested by the user
+                import os
+                app_url = os.getenv('APP_URL', 'http://localhost:5001')
+                logo_filename = 'scanmydata_logo_email.png'
+                logo_url = f"{app_url}/icons/{logo_filename}"
+                # Preserve newlines from message by replacing with <br>
+                safe_message = (message or '').replace('\n', '<br>')
+                html_body = f"""
+        <!DOCTYPE html>
         <html>
-            <body style="font-family: Arial, sans-serif; line-height: 1.4; color: #000; margin: 0; padding: 20px;">
-                <div style="max-width: 600px; margin: 0 auto;">
-                    <div style="text-align: center; margin-bottom: 20px;">
-                        <img src="{logo_url}" alt="ScanmyData" style="height: 40px; width: auto; display: block; margin: 0 auto;" />
+            <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+                    <div style="text-align: center; margin-bottom: 30px;">
+                        <img src="{logo_url}" alt="ScanmyData" style="height: 60px; width: auto;">
                     </div>
-
-                    <p style="margin: 0 0 12px; font-weight: bold;">{subject}</p>
-
-                    <div style="margin-bottom: 18px; white-space: pre-wrap;">{message}</div>
-
-                    <p style="margin: 12px 0 0; font-size: 12px; color: #666;">Αυτό το email στάλθηκε από το ScanmyData.</p>
+                    <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+                        <h2 style="color: #333; margin: 0;">📧 Μήνυμα από Διαχειριστή</h2>
+                    </div>
+                    <div style="background-color: white; padding: 20px; border: 1px solid #dee2e6; border-radius: 8px;">
+                        <h3 style="color: #495057; border-bottom: 2px solid #e9ecef; padding-bottom: 10px;">{subject}</h3>
+                        <div style="margin: 20px 0; line-height: 1.6; color: #495057;">
+                            {safe_message}
+                        </div>
+                    </div>
+                    <div style="margin-top: 20px; text-align: center;">
+                        <img src="{logo_url}" alt="ScanmyData" style="height: 40px; width: auto; opacity: 0.6;">
+                        <p style="color: #6c757d; font-size: 0.9em; margin-top: 10px;">Αυτό το email στάλθηκε από το ScanmyData</p>
+                    </div>
                 </div>
             </body>
         </html>
         """
-        # Provide a plain-text body for better deliverability
-        text_body = message
-        
-        # Resolve recipient emails for logging, then send
-        import email_utils
-        from models import User
-        recipients = []
-        for uid in user_ids:
-            try:
-                u = User.query.get(uid)
-                if u and u.email:
-                    recipients.append(u.email)
-            except Exception:
-                continue
 
-        results = email_utils.send_bulk_email_to_users(user_ids, subject, html_body, text_body)
+                # Resolve recipient emails for logging, then send
+                from models import User
+                recipients = []
+                for uid in user_ids:
+                        try:
+                                u = User.query.get(uid)
+                                if u and u.email:
+                                        recipients.append(u.email)
+                        except Exception:
+                                continue
 
-        # Log the admin action (include recipient list and sent/failed counts)
-        try:
-            _log_admin_action('send_email', 'users', f'{len(user_ids)}_users', {
-                'subject': subject,
-                'user_count': len(user_ids),
-                'recipient_count': len(recipients),
-                'recipients': recipients,
-                'sent': results.get('sent', 0),
-                'failed': results.get('failed', 0),
-                'errors': results.get('errors', [])
-            })
-        except Exception:
-            logger.debug('Failed to log admin send_email action')
-        
-        return jsonify({
-            'success': True,
-            'message': f'Email sent to {results["sent"]} users, {results["failed"]} failed',
-            'results': results
-        })
-    except Exception as e:
-        logger.error(f"Error sending admin email: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
+                results = send_bulk_email_to_users(user_ids, subject, html_body)
+
+                # Log the admin action (include recipient list and sent/failed counts)
+                try:
+                        _log_admin_action('send_email', 'users', f'{len(user_ids)}_users', {
+                                'subject': subject,
+                                'user_count': len(user_ids),
+                                'recipient_count': len(recipients),
+                                'recipients': recipients,
+                                'sent': results.get('sent', 0),
+                                'failed': results.get('failed', 0),
+                                'errors': results.get('errors', [])
+                        })
+                except Exception:
+                        logger.debug('Failed to log admin send_email action')
+
+                return jsonify({
+                        'success': True,
+                        'message': f'Email sent to {results["sent"]} users, {results["failed"]} failed',
+                        'results': results
+                })
+        except Exception as e:
+                logger.error(f"Error sending admin email: {e}")
+                return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @admin_api_bp.route('/email-config', methods=['GET', 'POST'])

@@ -125,6 +125,14 @@
 
   // --- One-shot submit blocker (prevents loops) ------------------------------
   let autoSaveInProgress = false;
+  let autoSaveWatchdog = null;
+  function resetAutoSaveState(){
+    autoSaveInProgress = false;
+    if (autoSaveWatchdog) {
+      try { clearTimeout(autoSaveWatchdog); } catch(_) {}
+      autoSaveWatchdog = null;
+    }
+  }
   function safeSubmitSaveSummary(){
     if (autoSaveInProgress) return false;
     const form = byId('saveSummaryForm');
@@ -141,6 +149,12 @@
     setTimeout(() => { autoSaveInProgress = false; }, 1200);
     return true;
   }
+
+  try {
+    window.__repeatFlowResetAutoSave = resetAutoSaveState;
+    window.addEventListener('scanmydata:save-summary-finished', resetAutoSaveState);
+    window.addEventListener('scanmydata:reclassification-cancelled', resetAutoSaveState);
+  } catch(_) {}
 
   // --- Apply receipt auto-category + submit ---------------------------------
   function applyReceiptAutoCategoryAndSubmit(){
