@@ -1554,7 +1554,7 @@ def api_resend_inbound_webhook():
     try:
         import email_utils
 
-        signing_secret = (email_utils.RESEND_WEBHOOK_SIGNING_SECRET or os.getenv('RESEND_WEBHOOK_SIGNING_SECRET') or '').strip()
+        signing_secret = (getattr(email_utils, 'RESEND_WEBHOOK_SIGNING_SECRET', None) or os.getenv('RESEND_WEBHOOK_SIGNING_SECRET') or '').strip()
         if not signing_secret:
             return jsonify({'success': False, 'error': 'RESEND_WEBHOOK_SIGNING_SECRET is not configured'}), 503
 

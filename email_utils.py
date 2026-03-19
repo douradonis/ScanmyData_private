@@ -21,6 +21,7 @@ APP_URL = os.getenv('APP_URL', 'http://localhost:5001')
 OAUTH2_CREDENTIALS_FILE = os.getenv('OAUTH2_CREDENTIALS_FILE', 'outlook_oauth2_credentials.json')
 RESEND_API_KEY = os.getenv('RESEND_API_KEY', '')
 RESEND_EMAIL_SENDER = os.getenv('RESEND_EMAIL_SENDER', '')
+RESEND_WEBHOOK_SIGNING_SECRET = os.getenv('RESEND_WEBHOOK_SIGNING_SECRET', '')
 RAILWAY_PROXY_URL = os.getenv('RAILWAY_PROXY_URL', '')
 
 
@@ -131,15 +132,19 @@ def _inline_logo_into_html(html: str) -> str:
         # Common logo file paths to try (project relative)
         # Try project-root-relative paths first (robust when running as module)
         this_dir = os.path.dirname(__file__)
+        # Prefer the small email-optimized logo to keep email size down.
         candidates = [
-            os.path.join(this_dir, 'icons', 'scanmydata_logo_3000w.png'),
-            os.path.join(this_dir, 'icons', 'scanmydata_logo.png'),
             os.path.join(this_dir, 'icons', 'scanmydata_logo_email.png'),
+            os.path.join(this_dir, 'icons', 'scanmydata_logo.png'),
+            os.path.join(this_dir, 'icons', 'scanmydata_logo_3000w.png'),
+            os.path.join(this_dir, 'icons', 'scanmydata_logo_dark_3000w.png'),
             os.path.join(this_dir, 'icons', 'scanmydata_logo.svg'),
+            os.path.join(this_dir, 'static', 'icons', 'scanmydata_logo_email.png'),
+            os.path.join(this_dir, 'static', 'icons', 'scanmydata_logo.png'),
             os.path.join(this_dir, 'static', 'icons', 'scanmydata_logo_3000w.png'),
-            os.path.join(os.getcwd(), 'icons', 'scanmydata_logo_3000w.png'),
-            os.path.join(os.getcwd(), 'icons', 'scanmydata_logo.png'),
             os.path.join(os.getcwd(), 'icons', 'scanmydata_logo_email.png'),
+            os.path.join(os.getcwd(), 'icons', 'scanmydata_logo.png'),
+            os.path.join(os.getcwd(), 'icons', 'scanmydata_logo_3000w.png'),
         ]
         logo_path = None
         for p in candidates:
@@ -158,7 +163,7 @@ def _inline_logo_into_html(html: str) -> str:
         b64 = base64.b64encode(raw).decode('ascii')
         data_uri = f'data:{mime};base64,{b64}'
 
-        # Replace any src attributes that point to /icons/ or APP_URL/.../icons/
+        # Replace any src attributes that point to scanmydata logo paths (absolute or relative).
         # Use regex to replace the whole src value with the data URI.
         import re
 
@@ -166,10 +171,13 @@ def _inline_logo_into_html(html: str) -> str:
             quote = match.group('q') or '"'
             return f'src={quote}{data_uri}{quote}'
 
-        # Patterns to match: src=".../icons/filename" or src='/icons/filename'
+        # Patterns to match:
+        #  - src=".../icons/scanmydata_logo*.png"
+        #  - src='/icons/scanmydata_logo*.png'
+        #  - src=".../scanmydata_logo*.png" (any path)
         patterns = [
-            rf'src=(?P<q>"|\')(?:(?:{re.escape(APP_URL.rstrip('/'))})?/icons/)[^"\']+(?P=q)',
-            r"src=(?P<q>\"|'|)\/icons\/[^\"']+(?P=q)",
+            rf'src=(?P<q>"|\')(?:(?:{re.escape(APP_URL.rstrip('/'))})?/icons/)[^"\']*scanmydata_logo[^"\']*(?P=q)',
+            rf'src=(?P<q>"|\')[^"\']*scanmydata_logo[^"\']*(?P=q)',
         ]
 
         for pat in patterns:
@@ -276,11 +284,53 @@ def send_oauth2_email(to_email: str, subject: str, html_body: str, text_body: Op
         return False
 
 
+def _resend_embed_data_uri_images(html: str) -> tuple[str, list[dict]]:
+    """Convert data URI images in HTML into Resend inline attachments.
+
+    Resend supports embedding images by attaching them and referencing them via
+    `cid:` URLs in the HTML (e.g. `<img src="cid:...">`).
+    """
+    import re
+
+    attachments: list[dict] = []
+    cid_index = 0
+
+    def _replace(match):
+        nonlocal cid_index
+        mime = match.group('mime')
+        b64 = match.group('b64')
+        cid = f"inline{cid_index}"
+        cid_index += 1
+
+        # Derive a safe filename from the MIME type
+        ext = mime.split('/')[-1] if '/' in mime else 'bin'
+        # Resend expects attachment keys like `filename`, `contentType`, and `contentId`.
+        # `contentId` must match the `cid:` used in the HTML.
+        attachments.append({
+            'filename': f"{cid}.{ext}",
+            'content_type': mime,  # recommended by Resend docs
+            'content': b64,
+            'content_id': cid,
+            'inline_content_id': cid,  # some variants accept this key
+        })
+        return f"cid:{cid}"
+
+    data_uri_pattern = re.compile(r'data:(?P<mime>[^;]+);base64,(?P<b64>[A-Za-z0-9+/=]+)')
+    processed_html = data_uri_pattern.sub(_replace, html or '')
+    return processed_html, attachments
+
+
 def send_resend_email(to_email: str, subject: str, html_body: str, text_body: Optional[str] = None) -> bool:
     """Send an email via Resend API"""
     if not RESEND_API_KEY:
         logger.warning(f"Resend API key not configured; skipping email to {to_email}")
         return False
+
+    # Inline the local logo image (if present) so that we can embed it when sending via Resend.
+    try:
+        html_body = _inline_logo_into_html(html_body)
+    except Exception:
+        pass
     
     # Check if using test domain - warn and suggest SMTP fallback
     sender = RESEND_EMAIL_SENDER or SENDER_EMAIL or "noreply@yourdomain.com"
@@ -296,14 +346,21 @@ def send_resend_email(to_email: str, subject: str, html_body: str, text_body: Op
         # Set the API key
         resend.api_key = RESEND_API_KEY
         
+        # Convert any embedded data URI images into Resend inline attachments
+        processed_html, attachments = _resend_embed_data_uri_images(html_body)
+
         # Prepare email params - Resend requires 'from' to be a verified domain
         params = {
             "from": sender,
             "to": [to_email],
             "subject": subject,
-            "html": html_body,
+            "html": processed_html,
         }
-        
+
+        if attachments:
+            logger.debug(f"Adding {len(attachments)} inline attachment(s) for Resend")
+            params["attachments"] = attachments
+
         # Add text body if provided
         if text_body:
             params["text"] = text_body
@@ -460,7 +517,7 @@ def send_email_verification(user_email: str, user_id: int, user_username: str) -
         return False
     
     verify_url = f"{APP_URL}/auth/verify-email?token={token}"
-    logo_url = f"{APP_URL}/icons/scanmydata_logo_3000w.png"
+    logo_url = f"{APP_URL}/icons/scanmydata_logo_email.png"
     
     html_body = f"""
     <html>
@@ -529,7 +586,7 @@ def send_password_reset(user_email: str, user_id: int, user_username: str) -> bo
         return False
     
     reset_url = f"{APP_URL}/auth/reset-password?token={token}"
-    logo_url = f"{APP_URL}/icons/scanmydata_logo_3000w.png"
+    logo_url = f"{APP_URL}/icons/scanmydata_logo_email.png"
     
     # Use a high-contrast, simple layout so the email renders correctly
     # in both light and dark modes and across common email clients.
@@ -646,3 +703,166 @@ def send_bulk_email_to_users(user_ids: list, subject: str, html_body: str) -> di
             results['errors'].append(f'User {uid}: {str(e)}')
     
     return results
+
+
+# --- Resend inbound forwarding helpers ---
+
+RESEND_INBOUND_FORWARD_TO = os.getenv('RESEND_INBOUND_FORWARD_TO', '')
+RESEND_API_URL = os.getenv('RESEND_API_URL', 'https://api.resend.com')
+
+
+def _resend_api_request(path: str, method: str = 'GET', json_data: dict | None = None, params: dict | None = None):
+    """Make a request to the Resend API.
+
+    This is intentionally lightweight and does not require the `resend` SDK.
+    """
+    if not RESEND_API_KEY:
+        logger.warning('Resend API key not configured; skipping Resend API request.')
+        return None
+
+    import json
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    url = path if path.startswith('http') else f"{RESEND_API_URL.rstrip('/')}/{path.lstrip('/')}"
+    if params:
+        url = f"{url}?{urllib.parse.urlencode(params)}"
+
+    headers = {
+        'Authorization': f'Bearer {RESEND_API_KEY}',
+        'User-Agent': 'ScanmyData/1.0',
+        'Accept': 'application/json',
+    }
+
+    data = None
+    if json_data is not None:
+        headers['Content-Type'] = 'application/json'
+        data = json.dumps(json_data).encode('utf-8')
+
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            text = resp.read().decode('utf-8')
+            if not text:
+                return None
+            return json.loads(text)
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode('utf-8')
+            err = json.loads(body)
+        except Exception:
+            err = body
+        logger.error(f"Resend API request failed: {method} {url} -> {e.code}: {err}")
+        return None
+    except Exception as e:
+        logger.error(f"Resend API request failed: {method} {url}: {e}")
+        return None
+
+
+def _resend_get_inbound_emails(limit: int = 25) -> list:
+    """Fetch inbound emails from Resend Receiving API."""
+    endpoints = [
+        'receiving/emails',
+        'emails/receiving',
+        'emails/received',
+        'receiving',
+    ]
+
+    for ep in endpoints:
+        data = _resend_api_request(ep, params={'limit': limit})
+        if not data:
+            continue
+        if isinstance(data, dict) and isinstance(data.get('data'), list):
+            return data.get('data', [])
+        if isinstance(data, list):
+            return data
+    return []
+
+
+def _resend_get_inbound_email(email_id: str) -> dict | None:
+    """Fetch a specific inbound email by ID from Resend."""
+    endpoints = [
+        f'receiving/emails/{email_id}',
+        f'emails/receiving/{email_id}',
+        f'emails/received/{email_id}',
+        f'receiving/{email_id}',
+    ]
+    for ep in endpoints:
+        data = _resend_api_request(ep)
+        if not data:
+            continue
+        if isinstance(data, dict) and data.get('id'):
+            return data
+    return None
+
+
+def _forward_resend_email_object(email_obj: dict, forward_to: str) -> tuple[bool, str]:
+    """Forward a Resend inbound email object via SMTP."""
+    try:
+        subject = email_obj.get('subject') or '(no subject)'
+        from_addr = email_obj.get('from') or email_obj.get('sender') or ''
+        to_addrs = email_obj.get('to') or email_obj.get('recipients') or []
+
+        # Normalize HTML/text bodies
+        html_body = email_obj.get('html') or email_obj.get('html_body') or ''
+        text_body = email_obj.get('text') or email_obj.get('text_body') or ''
+
+        # Wrap plain text in simple HTML if needed
+        if not html_body and text_body:
+            html_body = '<pre style="font-family:inherit; white-space:pre-wrap;">{}</pre>'.format(
+                text_body.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            )
+
+        # Add metadata header for traceability
+        if from_addr or to_addrs:
+            meta = []
+            if from_addr:
+                meta.append(f'From: {from_addr}')
+            if to_addrs:
+                if isinstance(to_addrs, list):
+                    to_addrs = ', '.join(to_addrs)
+                meta.append(f'To: {to_addrs}')
+            meta_html = '<div style="font-size:12px; color:#555; margin-bottom:14px;">' + '<br>'.join(meta) + '</div>'
+            html_body = meta_html + html_body
+
+        forward_subject = f"Fwd: {subject}" if not subject.lower().startswith('fwd:') else subject
+
+        sent = send_smtp_email(forward_to, forward_subject, html_body, text_body)
+        return sent, '' if sent else 'SMTP send failed'
+    except Exception as e:
+        return False, str(e)
+
+
+def forward_resend_inbound_to_smtp_user(limit: int = 25) -> dict:
+    """Fetch recent inbound emails from Resend and forward them via SMTP."""
+    forward_to = (RESEND_INBOUND_FORWARD_TO or SENDER_EMAIL or SMTP_USER or '').strip()
+    if not forward_to:
+        return {'sent': 0, 'failed': 0, 'errors': ['No forwarding email address configured (RESEND_INBOUND_FORWARD_TO or SENDER_EMAIL/SMTP_USER)']}
+
+    emails = _resend_get_inbound_emails(limit=limit)
+    results = {'sent': 0, 'failed': 0, 'errors': []}
+
+    for email_obj in emails:
+        ok, err = _forward_resend_email_object(email_obj, forward_to)
+        if ok:
+            results['sent'] += 1
+        else:
+            results['failed'] += 1
+            results['errors'].append(err or 'unknown error')
+
+    return results
+
+
+def forward_specific_resend_inbound_email(email_id: str) -> dict:
+    """Fetch a specific Resend inbound email by ID and forward it via SMTP."""
+    forward_to = (RESEND_INBOUND_FORWARD_TO or SENDER_EMAIL or SMTP_USER or '').strip()
+    if not forward_to:
+        return {'sent': 0, 'failed': 1, 'errors': ['No forwarding email address configured (RESEND_INBOUND_FORWARD_TO or SENDER_EMAIL/SMTP_USER)']}
+
+    email_obj = _resend_get_inbound_email(email_id)
+    if not email_obj:
+        return {'sent': 0, 'failed': 1, 'errors': [f'Email ID not found: {email_id}']}
+
+    ok, err = _forward_resend_email_object(email_obj, forward_to)
+    return {'sent': 1 if ok else 0, 'failed': 0 if ok else 1, 'errors': [] if ok else [err or 'unknown error']}
