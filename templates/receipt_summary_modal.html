@@ -151,10 +151,11 @@
                 } catch(_) {}
             }, 5200);
 
-            // Clear search input + cache after successful save
+            // Clear search input + cache after successful save.
+            // Set the flag first so mark-input watchers don't restore MARK from URL/history.
+            try { window.__RC_CLEAR_MARK_AFTER_SAVE = true; } catch(_) {}
             try { if (typeof clearSearchInputs === 'function') clearSearchInputs(); } catch(_) {}
             try { if (typeof clearReceiptSearchCacheOnClose === 'function') clearReceiptSearchCacheOnClose(); } catch(_) {}
-            try { window.__RC_CLEAR_MARK_AFTER_SAVE = true; } catch(_) {}
             // second pass to catch any late autofill that runs after save
             setTimeout(() => { try { if (typeof clearSearchInputs === 'function') clearSearchInputs(); } catch(_) {} }, 120);
         } catch (err) {

@@ -462,18 +462,53 @@
     if (dedupeKey) ssDel(dedupeKey);
     try{
       var successMsg = 'Αποθηκεύτηκε η απόδειξη (repeat).';
-      if (window.showFlash) window.showFlash(successMsg, 'success', 4200);
       if (window.persistReceiptFlash) window.persistReceiptFlash(successMsg, 'success');
-    }catch(_){ }
-    try{
+
+      try { window.__RC_CLEAR_MARK_AFTER_SAVE = true; } catch(_){}
+      try {
+        if (typeof window.clearSearchInputs === 'function') window.clearSearchInputs();
+      } catch(_){}
+      try {
+        if (typeof window.clearReceiptSearchCacheOnClose === 'function') window.clearReceiptSearchCacheOnClose();
+      } catch(_){}
+
       var urlInput = $id('scrapeUrlInput');
-      if (urlInput) urlInput.value = '';
+      if (urlInput) {
+        urlInput.value = '';
+        try { urlInput.dispatchEvent(new Event('input', { bubbles: true })); } catch(_){}
+      }
       var markInput = $id('markInput');
-      if (markInput) markInput.value = '';
+      if (markInput) {
+        markInput.value = '';
+        try { markInput.dispatchEvent(new Event('input', { bubbles: true })); } catch(_){}
+      }
+
       var modal = $id('summaryModal');
       if (modal) modal.style.display = 'none';
+
+      var reloaded = false;
       if (typeof window.partiallyReloadInvoiceTable === 'function') {
-        Promise.resolve(window.partiallyReloadInvoiceTable()).catch(function(){});
+        try { reloaded = !!(await window.partiallyReloadInvoiceTable()); } catch(_) { reloaded = false; }
+      }
+      if (!reloaded) {
+        try {
+          var tableRes = await fetch('/list/fragment', { method: 'GET', credentials: 'same-origin' });
+          if (tableRes.ok) {
+            var data = await tableRes.json().catch(function(){ return null; });
+            var container = document.getElementById('summary-container');
+            if (data && data.ok && data.table_html && container) {
+              container.innerHTML = data.table_html;
+              if (typeof window.FBP_INIT_TABULATOR === 'function') window.FBP_INIT_TABULATOR();
+              else if (typeof window.FBP_INIT_TABLE === 'function') window.FBP_INIT_TABLE();
+              reloaded = true;
+            }
+          }
+        } catch(_){}
+      }
+
+      if (window.showFlash) {
+        if (reloaded) window.showFlash(successMsg, 'success', 4200);
+        else window.showFlash('Η αποθήκευση ολοκληρώθηκε, αλλά δεν έγινε ανανέωση πίνακα. Πάτησε αναζήτηση ή ανανέωση λίστας.', 'warning', 4500);
       }
     }catch(_){ }
   }
