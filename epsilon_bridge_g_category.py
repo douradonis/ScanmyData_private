@@ -47,6 +47,7 @@ from epsilon_bridge_multiclient_strict import (
     _receipt_analysis_enabled,
     _parse_lines,
     _reason_for_rec_enhanced,
+    _format_name_with_afm,
     _load_client_map,
     resolve_paths_for_vat,
     load_epsilon_invoices,
@@ -544,9 +545,15 @@ def build_preview_rows_for_ui_g(
                         custid_val = new_suppliers[afm_issuer]["custid"]
                     else:
                         custid_val = next_custid
-                        counterpart_name = str(rec.get("counterpart_name") or rec.get("Name_issuer") or "").strip()
-                        if not counterpart_name:
+                        counterpart_name_raw = str(rec.get("counterpart_name") or rec.get("Name_issuer") or "").strip()
+                        if not counterpart_name_raw:
                             counterpart_name = f"Συναλλασσόμενος {afm_issuer}"
+                        else:
+                            # Apply formatting with 128-char limit, keeping AFM complete
+                            if not counterpart_name_raw.startswith("Συναλλασσόμενος"):
+                                counterpart_name = _format_name_with_afm(counterpart_name_raw, afm_issuer, max_len=128)
+                            else:
+                                counterpart_name = counterpart_name_raw
                         new_suppliers[afm_issuer] = {
                             "custid": custid_val,
                             "name": counterpart_name
@@ -573,9 +580,15 @@ def build_preview_rows_for_ui_g(
                 else:
                     # Δημιουργία νέου CUSTID
                     custid_val = next_custid
-                    counterpart_name = str(rec.get("counterpart_name") or rec.get("Name_issuer") or "").strip()
-                    if not counterpart_name:
+                    counterpart_name_raw = str(rec.get("counterpart_name") or rec.get("Name_issuer") or "").strip()
+                    if not counterpart_name_raw:
                         counterpart_name = f"Συναλλασσόμενος {afm_issuer}"
+                    else:
+                        # Apply formatting with 128-char limit, keeping AFM complete
+                        if not counterpart_name_raw.startswith("Συναλλασσόμενος"):
+                            counterpart_name = _format_name_with_afm(counterpart_name_raw, afm_issuer, max_len=128)
+                        else:
+                            counterpart_name = counterpart_name_raw
                     
                     new_suppliers[afm_issuer] = {
                         "custid": custid_val,

@@ -189,6 +189,17 @@
     .flash-error   { background:#fee2e2; color:#991b1b; border:1px solid #fca5a5; }
     .flash-warning { background:#fef3c7; color:#92400e; border:1px solid #fde68a; }
     .flash-info    { background:#e0f2fe; color:#075985; border:1px solid #bae6fd; }
+
+    /* Global warning banners – dark-mode aware */
+    .missing-customer-warning { background:#fffbeb; border-left:4px solid #f59e0b; color:#78350f; }
+    .missing-customer-warning a { color:#92400e; }
+    [data-theme="dark"] .missing-customer-warning { background:#3b2f00; border-left-color:#fbbf24; color:#fde68a; }
+    [data-theme="dark"] .missing-customer-warning a { color:#fcd34d; }
+    [data-theme="dark"] .missing-customer-warning svg { color:#fbbf24; }
+    .admin-only-warning { background:#fffbeb; border:1px solid #fde68a; color:#78350f; border-radius:8px; }
+    [data-theme="dark"] .admin-only-warning { background:#3b2f00; border-color:#92400e; color:#fde68a; }
+    .no-group-warning { background:#fee2e2; border:1px solid #fca5a5; color:#991b1b; border-radius:8px; }
+    [data-theme="dark"] .no-group-warning { background:#2d0000; border-color:#7f1d1d; color:#fca5a5; }
     
     #flashContainer {
       position: relative;
@@ -2050,6 +2061,24 @@
         {% endif %}
       {% endwith %}
     </div>
+
+    {% if current_user.is_authenticated and not active_credential %}
+    <div class="missing-customer-warning p-4 mb-4 rounded-r-lg" id="globalNoCredentialBanner">
+      <div class="flex items-center">
+        <div class="flex-shrink-0">
+          <svg class="h-5 w-5 text-yellow-500" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+            <path fill-rule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd" />
+          </svg>
+        </div>
+        <div class="ml-3">
+          <p class="text-sm">
+            <strong>Δεν έχει επιλεγεί ενεργός πελάτης.</strong>
+            <a href="{{ url_for('credentials') }}" class="font-medium underline">Επιλέξτε πελάτη</a> για να συνεχίσετε.
+          </p>
+        </div>
+      </div>
+    </div>
+    {% endif %}
 
     {% block content %}{% endblock %}
 
