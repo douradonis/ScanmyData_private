@@ -11,6 +11,7 @@ curl -v \
 
 τσεκαρισμα αποδειξεων με σειριακο ταμειακης
 reason size limit 128 (fix), χρωματα dark mode modal summary
-test
-διορθωση mydata api, e-invoicing
+Λήψη Παραστατικών MYDATA με μη επιλεγμενο πελατη, διορθωση η επεξεργασια credential ειναι διαθεσιμη μονο για διαχειριστές της ενεργης ομαδας 
+dark mode
+
 

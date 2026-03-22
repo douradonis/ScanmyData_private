@@ -7732,7 +7732,30 @@ def credentials():
 
     # GET: φορτώνουμε τα credentials και αφήνουμε το context_processor να περάσει το active credential/ΑΦΜ
     creds = load_credentials()
-    return safe_render("credentials_list.html", credentials=creds, active_page="credentials")
+    is_group_admin = False
+    other_creds = []
+    try:
+        from auth import get_active_group
+        grp = get_active_group()
+        if grp and getattr(current_user, 'is_authenticated', False):
+            is_group_admin = current_user.role_for_group(grp) == 'admin'
+    except Exception:
+        is_group_admin = False
+
+    if is_group_admin:
+        other_creds = [
+            {"name": c.get("name", ""), "vat": c.get("vat", "")}
+            for c in creds
+            if c.get("name")
+        ]
+
+    return safe_render(
+        "credentials_list.html",
+        credentials=creds,
+        other_creds=other_creds,
+        is_group_admin=is_group_admin,
+        active_page="credentials"
+    )
 
 
 @app.route("/credentials/edit/<name>", methods=["GET", "POST"])
@@ -7743,7 +7766,21 @@ def credentials_edit(name):
         flash("Το credential δεν βρέθηκε", "error")
         return redirect(url_for("credentials"))
 
+    can_edit_credential = False
+    try:
+        from auth import get_active_group
+        grp = get_active_group()
+        if grp and getattr(current_user, 'is_authenticated', False):
+            can_edit_credential = current_user.role_for_group(grp) == 'admin'
+    except Exception:
+        can_edit_credential = False
+
     if request.method == "POST":
+        if not can_edit_credential:
+            if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+                return jsonify({'ok': False, 'error': 'admin privileges required'}), 403
+            flash("Η επεξεργασία credential επιτρέπεται μόνο σε διαχειριστές της ομάδας.", "error")
+            return redirect(url_for("credentials"))
         new_name = (request.form.get("name") or "").strip()
         user = (request.form.get("user") or "").strip()
         key = (request.form.get("key") or "").strip()
@@ -7817,11 +7854,55 @@ def credentials_edit(name):
     # GET -> εμφανίζουμε τη φόρμα επεξεργασίας
     # Προσθέτουμε flash πληροφορία (παραμένει ως έχει)
     flash(f"Επεξεργασία credential: {credential.get('name')}", "info")
+
+    # Ελέγχουμε αν ο χρήστης είναι admin της ενεργής ομάδας
+    _is_group_admin = can_edit_credential
+
+    # Λίστα άλλων credentials (για copy-from feature) — μόνο για admins
+    other_creds = []
+    if _is_group_admin:
+        other_creds = [
+            {"name": c.get("name", ""), "vat": c.get("vat", "")}
+            for c in creds
+            if c.get("name") != name
+        ]
+
     return safe_render(
         "credentials_edit.html",
         credential=credential,
+        other_creds=other_creds,
+        is_group_admin=_is_group_admin,
         active_page="credentials"
     )
+
+
+@app.get("/api/credentials/copy_params/<path:source_name>")
+@login_required
+def credentials_copy_params(source_name):
+    """Return configuration params from another credential — only for group admins."""
+    try:
+        from auth import get_active_group
+        grp = get_active_group()
+        if not grp:
+            return jsonify({'ok': False, 'error': 'no active group'}), 403
+        if current_user.role_for_group(grp) != 'admin':
+            return jsonify({'ok': False, 'error': 'admin privileges required'}), 403
+    except Exception:
+        return jsonify({'ok': False, 'error': 'permission check failed'}), 500
+
+    creds = load_credentials()
+    src = next((c for c in creds if c.get('name') == source_name), None)
+    if not src:
+        return jsonify({'ok': False, 'error': 'credential not found'}), 404
+
+    # Return only configuration fields — never user/key/env/vat (sensitive / unique)
+    COPY_FIELDS = [
+        'book_category', 'fpa_applicable', 'expense_tags',
+        'apodeixakia_type', 'apodeixakia_supplier', 'apodeixakia_other_expenses',
+        'series_settings', 'custom_categories',
+    ]
+    params = {k: src.get(k) for k in COPY_FIELDS}
+    return jsonify({'ok': True, 'params': params})
 
 
 @app.route("/credentials/delete/<name>", methods=["POST"])
@@ -13275,6 +13356,55 @@ def _human_readable_size(num: int) -> str:
     return f"{value:.2f} TB"
 
 
+def _open_backup_zip(source, password: Optional[bytes] = None):
+    """Open a zip (plain or AES-encrypted) and return a context manager.
+    Tries plain zipfile first (old unencrypted backups); on failure tries
+    pyzipper with the server-derived AES key (new encrypted backups)."""
+    if password is None:
+        try:
+            password = _derive_backup_password().encode('utf-8')
+        except Exception:
+            password = b'scanmydata_bkup'
+
+    # 1) Try plain stdlib ZipFile — works for unencrypted backups
+    try:
+        zf = zipfile.ZipFile(source)
+        # Probe: peek at the first member; AES-encrypted members raise RuntimeError
+        for name in zf.namelist():
+            try:
+                with zf.open(name) as f:
+                    f.read(4)
+                break
+            except RuntimeError as probe_err:
+                if 'password' in str(probe_err).lower() or 'encrypt' in str(probe_err).lower():
+                    zf.close()
+                    raise
+                break
+            except Exception:
+                break
+        zf.close()
+        try:
+            source.seek(0)
+        except Exception:
+            pass
+        return zipfile.ZipFile(source)
+    except (RuntimeError, Exception):
+        pass
+
+    # 2) Fallback: AES-encrypted via pyzipper
+    try:
+        import pyzipper
+        try:
+            source.seek(0)
+        except Exception:
+            pass
+        zf = pyzipper.AESZipFile(source)
+        zf.setpassword(password)
+        return zf
+    except Exception as e:
+        raise zipfile.BadZipFile(f"Δεν ήταν δυνατό το άνοιγμα του ZIP (plain ή AES): {e}")
+
+
 def _analyze_backup_zip(file_like) -> Dict[str, Any]:
     summary: Dict[str, Any] = {
         "file_count": 0,
@@ -13295,7 +13425,7 @@ def _analyze_backup_zip(file_like) -> Dict[str, Any]:
     except Exception:
         pass
 
-    with zipfile.ZipFile(file_like) as zf:
+    with _open_backup_zip(file_like) as zf:
         infos = [info for info in zf.infolist() if not info.is_dir()]
         summary["file_count"] = len(infos)
         summary["total_size"] = sum(info.file_size for info in infos)
@@ -13388,7 +13518,7 @@ def _apply_backup_zip(zip_path: str) -> None:
     base = os.path.normpath(get_group_base_dir())
     has_credentials = False
 
-    with zipfile.ZipFile(zip_path) as zf:
+    with _open_backup_zip(zip_path) as zf:
         selected_vats: set[str] = set()
         mode = "group"
         try:
@@ -13484,6 +13614,22 @@ def _apply_backup_zip(zip_path: str) -> None:
         raise ValueError("Το backup δεν περιέχει το αρχείο credentials.json.")
 
 
+def _derive_backup_password() -> str:
+    """Derive a deterministic AES backup password from MASTER_ENCRYPTION_KEY.
+    Returns a 16-character hex string (64-bit); stable across calls."""
+    import hashlib
+    master = os.getenv("MASTER_ENCRYPTION_KEY", "")
+    if master:
+        digest = hashlib.sha256(master.encode("utf-8")).hexdigest()
+        return digest[:16]
+    # Fallback: fixed default (low security — warns in log)
+    current_app.logger.warning(
+        "MASTER_ENCRYPTION_KEY not set; backup encrypted with default password. "
+        "Set MASTER_ENCRYPTION_KEY for production."
+    )
+    return "scanmydata_bkup"
+
+
 @app.get("/api/data_backup/download")
 def data_backup_download():
     # only group admin may download backups
@@ -13499,17 +13645,22 @@ def data_backup_download():
         return jsonify({'ok': False, 'error': 'permission check failed'}), 500
 
     try:
+        import pyzipper
+
         # Get backup mode and customer list from query params
         mode = request.args.get('mode', 'group').strip().lower()
         customers_str = request.args.get('customers', '').strip()
         selected_customers = set(v.strip() for v in customers_str.split(',') if v.strip()) if customers_str else set()
-        
+
+        backup_password = _derive_backup_password().encode('utf-8')
+
         mem = io.BytesIO()
-        with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as zf:
+        with pyzipper.AESZipFile(mem, "w", compression=pyzipper.ZIP_DEFLATED,
+                                  encryption=pyzipper.WZ_AES) as zf:
+            zf.setpassword(backup_password)
             base = get_group_base_dir()
-            
+
             if mode == 'customer' and selected_customers:
-                # Write lightweight manifest so restore can apply customer-scoped merge safely.
                 manifest = {
                     "mode": "customer",
                     "selected_vats": sorted(list(selected_customers)),
@@ -13517,24 +13668,19 @@ def data_backup_download():
                 }
                 zf.writestr("backup_manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
 
-                # Build customer-scoped credentials.json (only selected customers).
                 creds_path = os.path.join(base, "credentials.json")
                 if os.path.exists(creds_path):
                     try:
                         creds_data = _safe_json_read(creds_path, default=[])
                         creds_list = creds_data if isinstance(creds_data, list) else []
-                        filtered = []
-                        for c in creds_list:
-                            if not isinstance(c, dict):
-                                continue
-                            vat = str(c.get("vat") or "").strip()
-                            if vat in selected_customers:
-                                filtered.append(c)
+                        filtered = [
+                            c for c in creds_list
+                            if isinstance(c, dict) and str(c.get("vat") or "").strip() in selected_customers
+                        ]
                         zf.writestr("credentials.json", json.dumps(filtered, ensure_ascii=False, indent=2).encode("utf-8"))
                     except Exception:
                         current_app.logger.warning("Failed to build filtered credentials.json for customer backup", exc_info=True)
 
-                # Only backup files related to selected customers
                 for root, _, files in os.walk(base):
                     for fname in files:
                         if fname in {'credentials.json', 'credentials_settings.json', 'activity.log', 'fiscal_meta.json', 'backup_manifest.json'}:
@@ -13550,22 +13696,19 @@ def data_backup_download():
                     "created_at": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
                 }
                 zf.writestr("backup_manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
-                # Backup entire group directory (default: mode='group')
                 for root, _, files in os.walk(base):
                     for fname in files:
                         path = os.path.join(root, fname)
                         arc = os.path.relpath(path, base)
                         zf.write(path, arc)
-        
+
         mem.seek(0)
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_label = f"backup_{mode}" if mode == 'customer' else "backup"
         file_name = f"data_{backup_label}_{ts}.zip"
-        
-        # Calculate file size
+
         file_size_mb = len(mem.getvalue()) / (1024 * 1024)
-        
-        # Log backup download with enhanced details
+
         try:
             from utils import log_user_activity
             log_user_activity(
@@ -13576,15 +13719,16 @@ def data_backup_download():
                     'file_name': file_name,
                     'file_size_mb': round(file_size_mb, 2),
                     'mode': mode,
+                    'encrypted': True,
                     'customers': list(selected_customers) if mode == 'customer' else None,
-                    'customers_count': len(selected_customers) if mode == 'customer' else None
+                    'customers_count': len(selected_customers) if mode == 'customer' else None,
                 },
                 user_email=getattr(current_user, 'email', None),
                 user_username=getattr(current_user, 'username', None)
             )
         except Exception as e:
             current_app.logger.error(f"Failed to log backup download: {e}")
-        
+
         return send_file(
             mem,
             mimetype="application/zip",
