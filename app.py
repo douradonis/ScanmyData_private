@@ -3533,6 +3533,37 @@ def get_last_fetch_date(credential_name: str, only_meta: bool = False) -> Option
         return None
 
 
+def _format_last_fetch_date_for_display(last_date: Optional[str]) -> Optional[str]:
+    """Return last-fetch timestamp formatted for the UI in Europe/Athens time."""
+    if not last_date:
+        return None
+
+    try:
+        try:
+            dt = datetime.datetime.fromisoformat(last_date)
+        except Exception:
+            dt = None
+
+        if dt is None:
+            return last_date
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+
+        try:
+            from zoneinfo import ZoneInfo
+            dt = dt.astimezone(ZoneInfo('Europe/Athens'))
+        except Exception:
+            try:
+                dt = dt.astimezone(datetime.timezone(datetime.timedelta(hours=2)))
+            except Exception:
+                pass
+
+        return dt.strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return last_date
+
+
 def _get_fetch_tracking_key(credential_name: str = '', credential_vat: str = '') -> str:
     """Return stable key for last-fetch tracking (prefer VAT when available)."""
     vat = str(credential_vat or '').strip()
@@ -4965,24 +4996,23 @@ def inject_active_credential():
     try:
         from auth import get_active_group
         from flask_login import current_user
-        
-        # Έλεγχος αν ο χρήστης είναι authenticated
+
         if getattr(current_user, 'is_authenticated', False):
             grp = get_active_group()
             if grp:
-                # Πάρε το ρόλο του χρήστη στην ομάδα
                 role = current_user.role_for_group(grp)
                 if role in ('admin', 'member'):
                     user_role = role
                 else:
-                    # Default if role is something else
                     user_role = 'member'
-            # else: no active group, keep default 'member'
-        # else: not authenticated, keep default 'member'
     except Exception as e:
-        # Log the error for debugging
         log.warning(f"[auth] Failed to determine user_role: {e}")
         user_role = "member"
+
+    try:
+        active_year = get_active_fiscal_year()
+    except Exception:
+        active_year = None
     
     active_group_name = None
     try:
@@ -5011,6 +5041,7 @@ def inject_active_credential():
         app_settings=settings,
         user_role=user_role,
         active_group=active_group_name,
+        active_year=active_year,
         ADMIN_USER_ID=ADMIN_USER_ID if 'ADMIN_USER_ID' in globals() else 0,
         display_username=display_username,
     )
@@ -7565,39 +7596,9 @@ def api_last_fetch_date():
             # Backward compatibility: older installs may have written by credential name.
             last_date = get_last_fetch_date(credential_name, only_meta=True)
         
-        # Format for display if available
-        if last_date:
-            try:
-                # Parse ISO 8601, interpret naive as UTC, then convert to Europe/Athens
-                try:
-                    dt = datetime.datetime.fromisoformat(last_date)
-                except Exception:
-                    dt = None
-
-                if dt is not None:
-                    # Ensure tz-aware: treat naive timestamps as UTC
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=datetime.timezone.utc)
-                    # Convert to Europe/Athens for display
-                    try:
-                        from zoneinfo import ZoneInfo
-                        athens_tz = ZoneInfo('Europe/Athens')
-                        dt = dt.astimezone(athens_tz)
-                    except Exception:
-                        # Fallback: add 2 hours offset (approximate)
-                        try:
-                            dt = dt.astimezone(datetime.timezone(datetime.timedelta(hours=2)))
-                        except Exception:
-                            pass
-                    formatted = dt.strftime("%d/%m/%Y %H:%M")
-                else:
-                    formatted = last_date
-            except Exception:
-                formatted = last_date
-        else:
-            formatted = None
+        formatted = _format_last_fetch_date_for_display(last_date)
         
-        return jsonify({"last_fetch_date": formatted})
+        return jsonify({"last_fetch_date": formatted, "last_fetch_raw": last_date})
     except Exception as e:
         log.exception("api_last_fetch_date error")
         return jsonify({"error": str(e)}), 500
@@ -8448,6 +8449,21 @@ def fetch():
     creds = load_credentials()
     active_cred = get_active_credential_from_session()
     active_name = active_cred.get("name") if active_cred else None
+    initial_last_fetch_date = None
+
+    try:
+        initial_vat = str((active_cred or {}).get("vat") or "").strip()
+        initial_key = _get_fetch_tracking_key(active_name or "", initial_vat)
+        initial_last_fetch_date = _format_last_fetch_date_for_display(
+            get_last_fetch_date(initial_key, only_meta=True) if initial_key else None
+        )
+    except Exception:
+        initial_last_fetch_date = None
+
+    wants_json = (
+        request.headers.get("X-Requested-With") == "XMLHttpRequest"
+        or "application/json" in (request.headers.get("Accept") or "")
+    )
 
     if request.method == "POST":
         date_from_raw = request.form.get("date_from", "").strip()
@@ -8457,9 +8473,12 @@ def fetch():
 
         if not date_from_iso or not date_to_iso:
             error = "Παρακαλώ συμπλήρωσε έγκυρες ημερομηνίες (dd/mm/YYYY)."
+            if wants_json:
+                return jsonify({"ok": False, "error": error}), 400
             return safe_render("fetch.html", credentials=creds, message=message,
                                error=error, preview=preview, active_page="fetch",
-                               active_credential=active_name)
+                               active_credential=active_name,
+                               last_fetch_date_display=initial_last_fetch_date)
 
         d1 = datetime.datetime.fromisoformat(date_from_iso).strftime("%d/%m/%Y")
         d2 = datetime.datetime.fromisoformat(date_to_iso).strftime("%d/%m/%Y")
@@ -8479,9 +8498,12 @@ def fetch():
 
         if not aade_user or not aade_key:
             error = "Δεν υπάρχουν αποθηκευμένα credentials για την κλήση."
+            if wants_json:
+                return jsonify({"ok": False, "error": error}), 400
             return safe_render("fetch.html", credentials=creds, message=message,
                                error=error, preview=preview, active_page="fetch",
-                               active_credential=active_name)
+                               active_credential=active_name,
+                               last_fetch_date_display=initial_last_fetch_date)
 
         # perform the actual fetch+save in background so the request can
         # return immediately and avoid timeouts.
@@ -8583,9 +8605,25 @@ def fetch():
         message = "Fetch started – results will be saved shortly."
         preview = []
 
+        if wants_json:
+            fetch_key = _get_fetch_tracking_key(selected, vat)
+            current_last_fetch_date = _format_last_fetch_date_for_display(
+                get_last_fetch_date(fetch_key, only_meta=True) if fetch_key else None
+            )
+            return jsonify({
+                "ok": True,
+                "started": True,
+                "message": message,
+                "credential": selected,
+                "vat": vat,
+                "last_fetch_date": current_last_fetch_date,
+                "last_fetch_raw": get_last_fetch_date(fetch_key, only_meta=True) if fetch_key else None,
+            })
+
     return safe_render("fetch.html", credentials=creds, message=message,
                        error=error, preview=preview, active_page="fetch",
-                       active_credential=active_name)
+                       active_credential=active_name,
+                       last_fetch_date_display=initial_last_fetch_date)
 
 
 @app.route("/credentials/get_settings", methods=["GET"])

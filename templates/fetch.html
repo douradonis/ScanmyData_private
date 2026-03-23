@@ -63,7 +63,7 @@
           <input id="vat_input" name="vat_number" type="text" value="{{ request.form.get('vat_number','') }}" placeholder="π.χ. 802576637" class="border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-sky-300">
         </div>
         <div class="flex items-end justify-center">
-          <div id="lastFetchInfo" class="text-lg font-bold text-center text-gray-700" style="line-height: 1.3;">Τελευταία λήψη: —</div>
+          <div id="lastFetchInfo" class="text-lg font-bold text-center text-gray-700" style="line-height: 1.3;">Τελευταία λήψη: {% if last_fetch_date_display %}{{ last_fetch_date_display }}{% elif active_credential %}δεν υπάρχει{% else %}—{% endif %}</div>
         </div>
       </div>
 
@@ -189,7 +189,13 @@
 </style>
 
 <script>
-document.addEventListener("DOMContentLoaded", function() {
+(window.__runOnPageReady || function(fn){
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', fn, { once: true });
+  } else {
+    fn();
+  }
+})(function() {
   // Initialize Flatpickr with Greek locale
   flatpickr("#date_from", { locale: "el", dateFormat: "d/m/Y", allowInput: true });
   flatpickr("#date_to", { locale: "el", dateFormat: "d/m/Y", allowInput: true });
@@ -197,6 +203,60 @@ document.addEventListener("DOMContentLoaded", function() {
   // Lock credential dropdown to active credential
   const credentialSelect = document.getElementById('use_credential');
   const lastFetchInfo = document.getElementById('lastFetchInfo');
+  const fetchForm = document.querySelector('form[method="POST"]');
+  const waitOverlay = document.getElementById('waitOverlay');
+  let lastFetchPollTimer = null;
+  const pageAbortController = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const pageSignal = pageAbortController ? pageAbortController.signal : undefined;
+
+  function setLastFetchInfoText(value) {
+    if (!lastFetchInfo) return;
+    if (value) {
+      lastFetchInfo.textContent = 'Τελευταία λήψη: ' + value;
+      return;
+    }
+    const hasActiveSelection = !!((credentialSelect && credentialSelect.value) || (document.getElementById('vat_input')?.value || '').trim());
+    lastFetchInfo.textContent = hasActiveSelection ? 'Τελευταία λήψη: δεν υπάρχει' : 'Τελευταία λήψη: —';
+  }
+
+  function clearLastFetchPolling() {
+    if (!lastFetchPollTimer) return;
+    clearInterval(lastFetchPollTimer);
+    lastFetchPollTimer = null;
+  }
+
+  function cleanupFetchPage() {
+    clearLastFetchPolling();
+    if (pageAbortController) {
+      try { pageAbortController.abort(); } catch(_) {}
+    }
+  }
+
+  if (typeof window.__registerPageCleanup === 'function') {
+    window.__registerPageCleanup(cleanupFetchPage);
+  }
+
+  function showFetchFlash(message, type) {
+    const host = document.querySelector('.max-w-14xl');
+    if (!host) return;
+
+    const existing = document.getElementById('fetchAjaxFlash');
+    if (existing) existing.remove();
+
+    const flash = document.createElement('div');
+    flash.id = 'fetchAjaxFlash';
+    flash.className = 'flash-banner mb-4 relative px-4 py-2 rounded-lg ' + (type === 'error' ? 'flash-error' : 'flash-success');
+    flash.textContent = message;
+
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'absolute top-1 right-2 font-bold';
+    closeBtn.textContent = '×';
+    closeBtn.addEventListener('click', () => flash.remove());
+    flash.appendChild(closeBtn);
+
+    host.insertBefore(flash, host.firstChild);
+  }
   
   async function lockCredentialToActive() {
     // Αν υπάρχει ήδη επιλεγμένο credential, κλείδωσέ το
@@ -224,14 +284,17 @@ document.addEventListener("DOMContentLoaded", function() {
     }
   }
   
-  async function loadLastFetch() {
-    const credentialName = credentialSelect.value;
+  async function loadLastFetch(options) {
+    options = options || {};
+    const credentialName = typeof options.credentialName === 'string' ? options.credentialName : credentialSelect.value;
     const vatInput = document.getElementById('vat_input');
-    const vatVal = (vatInput && vatInput.value) ? vatInput.value.trim() : '';
+    const vatVal = typeof options.vat === 'string'
+      ? options.vat.trim()
+      : ((vatInput && vatInput.value) ? vatInput.value.trim() : '');
 
     if (!credentialName && !vatVal) {
-      lastFetchInfo.textContent = 'Τελευταία λήψη: —';
-      return;
+      setLastFetchInfoText(null);
+      return null;
     }
     try {
       const selectedOption = credentialSelect.options[credentialSelect.selectedIndex];
@@ -247,16 +310,44 @@ document.addEventListener("DOMContentLoaded", function() {
       const res = await fetch('/api/last_fetch_date?' + query.toString());
       if (res.ok) {
         const data = await res.json();
-        if (data.last_fetch_date) {
-          lastFetchInfo.textContent = 'Τελευταία λήψη: ' + data.last_fetch_date;
-        } else {
-          lastFetchInfo.textContent = 'Τελευταία λήψη: δεν υπάρχει';
-        }
+        setLastFetchInfoText(data.last_fetch_date || null);
+        return {
+          display: data.last_fetch_date || null,
+          raw: data.last_fetch_raw || data.last_fetch_date || null
+        };
       }
     } catch(e) {
       console.warn('Failed to load last fetch date', e);
-      lastFetchInfo.textContent = 'Τελευταία λήψη: —';
     }
+    setLastFetchInfoText(null);
+    return { display: null, raw: null };
+  }
+
+  function startLastFetchPolling(previousValue, options) {
+    clearLastFetchPolling();
+    let attempts = 0;
+    const maxAttempts = 60;
+    const targetCredential = options && typeof options.credentialName === 'string' ? options.credentialName : '';
+    const targetVat = options && typeof options.vat === 'string' ? options.vat : '';
+    const previousRaw = previousValue && previousValue.raw ? previousValue.raw : null;
+
+    const tick = async () => {
+      attempts += 1;
+      const currentValue = await loadLastFetch({ credentialName: targetCredential, vat: targetVat });
+      if (currentValue && currentValue.raw && currentValue.raw !== previousRaw) {
+        clearLastFetchPolling();
+        return;
+      }
+      if (attempts >= maxAttempts) {
+        clearLastFetchPolling();
+      }
+    };
+
+    lastFetchPollTimer = setInterval(() => {
+      tick().catch(err => console.warn('Last fetch polling failed', err));
+    }, 2500);
+
+    tick().catch(err => console.warn('Initial last fetch polling failed', err));
   }
   
   // Κλείδωσε το credential και φόρτωσε την τελευταία λήψη
@@ -304,8 +395,8 @@ document.addEventListener("DOMContentLoaded", function() {
   // also reload last fetch when VAT input changes
   const vatInputEl = document.getElementById('vat_input');
   if (vatInputEl) {
-    vatInputEl.addEventListener('blur', loadLastFetch);
-    vatInputEl.addEventListener('change', loadLastFetch);
+    vatInputEl.addEventListener('blur', loadLastFetch, pageSignal ? { signal: pageSignal } : undefined);
+    vatInputEl.addEventListener('change', loadLastFetch, pageSignal ? { signal: pageSignal } : undefined);
   }
   
   // Αποθήκευσε την αρχική τιμή
@@ -336,7 +427,7 @@ document.addEventListener("DOMContentLoaded", function() {
     minimized = !minimized;
     try { localStorage.setItem(PREVIEW_KEY, minimized ? 'true' : 'false'); } catch(e) {}
     render();
-  });
+  }, pageSignal ? { signal: pageSignal } : undefined);
 
   render();
 
@@ -351,19 +442,55 @@ document.addEventListener("DOMContentLoaded", function() {
   });
 
   // Show wait overlay when the fetch form is submitted
-  const fetchForm = document.querySelector('form[method="POST"]');
-  const waitOverlay = document.getElementById('waitOverlay');
   if (fetchForm && waitOverlay) {
-    fetchForm.addEventListener('submit', function(e){
-      // show overlay immediately
+    fetchForm.addEventListener('submit', async function(e){
+      e.preventDefault();
+
       try {
         waitOverlay.style.display = 'flex';
-        // ensure focus on overlay for screen readers
         waitOverlay.setAttribute('aria-hidden', 'false');
       } catch(err){}
-      // leave normal form submit to proceed; overlay will hide when response renders
-    });
+
+      const formData = new FormData(fetchForm);
+      const fallbackCredential = credentialSelect ? credentialSelect.value : '';
+      const fallbackVat = (document.getElementById('vat_input')?.value || '').trim();
+      const requestCredential = String(formData.get('use_credential') || fallbackCredential || '');
+      const requestVat = String(formData.get('vat_number') || fallbackVat || '');
+      const previousValue = await loadLastFetch({ credentialName: requestCredential, vat: requestVat });
+
+      try {
+        const response = await fetch(fetchForm.getAttribute('action') || window.location.pathname, {
+          method: 'POST',
+          body: formData,
+          credentials: 'same-origin',
+          headers: {
+            'X-Requested-With': 'XMLHttpRequest',
+            'Accept': 'application/json'
+          }
+        });
+
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.ok) {
+          throw new Error(data.error || 'Αποτυχία εκκίνησης λήψης.');
+        }
+
+        showFetchFlash(data.message || 'Η λήψη ξεκίνησε.', 'success');
+        startLastFetchPolling(previousValue, {
+          credentialName: requestCredential,
+          vat: requestVat
+        });
+      } catch (err) {
+        showFetchFlash(err.message || 'Αποτυχία εκκίνησης λήψης.', 'error');
+      } finally {
+        try {
+          waitOverlay.style.display = 'none';
+          waitOverlay.setAttribute('aria-hidden', 'true');
+        } catch(_) {}
+      }
+    }, pageSignal ? { signal: pageSignal } : undefined);
   }
+
+  window.addEventListener('beforeunload', cleanupFetchPage, pageSignal ? { signal: pageSignal } : undefined);
 });
 
 // spinner keyframes

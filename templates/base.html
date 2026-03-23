@@ -4,6 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>{% block title %}ScanmyData{% endblock %}</title>
+  <script>
+    (function () {
+      var theme = 'light';
+      try {
+        theme = localStorage.getItem('theme') || 'light';
+      } catch (_) {}
+      document.documentElement.setAttribute('data-theme', theme);
+      document.documentElement.style.colorScheme = theme === 'dark' ? 'dark' : 'light';
+    })();
+  </script>
   
   <link rel="icon" type="image/png" href="/icons/web-app-manifest-192x192.png" sizes="192x192" />
   <link rel="icon" type="image/png" href="/icons/favicon-96x96.png" sizes="96x96" />
@@ -1907,6 +1917,7 @@
 </head>
 <body>
   <div class="container">
+    <div id="appShell">
     <header class="mb-6">
       <div class="layout-header flex items-center justify-between">
         <div class="layout-header__brand">
@@ -1972,7 +1983,11 @@
             </div>
 
             <label for="fiscalYearSelect" class="text-sm text-gray-500">Χρήση:</label>
-            <select id="fiscalYearSelect" class="px-2 py-1 rounded border text-sm"></select>
+            <select id="fiscalYearSelect" class="px-2 py-1 rounded border text-sm" data-initial-year="{{ active_year if active_year is not none else '' }}">
+              {% if active_year is not none %}
+              <option value="{{ active_year }}" selected>{{ active_year }}</option>
+              {% endif %}
+            </select>
             <span id="fiscalYearCheckmark">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5 text-sky-600">
                 <path fill-rule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12zm13.36-1.814a.75.75 0 10-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 00-1.06 1.06l2.25 2.25a.75.75 0 001.14-.094l3.75-5.25z" clip-rule="evenodd" />
@@ -2124,6 +2139,7 @@
         </p>
       </div>
     </footer>
+    </div>
   </div>
 
   <!-- WAIT OVERLAY (global) -->
@@ -2237,9 +2253,25 @@
     </div>
   </div>
 
-  {% block scripts %}{% endblock %}
+  <div id="appPageScripts" hidden>
+    {% block scripts %}{% endblock %}
+  </div>
 
   <script>
+    window.__runOnPageReady = function(fn) {
+      if (typeof fn !== 'function') return;
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', fn, { once: true });
+      } else {
+        fn();
+      }
+    };
+
+    window.__cleanupPageScripts = null;
+    window.__registerPageCleanup = function(fn) {
+      window.__cleanupPageScripts = typeof fn === 'function' ? fn : null;
+    };
+
     // ============================================================================
     // COOKIE CONSENT MANAGEMENT (GDPR)
     // ============================================================================
@@ -2445,7 +2477,47 @@
   <script>
     (function(){
       const thisYear = new Date().getFullYear();
+      const FY_STORAGE_KEY = 'app:activeFiscalYear';
+      const serverInitialFiscalYear = (function(){
+        try { return {{ active_year|default('null') }}; } catch(_) { return null; }
+      })();
       let initialFiscalYear = null;
+
+      function readCachedFiscalYear(){
+        try {
+          const raw = localStorage.getItem(FY_STORAGE_KEY);
+          if (raw === null || raw === '') return null;
+          const parsed = Number(raw);
+          return Number.isFinite(parsed) ? parsed : null;
+        } catch(_) {
+          return null;
+        }
+      }
+
+      function syncFiscalYearState(year){
+        const normalized = Number(year);
+        if (!Number.isFinite(normalized)) return;
+        try { localStorage.setItem(FY_STORAGE_KEY, String(normalized)); } catch(_) {}
+        try { window.__ACTIVE_FISCAL_YEAR = normalized; } catch(_) {}
+        try { document.body.dataset.activeFiscalYear = String(normalized); } catch(_) {}
+      }
+
+      function dispatchFiscalYearChanged(year){
+        try {
+          window.dispatchEvent(new CustomEvent('app:fiscal-year-changed', {
+            detail: { year: Number(year) }
+          }));
+        } catch(_) {}
+      }
+
+      function resolveInitialFiscalYear(){
+        if (serverInitialFiscalYear !== null && serverInitialFiscalYear !== undefined) {
+          return Number(serverInitialFiscalYear);
+        }
+        const cached = readCachedFiscalYear();
+        if (cached !== null) return cached;
+        return thisYear;
+      }
 
       function populateFiscalSelect(selected){
         const sel = document.getElementById('fiscalYearSelect');
@@ -2489,15 +2561,23 @@
       }
 
       async function loadFiscalYearIntoUi(){
+        const resolvedInitial = resolveInitialFiscalYear();
+        initialFiscalYear = resolvedInitial;
+        populateFiscalSelect(resolvedInitial);
+        syncFiscalYearState(resolvedInitial);
+        toggleSaveButton();
+
         try{
           const r = await fetch('/get_fiscal_year', { credentials:'same-origin' });
           const j = await r.json();
-          initialFiscalYear = j.fiscal_year || thisYear;
+          initialFiscalYear = Number((j && j.fiscal_year) || resolvedInitial || thisYear);
           populateFiscalSelect(initialFiscalYear);
+          syncFiscalYearState(initialFiscalYear);
           toggleSaveButton();
         } catch {
-          initialFiscalYear = thisYear;
-          populateFiscalSelect(thisYear);
+          initialFiscalYear = resolvedInitial;
+          populateFiscalSelect(resolvedInitial);
+          syncFiscalYearState(resolvedInitial);
           toggleSaveButton();
         }
       }
@@ -2517,24 +2597,35 @@
           const j = await r.json();
           if (j.success){
             initialFiscalYear = year;
+            syncFiscalYearState(year);
+            populateFiscalSelect(year);
             if (saveBtn) saveBtn.classList.add('hidden');
             if (checkmark) {
               checkmark.classList.remove('hidden');
-              setTimeout(() => location.reload(), 500);
             }
+            dispatchFiscalYearChanged(year);
           }
         } catch {
           // Keep button visible on error
         }
       }
 
-      document.addEventListener('DOMContentLoaded', () => {
+      function initFiscalYearUi(){
         loadFiscalYearIntoUi();
         const btn = document.getElementById('fiscalYearSaveBtn');
         const select = document.getElementById('fiscalYearSelect');
-        if (btn) btn.addEventListener('click', saveFiscalYear);
-        if (select) select.addEventListener('change', toggleSaveButton);
-      });
+        if (btn && btn.dataset.fiscalBound !== '1') {
+          btn.dataset.fiscalBound = '1';
+          btn.addEventListener('click', saveFiscalYear);
+        }
+        if (select && select.dataset.fiscalBound !== '1') {
+          select.dataset.fiscalBound = '1';
+          select.addEventListener('change', toggleSaveButton);
+        }
+      }
+
+      window.__initFiscalYearUi = initFiscalYearUi;
+      document.addEventListener('DOMContentLoaded', initFiscalYearUi);
     })();
   </script>
 
@@ -2852,7 +2943,7 @@
     })();
 
     // Side menu toggle functionality
-    document.addEventListener('DOMContentLoaded', function(){
+    function initSideMenuAndShell(){
       const sideMenu = document.getElementById('sideMenu');
       const sideMenuOverlay = document.getElementById('sideMenuOverlay');
       const sideMenuToggle = document.getElementById('sideMenuToggle');
@@ -2868,15 +2959,18 @@
         sideMenuOverlay.classList.toggle('invisible');
       }
 
-      if (sideMenuToggle) {
+      if (sideMenuToggle && sideMenuToggle.dataset.menuBound !== '1') {
+        sideMenuToggle.dataset.menuBound = '1';
         sideMenuToggle.addEventListener('click', toggleMenu);
       }
 
-      if (sideMenuClose) {
+      if (sideMenuClose && sideMenuClose.dataset.menuBound !== '1') {
+        sideMenuClose.dataset.menuBound = '1';
         sideMenuClose.addEventListener('click', toggleMenu);
       }
 
-      if (sideMenuOverlay) {
+      if (sideMenuOverlay && sideMenuOverlay.dataset.menuBound !== '1') {
+        sideMenuOverlay.dataset.menuBound = '1';
         sideMenuOverlay.addEventListener('click', toggleMenu);
       }
 
@@ -2924,37 +3018,13 @@
         })
         .catch(err => showModalAlert('Σφάλμα', 'Request failed: ' + err));
       };
-    });
-    
-    // Dark mode toggle functionality
-    const themeToggle = document.getElementById('themeToggle');
-    const htmlElement = document.documentElement;
-    
-    // Check for saved theme preference or default to light mode
-    const currentTheme = localStorage.getItem('theme') || 'light';
-    htmlElement.setAttribute('data-theme', currentTheme);
-    if (themeToggle) {
-      themeToggle.checked = currentTheme === 'dark';
       
-      themeToggle.addEventListener('change', function() {
-        const newTheme = this.checked ? 'dark' : 'light';
-        htmlElement.setAttribute('data-theme', newTheme);
-        localStorage.setItem('theme', newTheme);
-      });
-    }
-    
-    // Highlight matching links inside the side menu (both light & dark)
-    document.addEventListener('DOMContentLoaded', function(){
       try {
-        const side = document.getElementById('sideMenu');
-        if (!side) return;
-        const anchors = Array.from(side.querySelectorAll('a'));
-        const path = window.location.pathname.replace(/\/$/, '');
+        const anchors = Array.from(sideMenu.querySelectorAll('a'));
+        const path = window.location.pathname.replace(/\/$/, '') || '/';
         anchors.forEach(a => {
           try {
-            const href = (a.getAttribute('href') || '').replace(/\/$/, '');
-            if (!href) return;
-            // mark active when the current path starts with the link href (covers subpages)
+            const href = new URL(a.getAttribute('href') || '', window.location.origin).pathname.replace(/\/$/, '') || '/';
             if (path === href || path.indexOf(href) === 0 || href.indexOf(path) === 0) {
               a.classList.add('side-menu-active');
             } else {
@@ -2963,7 +3033,291 @@
           } catch(_){ }
         });
       } catch (e) { console.warn('side menu highlight error', e); }
-    });
+    }
+
+    window.__initBaseShell = initSideMenuAndShell;
+    document.addEventListener('DOMContentLoaded', initSideMenuAndShell);
+    
+    // Dark mode toggle functionality
+    (function(){
+      const THEME_KEY = 'theme';
+
+      function readTheme(){
+        try {
+          return localStorage.getItem(THEME_KEY) || document.documentElement.getAttribute('data-theme') || 'light';
+        } catch (_) {
+          return document.documentElement.getAttribute('data-theme') || 'light';
+        }
+      }
+
+      function applyTheme(theme){
+        const normalized = theme === 'dark' ? 'dark' : 'light';
+        document.documentElement.setAttribute('data-theme', normalized);
+        document.documentElement.style.colorScheme = normalized === 'dark' ? 'dark' : 'light';
+        try { localStorage.setItem(THEME_KEY, normalized); } catch (_) {}
+
+        const themeToggle = document.getElementById('themeToggle');
+        if (themeToggle) {
+          themeToggle.checked = normalized === 'dark';
+        }
+      }
+
+      function initThemeToggle(){
+        const themeToggle = document.getElementById('themeToggle');
+        const currentTheme = readTheme();
+        applyTheme(currentTheme);
+        if (!themeToggle || themeToggle.dataset.themeBound === '1') return;
+
+        themeToggle.dataset.themeBound = '1';
+        themeToggle.addEventListener('change', function() {
+          applyTheme(this.checked ? 'dark' : 'light');
+        });
+      }
+
+      window.__applyTheme = applyTheme;
+      window.__initThemeToggle = initThemeToggle;
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initThemeToggle, { once: true });
+      } else {
+        initThemeToggle();
+      }
+    })();
+    
+    (function(){
+      const ALLOWED_PATHS = new Set(['/', '/fetch', '/credentials', '/terms', '/privacy']);
+      let navInFlight = null;
+      let pageCaptureTimer = null;
+
+      if (!window.__pageScopedListenerPatchInstalled) {
+        window.__pageScopedListenerPatchInstalled = true;
+        window.__capturePageScopedListeners = false;
+        window.__pageScopedListenerRecords = [];
+
+        const originalAddEventListener = EventTarget.prototype.addEventListener;
+        EventTarget.prototype.addEventListener = function(type, listener, options) {
+          if (window.__capturePageScopedListeners && listener) {
+            try {
+              window.__pageScopedListenerRecords.push({
+                target: this,
+                type: type,
+                listener: listener,
+                options: options
+              });
+            } catch (_) {}
+          }
+          return originalAddEventListener.call(this, type, listener, options);
+        };
+      }
+
+      function startPageListenerCapture() {
+        window.__capturePageScopedListeners = true;
+        if (pageCaptureTimer) {
+          clearTimeout(pageCaptureTimer);
+          pageCaptureTimer = null;
+        }
+      }
+
+      function stopPageListenerCaptureLater() {
+        if (pageCaptureTimer) clearTimeout(pageCaptureTimer);
+        pageCaptureTimer = setTimeout(function(){
+          window.__capturePageScopedListeners = false;
+        }, 1500);
+      }
+
+      function cleanupPageScopedListeners() {
+        const records = Array.isArray(window.__pageScopedListenerRecords)
+          ? window.__pageScopedListenerRecords
+          : [];
+        for (const rec of records) {
+          try {
+            if (rec && rec.target && rec.type && rec.listener) {
+              rec.target.removeEventListener(rec.type, rec.listener, rec.options);
+            }
+          } catch (_) {}
+        }
+        window.__pageScopedListenerRecords = [];
+        window.__capturePageScopedListeners = false;
+        if (pageCaptureTimer) {
+          clearTimeout(pageCaptureTimer);
+          pageCaptureTimer = null;
+        }
+      }
+
+      function normalizePath(pathname) {
+        const cleaned = String(pathname || '').replace(/\/+$/, '');
+        return cleaned || '/';
+      }
+
+      function isAllowedUrl(url) {
+        if (!url || url.origin !== window.location.origin) return false;
+        return ALLOWED_PATHS.has(normalizePath(url.pathname));
+      }
+
+      function shouldHandleLink(anchor, event) {
+        if (!anchor) return false;
+        if (event.defaultPrevented) return false;
+        if (event.button !== 0) return false;
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return false;
+        if (anchor.target && anchor.target !== '_self') return false;
+        if (anchor.hasAttribute('download')) return false;
+        if (anchor.getAttribute('rel') === 'external') return false;
+
+        const rawHref = anchor.getAttribute('href') || '';
+        if (!rawHref || rawHref.startsWith('#') || rawHref.startsWith('mailto:') || rawHref.startsWith('tel:') || rawHref.startsWith('javascript:')) return false;
+
+        let url;
+        try {
+          url = new URL(rawHref, window.location.href);
+        } catch (_) {
+          return false;
+        }
+
+        if (!isAllowedUrl(url)) return false;
+        if (normalizePath(url.pathname) === '/search') return false;
+        return true;
+      }
+
+      async function runPageScripts(fromScriptsHost, targetScriptsHost) {
+        if (!targetScriptsHost) return;
+        targetScriptsHost.innerHTML = '';
+        if (!fromScriptsHost) return;
+
+        const scripts = Array.from(fromScriptsHost.querySelectorAll('script'));
+        for (const oldScript of scripts) {
+          await new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            for (const attr of oldScript.attributes) {
+              script.setAttribute(attr.name, attr.value);
+            }
+
+            if (oldScript.src) {
+              script.onload = () => resolve();
+              script.onerror = () => reject(new Error('Failed loading script: ' + oldScript.src));
+            } else {
+              script.textContent = oldScript.textContent || '';
+            }
+
+            targetScriptsHost.appendChild(script);
+            if (!oldScript.src) resolve();
+          });
+        }
+      }
+
+      async function swapPage(url, options) {
+        options = options || {};
+        if (navInFlight) navInFlight.abort();
+        navInFlight = new AbortController();
+
+        const shell = document.getElementById('appShell');
+        const scriptsHost = document.getElementById('appPageScripts');
+        if (!shell || !scriptsHost) {
+          window.location.href = url.toString();
+          return;
+        }
+
+        const response = await fetch(url.toString(), {
+          credentials: 'same-origin',
+          headers: {
+            'X-Requested-With': 'partial-nav',
+            'X-Partial-Nav': '1'
+          },
+          signal: navInFlight.signal
+        });
+
+        if (!response.ok) {
+          window.location.href = url.toString();
+          return;
+        }
+
+        const html = await response.text();
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const nextShell = doc.getElementById('appShell');
+        const nextScripts = doc.getElementById('appPageScripts');
+        if (!nextShell) {
+          window.location.href = url.toString();
+          return;
+        }
+
+        try {
+          if (typeof window.__cleanupPageScripts === 'function') {
+            window.__cleanupPageScripts();
+          }
+        } catch (e) {
+          console.warn('page cleanup failed', e);
+        }
+        cleanupPageScopedListeners();
+        window.__cleanupPageScripts = null;
+
+        shell.innerHTML = nextShell.innerHTML;
+        document.title = doc.title || document.title;
+
+        if (!options.replaceState) {
+          history.pushState({ partialNav: true }, '', url.toString());
+        }
+
+        try {
+          if (typeof window.__applyTheme === 'function') {
+            const currentTheme = (function(){ try { return localStorage.getItem('theme') || 'light'; } catch(_) { return 'light'; } })();
+            window.__applyTheme(currentTheme);
+          }
+          if (typeof window.__initThemeToggle === 'function') window.__initThemeToggle();
+          if (typeof window.__initBaseShell === 'function') window.__initBaseShell();
+          if (typeof window.__initFiscalYearUi === 'function') window.__initFiscalYearUi();
+        } catch (e) {
+          console.warn('base shell init failed', e);
+        }
+
+        startPageListenerCapture();
+        await runPageScripts(nextScripts, scriptsHost);
+        stopPageListenerCaptureLater();
+
+        try {
+          window.dispatchEvent(new CustomEvent('app:page-ready', {
+            detail: { path: normalizePath(url.pathname), href: url.toString() }
+          }));
+        } catch (_) {}
+
+        window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+      }
+
+      document.addEventListener('click', function(event) {
+        const anchor = event.target && event.target.closest ? event.target.closest('a[href]') : null;
+        if (!shouldHandleLink(anchor, event)) return;
+
+        event.preventDefault();
+        let url;
+        try {
+          url = new URL(anchor.getAttribute('href'), window.location.href);
+        } catch (_) {
+          return;
+        }
+
+        swapPage(url).catch(err => {
+          console.warn('partial navigation failed', err);
+          window.location.href = url.toString();
+        });
+      }, true);
+
+      window.addEventListener('popstate', function(event) {
+        if (!event.state || !event.state.partialNav) return;
+        const url = new URL(window.location.href);
+        if (!isAllowedUrl(url)) return;
+        swapPage(url, { replaceState: true }).catch(err => {
+          console.warn('partial navigation popstate failed', err);
+          window.location.reload();
+        });
+      });
+
+      window.__runOnPageReady(function(){
+        const url = new URL(window.location.href);
+        if (isAllowedUrl(url)) {
+          try {
+            history.replaceState({ partialNav: true }, '', url.toString());
+          } catch (_) {}
+        }
+      });
+    })();
 </script>
 
 

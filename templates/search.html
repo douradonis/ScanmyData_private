@@ -98,7 +98,7 @@
             <div id="activeRepeatProfileHint" class="text-xs text-gray-500 mb-1" style="display:none"></div>
 
             <label for="repeatEntrySwitch" class="text-sm">Επαναληψιμη εισαγωγή</label>
-            <input type="checkbox" id="repeatEntrySwitch" class="toggle-switch">
+            <input type="checkbox" id="repeatEntrySwitch" class="toggle-switch" data-initial-enabled="{{ '1' if repeat_entry_conf.get('enabled') else '0' }}" {% if repeat_entry_conf.get('enabled') %}checked{% endif %}>
             <button type="button" id="editRepeatMappingBtn" class="ml-2 px-2 py-1 border rounded text-sm hidden">Επεξεργασία</button>
         <!-- New button for editing receipt classification (shown only when
              receipts+analysis+repeat are active) -->
@@ -2126,6 +2126,11 @@ function rcConsumeSearchClear(){
 }
 const ACTIVE_YEAR = (function(){ try { return {{ active_year|default('null') }}; } catch(e){ return null; } })();
 async function getActiveFiscalYear() {
+  try {
+    if (typeof window !== 'undefined' && window.__ACTIVE_FISCAL_YEAR != null) {
+      return String(window.__ACTIVE_FISCAL_YEAR);
+    }
+  } catch(_) {}
   // Προτίμησε την τιμή που ήρθε από server-side render (Jinja)
   if (typeof ACTIVE_YEAR !== 'undefined' && ACTIVE_YEAR !== null) {
     try { return String(ACTIVE_YEAR); } catch(_) { /* noop */ }
@@ -10887,8 +10892,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // bootstrap: στην εκκίνηση
   document.addEventListener('DOMContentLoaded', () => {
-    refreshRepeatState();
     const sw = document.getElementById('repeatEntrySwitch');
+    if (sw) {
+      const initialEnabled = sw.checked;
+      document.body.dataset.repeatEnabled = initialEnabled ? '1' : '0';
+      window.REPEAT_ENABLED = initialEnabled;
+      try {
+        if (localStorage.getItem(LS_KEY_REPEAT_ENABLED) === null) {
+          localStorage.setItem(LS_KEY_REPEAT_ENABLED, initialEnabled ? '1' : '0');
+        }
+      } catch(_) {}
+    }
+
+    refreshRepeatState();
+
     if (sw) {
       sw.addEventListener('change', function() {
         setRepeatEnabled(this.checked);
