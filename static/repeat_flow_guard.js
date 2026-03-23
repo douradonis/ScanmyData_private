@@ -184,6 +184,8 @@
 
     function decideAndAct(){
       if (autoSaveInProgress) return;
+      // Αν η Β-κατηγορία έχει ήδη ξεκινήσει αυτόματη αποθήκευση, μην έχει διπλή υποβολή
+      if (window.__RC_B_CAT_AUTOSAVE_IN_PROGRESS) return;
       let obj = null;
       try { obj = JSON.parse(input.value || '{}'); } catch(_){ obj = null; }
       if (!isMeaningfulSummaryObject(obj)) return;
