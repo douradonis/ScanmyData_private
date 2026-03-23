@@ -22,6 +22,11 @@ try:
 except ImportError:
     _analysis_einvoicing_gr = None
 
+try:
+    from scraper_receipt_analysis import detect_and_scrape as _analysis_detect_and_scrape
+except ImportError:
+    _analysis_detect_and_scrape = None
+
 
 def scrape_einvoicing_gr(url, timeout=15, debug=False):
     """Proxy to the analysis variant so that detect_and_scrape in this module
@@ -33,10 +38,59 @@ def scrape_einvoicing_gr(url, timeout=15, debug=False):
     receipt-facing module should operate on the simplified schema.  The
     analysis version returns these for diagnostic purposes only.
     """
-    if not _analysis_einvoicing_gr:
+    if not _analysis_einvoicing_gr and not _analysis_detect_and_scrape:
         raise RuntimeError("scrape_einvoicing_gr implementation not available")
-    res = _analysis_einvoicing_gr(url, timeout=timeout, debug=debug)
+
+    if _analysis_detect_and_scrape:
+        res = _analysis_detect_and_scrape(url, timeout=timeout, debug=debug)
+    else:
+        res = _analysis_einvoicing_gr(url, timeout=timeout, debug=debug)
+
+    def _amount_to_float(raw):
+        if raw is None:
+            return None
+        s = str(raw).strip()
+        if not s:
+            return None
+        s = s.replace("€", "").replace("EUR", "")
+        s = re.sub(r"[^\d\.,\-]", "", s)
+        if not s:
+            return None
+        if "," in s and "." in s:
+            if s.rfind(",") > s.rfind("."):
+                s = s.replace(".", "")
+                s = s.replace(",", ".")
+            else:
+                s = s.replace(",", "")
+        elif "," in s:
+            s = s.replace(",", ".")
+        try:
+            return float(s)
+        except Exception:
+            return None
+
+    def _single_vat_gross(vmap):
+        if not isinstance(vmap, dict):
+            return None
+        rows = [(k, v) for k, v in vmap.items() if k != "__inferred__" and isinstance(v, dict)]
+        if len(rows) != 1:
+            return None
+        return rows[0][1].get("gross_amount")
+
     if isinstance(res, dict):
+        mk = str(res.get("MARK") or "").strip()
+        m = MARK_RE.search(mk)
+        res["MARK"] = m.group(0) if m else None
+
+        total_v = _amount_to_float(res.get("total_amount"))
+        gross_raw = _single_vat_gross(res.get("vat_analysis"))
+        gross_v = _amount_to_float(gross_raw)
+        if gross_raw and (total_v is None or gross_v is None or abs(total_v - gross_v) > 0.06):
+            res["total_amount"] = str(gross_raw)
+
+        text_blob = " ".join(str(v) for v in res.values() if isinstance(v, str))
+        if re.search(r"τιμολογ|invoice|credit\s*note|πιστωτικ", text_blob, re.I):
+            res["is_invoice"] = True
         res.pop("vat_analysis", None)
         res.pop("vat_analysis_inferred", None)
     return res

@@ -3,7 +3,7 @@ import re
 import base64
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse, parse_qs, unquote
+from urllib.parse import urljoin, urlparse, parse_qs, unquote, urlencode
 import xml.etree.ElementTree as ET
 import os
 
@@ -860,6 +860,21 @@ def scrape_einvoicing_gr(url, return_meta=False):
             return mark_val, afm_val, meta
         return mark_val, afm_val
 
+    afm_hint = None
+    doc_type_hint = ""
+    receipt_hint = False
+
+    def _clean_mark_candidate(raw_mark):
+        txt = str(raw_mark or "").strip()
+        if not txt:
+            return None
+        m = re.search(r"\b([0-9]{15})\b", txt)
+        if m:
+            return m.group(1)
+        if txt.isdigit() and len(txt) == 15:
+            return txt
+        return None
+
     def _try_mydatapi_extract(myd_url):
         if not myd_url:
             return None, None, False, ""
@@ -886,6 +901,27 @@ def scrape_einvoicing_gr(url, return_meta=False):
             afm = None
         return mark_str, afm, is_receipt, doc_type
 
+    def _response_text(resp):
+        raw = resp.content or b""
+        head = raw[:4096].lower()
+        if b"charset=utf-16" in head or b"charset=\"utf-16\"" in head:
+            try:
+                return raw.decode("utf-16")
+            except Exception:
+                pass
+        if b"charset=utf-8" in head or b"charset=\"utf-8\"" in head:
+            try:
+                return raw.decode("utf-8", errors="replace")
+            except Exception:
+                pass
+        try:
+            return resp.text
+        except Exception:
+            try:
+                return raw.decode(resp.apparent_encoding or "utf-8", errors="replace")
+            except Exception:
+                return raw.decode("utf-8", errors="replace")
+
     def _looks_like_retail_receipt(text):
         if not text:
             return False
@@ -895,12 +931,12 @@ def scrape_einvoicing_gr(url, return_meta=False):
     try:
         r_initial = sess.get(url, timeout=15)
         r_initial.raise_for_status()
-        r_initial.encoding = r_initial.apparent_encoding or 'utf-8'
     except Exception as e:
         print(f"[RequestError] {e}")
         return None, None
     
-    soup_initial = BeautifulSoup(r_initial.text, "html.parser")
+    html_initial = _response_text(r_initial)
+    soup_initial = BeautifulSoup(html_initial, "html.parser")
 
     # 0) Ψάξε πρώτα για κουμπί "Παραστατικό (ΑΑΔΕ)" που οδηγεί σε mydatapi
     # Αυτό είναι το προτιμητέο, γιατί δίνει πρώσβαση στο mydatapi flow
@@ -915,30 +951,47 @@ def scrape_einvoicing_gr(url, return_meta=False):
     if mydatapi_url_button:
         try:
             mark_str, afm, is_receipt, doc_type = _try_mydatapi_extract(mydatapi_url_button)
-            if mark_str or afm:
+            if mark_str:
                 return _pack(mark_str, afm, is_receipt=is_receipt, doc_type=doc_type)
+            if afm and not afm_hint:
+                afm_hint = afm
+            if doc_type and not doc_type_hint:
+                doc_type_hint = doc_type
+            receipt_hint = receipt_hint or bool(is_receipt)
         except Exception:
             pass
 
     # 1) Άμεση εξαγωγή embedded mydatapi URL από HTML/scripts
-    embedded_myd = _extract_mydatapi_url_from_text(r_initial.text, r_initial.url)
+    embedded_myd = _extract_mydatapi_url_from_text(html_initial, r_initial.url)
     if embedded_myd:
         try:
             mark_str, afm, is_receipt, doc_type = _try_mydatapi_extract(embedded_myd)
-            if mark_str or afm:
+            if mark_str:
                 return _pack(mark_str, afm, is_receipt=is_receipt, doc_type=doc_type)
+            if afm and not afm_hint:
+                afm_hint = afm
+            if doc_type and not doc_type_hint:
+                doc_type_hint = doc_type
+            receipt_hint = receipt_hint or bool(is_receipt)
         except Exception:
             pass
 
-    # 2) Headless fallback: πάτημα κουμπιού MyData για δυναμικές σελίδες
-    browser_myd = _resolve_mydatapi_via_browser(url, timeout=20, debug=False)
-    if browser_myd:
-        try:
-            mark_str, afm, is_receipt, doc_type = _try_mydatapi_extract(browser_myd)
-            if mark_str or afm:
-                return _pack(mark_str, afm, is_receipt=is_receipt, doc_type=doc_type)
-        except Exception:
-            pass
+    # 2) Headless fallback ΜΟΝΟ ως εναλλακτική όταν δεν βρέθηκε καθόλου
+    # κουμπί/URL για «Παραστατικό (ΑΑΔΕ)» στο static HTML.
+    if (not mydatapi_url_button) and (not embedded_myd):
+        browser_myd = _resolve_mydatapi_via_browser(url, timeout=20, debug=False)
+        if browser_myd:
+            try:
+                mark_str, afm, is_receipt, doc_type = _try_mydatapi_extract(browser_myd)
+                if mark_str:
+                    return _pack(mark_str, afm, is_receipt=is_receipt, doc_type=doc_type)
+                if afm and not afm_hint:
+                    afm_hint = afm
+                if doc_type and not doc_type_hint:
+                    doc_type_hint = doc_type
+                receipt_hint = receipt_hint or bool(is_receipt)
+            except Exception:
+                pass
     
     # Fallback: χρησιμοποίησε την παλιά λογική (API endpoint ή HTML parsing)
     parsed = urlparse(url)
@@ -949,26 +1002,41 @@ def scrape_einvoicing_gr(url, return_meta=False):
     else:
         # Μετατροπή ViewInvoice → API endpoint
         qs = parse_qs(parsed.query)
+        base = f"{parsed.scheme}://{parsed.netloc}"
+
+        # Legacy schema: ct/id/s/h
         ct = qs.get("ct", [""])[0]
         doc_id = qs.get("id", [""])[0]
         source = qs.get("s", [""])[0]
         hash_token = qs.get("h", [""])[0]
-        
-        if not all([ct, doc_id, source, hash_token]):
+
+        # New PEPPOL schema used by e-invoicing.gr: v/ag/c
+        vat_hint = qs.get("v", [""])[0]
+        agent_hint = qs.get("ag", [""])[0]
+        off_token = qs.get("c", [""])[0]
+
+        if all([ct, doc_id, source, hash_token]):
+            api_url = f"{base}/api/GetInvoice?contentType={ct}&id={doc_id}&source={source}&isPreview=True&hashToken={hash_token}"
+        elif all([vat_hint, agent_hint, off_token]):
+            params = {
+                "contentType": "PEPPOL",
+                "offTokenTp1": off_token,
+                "vat": vat_hint,
+                "agent": agent_hint,
+                "isPreview": "True",
+            }
+            api_url = f"{base}/api/GetInvoice?{urlencode(params)}"
+        else:
             return None, None
-        
-        base = f"{parsed.scheme}://{parsed.netloc}"
-        api_url = f"{base}/api/GetInvoice?contentType={ct}&id={doc_id}&source={source}&isPreview=True&hashToken={hash_token}"
     
     try:
         r = sess.get(api_url, timeout=15)
         r.raise_for_status()
-        r.encoding = r.apparent_encoding or 'utf-8'
     except Exception as e:
         print(f"[RequestError] {e}")
         return None, None
     
-    html = r.text
+    html = _response_text(r)
     soup = BeautifulSoup(html, "html.parser")
     page_text = soup.get_text("\n", strip=True)
     is_retail_receipt = _looks_like_retail_receipt(page_text)
@@ -977,8 +1045,13 @@ def scrape_einvoicing_gr(url, return_meta=False):
     embedded_myd_api = _extract_mydatapi_url_from_text(html, r.url)
     if embedded_myd_api:
         mark_str, afm, is_receipt, doc_type = _try_mydatapi_extract(embedded_myd_api)
-        if mark_str or afm:
+        if mark_str:
             return _pack(mark_str, afm, is_receipt=is_receipt, doc_type=doc_type)
+        if afm and not afm_hint:
+            afm_hint = afm
+        if doc_type and not doc_type_hint:
+            doc_type_hint = doc_type
+        receipt_hint = receipt_hint or bool(is_receipt)
 
     # 0.2) Αν το API payload είναι «άδειο» από labels, δοκίμασε rendered περιεχόμενο
     if not re.search(r"ΑΦΜ|Α\.Φ\.Μ|ΣΤΟΙΧΕΙΑ\s*ΠΕΛΑΤ|M\.AR\.K|MARK|ΑΝΑΛΥΣΗ\s*ΦΠΑ|ΤΙΜΟΛ|ΑΠΟΔΕΙΞ", page_text, re.I):
@@ -1006,21 +1079,37 @@ def scrape_einvoicing_gr(url, return_meta=False):
     # 1) MARK - Αναζήτηση στο HTML
     mark = None
     
-    # Pattern 1: Βρες το div με "M.AR.K:"
-    for row in soup.find_all("div", class_="row"):
-        row_text = row.get_text(" ", strip=True)
-        if "M.AR.K:" in row_text or "MARK:" in row_text:
-            # Πάρε το επόμενο col
-            cols = row.find_all("div", class_=lambda c: c and "col" in c)
-            if len(cols) >= 2:
-                mark = cols[-1].get_text(strip=True)
-                break
+    # Pattern 1: label-aware extraction γύρω από το M.AR.K block
+    if not mark:
+        idx = html.find("M.AR.K")
+        if idx < 0:
+            idx = html.upper().find("MARK:")
+        if idx >= 0:
+            window = html[idx:idx + 500]
+            mark = _clean_mark_candidate(window)
+
+    # Pattern 1b: DOM-based fallback
+    if not mark:
+        for row in soup.find_all("div", class_="row"):
+            row_text = row.get_text(" ", strip=True)
+            if "M.AR.K:" in row_text or "MARK:" in row_text:
+                cols = row.find_all("div", class_=lambda c: c and "col" in c)
+                if len(cols) >= 2:
+                    mark = _clean_mark_candidate(cols[-1].get_text(strip=True))
+                    if mark:
+                        break
+
+    # Pattern 1c: strict regex fallback γύρω από το label
+    if not mark:
+        m_label = re.search(r"M\.AR\.K:\s*</div>\s*<div[^>]*>\s*([^<]{1,120})\s*</div>", html, re.I | re.S)
+        if m_label:
+            mark = _clean_mark_candidate(m_label.group(1))
     
     # Pattern 2: Regex fallback για 15ψήφιο
     if not mark:
         m = re.search(r'\b([0-9]{15})\b', html)
         if m:
-            mark = m.group(1)
+            mark = _clean_mark_candidate(m.group(1))
     
     # 2) ΑΦΜ Πελάτη - Αναζήτηση στο HTML
     counterpart_vat = None
@@ -1055,8 +1144,11 @@ def scrape_einvoicing_gr(url, return_meta=False):
     # Για λιανική απόδειξη το counterpart VAT πρέπει να είναι κενό
     if is_retail_receipt:
         counterpart_vat = None
+    elif not counterpart_vat and afm_hint:
+        counterpart_vat = afm_hint
     
-    return _pack(mark, counterpart_vat, is_receipt=is_retail_receipt, doc_type=("Απόδειξη" if is_retail_receipt else ""))
+    resolved_doc_type = "Απόδειξη" if is_retail_receipt else (doc_type_hint or "")
+    return _pack(mark, counterpart_vat, is_receipt=(is_retail_receipt or receipt_hint), doc_type=resolved_doc_type)
 
 
 # -------------------- EPSILON --------------------
@@ -1415,6 +1507,9 @@ def main():
 
     elif "e-invoicing.gr" in domain:
         source = "e-Invoicing.gr (PEPPOL)"
+        # In standalone CLI usage, prefer browser fallback for dynamic e-invoicing pages
+        # when the MyData button/link is not present in static HTML.
+        os.environ.setdefault("MYDATA_USE_BROWSER", "1")
         mark, counterpart_vat = scrape_einvoicing_gr(url)
         marks = [mark] if mark else []
 

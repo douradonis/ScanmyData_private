@@ -398,6 +398,10 @@ function normalizeScanValue(raw){
   try {
     const text = (raw == null) ? '' : String(raw).trim();
     if (!text) return '';
+    // Keep AADE TimologioQR payloads untouched; scraper.py owns URL correction.
+    if (/mydatapi\.aade\.gr/i.test(text) && /TimologioQR\/QRInfo\?q=/i.test(text)) {
+      return text;
+    }
     if (!/^https?:\/\//i.test(text)) return text;
     if (typeof URL === 'undefined') return text;
 
@@ -595,17 +599,26 @@ function applyScannedPayload(payload, options){
   const markVal = payload && payload.mark != null ? String(payload.mark).trim() : '';
   const normalizedRaw = normalizeScanValue(rawVal);
   const effectiveRaw = normalizedRaw || rawVal;
+  const embeddedUrlMatch = (function(){
+    try {
+      const candidate = String(effectiveRaw || markVal || '').trim();
+      if (!candidate) return null;
+      const m = candidate.match(/https?:\/\/[^\s"'<>]+/i);
+      return m ? m[0].trim() : null;
+    } catch(_) { return null; }
+  })();
+  const routedRaw = embeddedUrlMatch || effectiveRaw;
   if (payload && typeof payload === 'object'){
-    payload.raw = effectiveRaw;
+    payload.raw = routedRaw;
   }
-  const chosen = markVal || effectiveRaw;
+  const chosen = markVal || routedRaw;
   if (!chosen) return null;
 
   let isUrl;
   if (Object.prototype.hasOwnProperty.call(options, 'forceUrl')) {
     isUrl = !!options.forceUrl;
   } else {
-    isUrl = /^https?:\/\//i.test(effectiveRaw);
+    isUrl = !!embeddedUrlMatch || /^https?:\/\//i.test(routedRaw);
   }
 
   let mode = options.mode || currentScannerMode();
@@ -617,16 +630,16 @@ function applyScannedPayload(payload, options){
   if (mode === 'receipts' && isUrl) {
     const receiptsInput = document.getElementById('scrapeUrlInput');
     if (receiptsInput) {
-      receiptsInput.value = effectiveRaw;
+      receiptsInput.value = routedRaw;
       try { receiptsInput.dispatchEvent(new Event('input', { bubbles: true })); } catch (_) {}
       appliedTo = 'receipts';
     }
     const hiddenUrl = document.getElementById('scrapeUrlField');
-    if (hiddenUrl) hiddenUrl.value = effectiveRaw;
+    if (hiddenUrl) hiddenUrl.value = routedRaw;
   } else {
     const markInput = document.getElementById('markInput');
     if (markInput) {
-      const nextValue = markVal ? markVal : (isUrl ? effectiveRaw : chosen);
+      const nextValue = isUrl ? routedRaw : (markVal ? markVal : chosen);
       markInput.value = nextValue;
       try { markInput.dispatchEvent(new Event('input', { bubbles: true })); } catch (_) {}
       appliedTo = 'mark';
@@ -635,7 +648,7 @@ function applyScannedPayload(payload, options){
 
   return {
     appliedTo,
-    raw: effectiveRaw,
+    raw: routedRaw,
     mark: markVal,
     is_url: !!isUrl,
     mode

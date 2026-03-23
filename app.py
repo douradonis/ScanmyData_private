@@ -9080,14 +9080,37 @@ def search():
         except Exception:
             detect_and_scrape_receipt = None
 
-        input_is_url = re.match(r'^https?://', mark)
-        
-        # Normalization: αν λείπει https://, πρόσθεσε το
-        if not input_is_url and re.match(r'^[a-z0-9]', mark, re.I):
+        # Αν ο scanner έστειλε payload τύπου "MARK https://..." ή "... https:/...",
+        # πάρε πρώτα το URL token για να ακολουθήσει η ροή fetch αντί cache-by-MARK.
+        embedded_url = re.search(r'https?://[^\s]+', mark, re.I)
+        if embedded_url:
+            mark = embedded_url.group(0).strip()
+
+        # Ειδική ανάκτηση για malformed payloads που περιέχουν mydatapi URL χωρίς
+        # καθαρό scheme token στην αρχή (π.χ. "MARK ... mydatapi.aade.gr/.../QRInfo?q=...").
+        if not re.match(r'^https?://', mark, re.I):
+            md = re.search(r'(mydatapi\.aade\.gr/[^\s"\'<>]*TimologioQR/QRInfo\?q=[^\s"\'<>]+)', mark, re.I)
+            if md:
+                mark = 'https://' + md.group(1)
+
+        # Καθάρισε malformed διπλό scheme από scanner payloads (π.χ. https://https:/...).
+        mark = re.sub(r'^(https?://)+(https?:/)', r'\2', mark, flags=re.I)
+        # Ελάχιστη διόρθωση protocol μόνο για routing (https:/x -> https://x).
+        mark = re.sub(r'^(https?):/([^/])', r'\1://\2', mark, flags=re.I)
+
+        # Απέφυγε λάθος διπλό prepend όταν έχουμε ήδη "https:/...".
+        input_is_url = bool(re.match(r'^https?://', mark, re.I) or re.match(r'^https?:/', mark, re.I))
+
+        # Normalization: αν λείπει τελείως protocol, πρόσθεσε το μόνο σε καθαρά domain-like inputs.
+        if (not input_is_url) and (' ' not in mark) and re.match(r'^[a-z0-9]', mark, re.I):
             # Ψάχνουμε αν μοιάζει με domain (περιέχει . ή /)
             if '.' in mark or '/' in mark:
                 mark = 'https://' + mark
                 input_is_url = True
+
+        # Για URLs τύπου https:/... άφησε τη διόρθωση στο scraper.py (_normalize_url).
+        if re.match(r'^https?:/', mark, re.I):
+            input_is_url = True
         
         if input_is_url:
             domain = urlparse(mark).netloc.lower()

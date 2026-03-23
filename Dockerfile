@@ -52,7 +52,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt /app/requirements.txt
 RUN pip install --upgrade pip setuptools wheel \
  && pip install --no-cache-dir -r /app/requirements.txt \
- && python -m playwright install chromium
+ && python -m playwright install chromium \
+ && python - <<'PY'
+from pathlib import Path
+p = Path('/ms-playwright')
+ok = any(x.is_file() and ('chrome' in x.name.lower()) for x in p.rglob('*'))
+if not ok:
+    raise SystemExit('Playwright Chromium binary not found under /ms-playwright')
+print('Playwright Chromium binary detected')
+PY
 
 # Μετά όλος ο κώδικας
 COPY . /app
