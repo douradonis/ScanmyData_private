@@ -3409,8 +3409,22 @@ def set_active_fiscal_year(year):
     try:
         p = _fiscal_meta_path()
         os.makedirs(os.path.dirname(p), exist_ok=True)
+
+        # Preserve existing metadata (for example last_fetches) and only update fiscal_year.
+        data = {}
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as fh:
+                    data = json.load(fh) or {}
+            except Exception:
+                data = {}
+
+        if not isinstance(data, dict):
+            data = {}
+        data["fiscal_year"] = int(year)
+
         with open(p, "w", encoding="utf-8") as fh:
-            json.dump({"fiscal_year": int(year)}, fh)
+            json.dump(data, fh)
         try:
             log.info("Set active fiscal year: %s", year)
         except Exception:
@@ -7589,9 +7603,14 @@ def api_last_fetch_date():
 
         fetch_key = _get_fetch_tracking_key(credential_name, credential_vat)
         last_date = get_last_fetch_date(fetch_key, only_meta=True) if fetch_key else None
+        if not last_date and fetch_key:
+            # Fallback to activity log when metadata is missing.
+            last_date = get_last_fetch_date(fetch_key, only_meta=False)
         if not last_date and credential_name and fetch_key != credential_name:
             # Backward compatibility: older installs may have written by credential name.
             last_date = get_last_fetch_date(credential_name, only_meta=True)
+        if not last_date and credential_name:
+            last_date = get_last_fetch_date(credential_name, only_meta=False)
         
         formatted = _format_last_fetch_date_for_display(last_date)
         
@@ -8451,9 +8470,10 @@ def fetch():
     try:
         initial_vat = str((active_cred or {}).get("vat") or "").strip()
         initial_key = _get_fetch_tracking_key(active_name or "", initial_vat)
-        initial_last_fetch_date = _format_last_fetch_date_for_display(
-            get_last_fetch_date(initial_key, only_meta=True) if initial_key else None
-        )
+        initial_last_raw = get_last_fetch_date(initial_key, only_meta=True) if initial_key else None
+        if not initial_last_raw and initial_key:
+            initial_last_raw = get_last_fetch_date(initial_key, only_meta=False)
+        initial_last_fetch_date = _format_last_fetch_date_for_display(initial_last_raw)
     except Exception:
         initial_last_fetch_date = None
 
@@ -8604,9 +8624,10 @@ def fetch():
 
         if wants_json:
             fetch_key = _get_fetch_tracking_key(selected, vat)
-            current_last_fetch_date = _format_last_fetch_date_for_display(
-                get_last_fetch_date(fetch_key, only_meta=True) if fetch_key else None
-            )
+            current_last_fetch_raw = get_last_fetch_date(fetch_key, only_meta=True) if fetch_key else None
+            if not current_last_fetch_raw and fetch_key:
+                current_last_fetch_raw = get_last_fetch_date(fetch_key, only_meta=False)
+            current_last_fetch_date = _format_last_fetch_date_for_display(current_last_fetch_raw)
             return jsonify({
                 "ok": True,
                 "started": True,
@@ -8614,7 +8635,7 @@ def fetch():
                 "credential": selected,
                 "vat": vat,
                 "last_fetch_date": current_last_fetch_date,
-                "last_fetch_raw": get_last_fetch_date(fetch_key, only_meta=True) if fetch_key else None,
+                "last_fetch_raw": current_last_fetch_raw,
             })
 
     return safe_render("fetch.html", credentials=creds, message=message,

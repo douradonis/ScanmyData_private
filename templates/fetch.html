@@ -130,10 +130,10 @@
   </div>
 </div>
 
-<!-- Flatpickr scripts -->
+{% endblock %}
+
+{% block scripts %}
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
-<script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
-<script src="https://cdn.jsdelivr.net/npm/flatpickr/dist/l10n/el.js"></script>
 
 <!-- Dark-mode overrides for overlay and flatpickr -->
 <style>
@@ -188,6 +188,9 @@
   }
 </style>
 
+<script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+<script src="https://cdn.jsdelivr.net/npm/flatpickr/dist/l10n/el.js"></script>
+
 <script>
 (window.__runOnPageReady || function(fn){
   if (document.readyState === 'loading') {
@@ -196,16 +199,100 @@
     fn();
   }
 })(function() {
-  // Initialize Flatpickr with Greek locale
-  try {
-    if (typeof window.flatpickr === 'function') {
-      flatpickr("#date_from", { locale: "el", dateFormat: "d/m/Y", allowInput: true });
-      flatpickr("#date_to", { locale: "el", dateFormat: "d/m/Y", allowInput: true });
-    } else {
-      console.warn('flatpickr not available on fetch init');
+  function formatDateInputWithSlashes(raw) {
+    const digits = String(raw || '').replace(/\D/g, '').slice(0, 8);
+    const dd = digits.slice(0, 2);
+    const mm = digits.slice(2, 4);
+    const yyyy = digits.slice(4, 8);
+    if (digits.length <= 2) return dd;
+    if (digits.length <= 4) return dd + '/' + mm;
+    return dd + '/' + mm + '/' + yyyy;
+  }
+
+  function bindManualDateMask(input) {
+    if (!input || input.dataset.maskBound === '1') return;
+    input.dataset.maskBound = '1';
+
+    input.addEventListener('input', function() {
+      const next = formatDateInputWithSlashes(input.value);
+      if (input.value !== next) {
+        input.value = next;
+      }
+    });
+  }
+
+  function initDateInputs() {
+    const fromInput = document.getElementById('date_from');
+    const toInput = document.getElementById('date_to');
+    bindManualDateMask(fromInput);
+    bindManualDateMask(toInput);
+  }
+
+  function initFlatpickrIfAvailable() {
+    const fromInput = document.getElementById('date_from');
+    const toInput = document.getElementById('date_to');
+    if (!fromInput || !toInput || typeof window.flatpickr !== 'function') return false;
+
+    try {
+      if (fromInput._flatpickr) fromInput._flatpickr.destroy();
+      if (toInput._flatpickr) toInput._flatpickr.destroy();
+    } catch (_) {}
+
+    try {
+      window.flatpickr(fromInput, { locale: 'el', dateFormat: 'd/m/Y', allowInput: true });
+      window.flatpickr(toInput, { locale: 'el', dateFormat: 'd/m/Y', allowInput: true });
+      return true;
+    } catch (e) {
+      console.warn('Flatpickr init failed', e);
+      return false;
     }
-  } catch (e) {
-    console.warn('Flatpickr init failed', e);
+  }
+
+  function loadScriptOnce(src) {
+    return new Promise((resolve, reject) => {
+      const existing = document.querySelector('script[src="' + src + '"]');
+      if (existing) {
+        if (existing.dataset.loaded === '1') {
+          resolve();
+          return;
+        }
+        existing.addEventListener('load', () => resolve(), { once: true });
+        existing.addEventListener('error', () => reject(new Error('Failed loading ' + src)), { once: true });
+        return;
+      }
+
+      const s = document.createElement('script');
+      s.src = src;
+      s.async = false;
+      s.onload = () => {
+        s.dataset.loaded = '1';
+        resolve();
+      };
+      s.onerror = () => reject(new Error('Failed loading ' + src));
+      document.head.appendChild(s);
+    });
+  }
+
+  async function ensureFlatpickrReady() {
+    if (typeof window.flatpickr === 'function') return;
+    if (!window.__flatpickrReadyPromise) {
+      window.__flatpickrReadyPromise = (async function() {
+        await loadScriptOnce('https://cdn.jsdelivr.net/npm/flatpickr');
+        await loadScriptOnce('https://cdn.jsdelivr.net/npm/flatpickr/dist/l10n/el.js');
+      })();
+    }
+    try {
+      await window.__flatpickrReadyPromise;
+    } catch (e) {
+      console.warn('Could not load Flatpickr assets', e);
+    }
+  }
+
+  initDateInputs();
+  if (!initFlatpickrIfAvailable()) {
+    ensureFlatpickrReady().then(() => {
+      initFlatpickrIfAvailable();
+    });
   }
 
   // Lock credential dropdown to active credential

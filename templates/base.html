@@ -3535,6 +3535,97 @@
         setTimeout(lockUiIfActiveCredential, 240);
       }
 
+      function initFetchDateInputsFallback(pathname) {
+        if (normalizePath(pathname) !== '/fetch') return;
+
+        const fromInput = document.getElementById('date_from');
+        const toInput = document.getElementById('date_to');
+        if (!fromInput || !toInput) return;
+
+        function formatDateInputWithSlashes(raw) {
+          const digits = String(raw || '').replace(/\D/g, '').slice(0, 8);
+          const dd = digits.slice(0, 2);
+          const mm = digits.slice(2, 4);
+          const yyyy = digits.slice(4, 8);
+          if (digits.length <= 2) return dd;
+          if (digits.length <= 4) return dd + '/' + mm;
+          return dd + '/' + mm + '/' + yyyy;
+        }
+
+        function bindManualDateMask(input) {
+          if (!input || input.dataset.fetchMaskBound === '1') return;
+          input.dataset.fetchMaskBound = '1';
+          input.addEventListener('input', function() {
+            const next = formatDateInputWithSlashes(input.value);
+            if (input.value !== next) input.value = next;
+          });
+        }
+
+        bindManualDateMask(fromInput);
+        bindManualDateMask(toInput);
+
+        function loadScriptOnce(src) {
+          return new Promise((resolve, reject) => {
+            const existing = document.querySelector('script[src="' + src + '"]');
+            if (existing) {
+              resolve();
+              return;
+            }
+            const s = document.createElement('script');
+            s.src = src;
+            s.async = false;
+            s.onload = () => resolve();
+            s.onerror = () => reject(new Error('Failed loading ' + src));
+            document.head.appendChild(s);
+          });
+        }
+
+        function ensureFlatpickrCss() {
+          const href = 'https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css';
+          const existing = document.querySelector('link[rel="stylesheet"][href="' + href + '"]');
+          if (existing) return;
+          const link = document.createElement('link');
+          link.rel = 'stylesheet';
+          link.href = href;
+          document.head.appendChild(link);
+        }
+
+        async function ensureFlatpickrReady() {
+          if (typeof window.flatpickr === 'function') return;
+          if (!window.__fetchFallbackFlatpickrReady) {
+            window.__fetchFallbackFlatpickrReady = (async function() {
+              ensureFlatpickrCss();
+              await loadScriptOnce('https://cdn.jsdelivr.net/npm/flatpickr');
+              await loadScriptOnce('https://cdn.jsdelivr.net/npm/flatpickr/dist/l10n/el.js');
+            })();
+          }
+          try {
+            await window.__fetchFallbackFlatpickrReady;
+          } catch (e) {
+            console.warn('Fetch fallback could not load flatpickr assets', e);
+          }
+        }
+
+        function initFlatpickr() {
+          if (typeof window.flatpickr !== 'function') return;
+          try {
+            if (fromInput._flatpickr) fromInput._flatpickr.destroy();
+            if (toInput._flatpickr) toInput._flatpickr.destroy();
+          } catch (_) {}
+
+          try {
+            window.flatpickr(fromInput, { locale: 'el', dateFormat: 'd/m/Y', allowInput: true });
+            window.flatpickr(toInput, { locale: 'el', dateFormat: 'd/m/Y', allowInput: true });
+          } catch (e) {
+            console.warn('Fetch fallback flatpickr init failed', e);
+          }
+        }
+
+        ensureFlatpickrReady().then(initFlatpickr);
+        setTimeout(initFlatpickr, 80);
+        setTimeout(initFlatpickr, 240);
+      }
+
       function isAllowedUrl(url) {
         if (!url || url.origin !== window.location.origin) return false;
         return ALLOWED_PATHS.has(normalizePath(url.pathname));
@@ -3753,6 +3844,7 @@
 
         initSearchRepeatProfileHintSync(url.pathname);
         initFetchCredentialLockFallback(url.pathname);
+        initFetchDateInputsFallback(url.pathname);
         initSearchReceiptsOutlineSync(url.pathname);
         initSearchRepeatSwitchStateSync(url.pathname);
 
@@ -3804,6 +3896,7 @@
         }
         initSearchRepeatProfileHintSync(url.pathname);
         initFetchCredentialLockFallback(url.pathname);
+        initFetchDateInputsFallback(url.pathname);
         initSearchReceiptsOutlineSync(url.pathname);
         initSearchRepeatSwitchStateSync(url.pathname);
       });
