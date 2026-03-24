@@ -4990,21 +4990,25 @@ def inject_active_credential():
     except Exception:
         log.exception("Could not load settings for context processor")
         settings = {}
-    
+
+    # Resolve active group ONCE to avoid multiple DB hits
+    active_grp = None
+    try:
+        from auth import get_active_group
+        active_grp = get_active_group()
+    except Exception:
+        pass
+
     # Get user role from active group
     user_role = "member"  # default
     try:
-        from auth import get_active_group
         from flask_login import current_user
-
-        if getattr(current_user, 'is_authenticated', False):
-            grp = get_active_group()
-            if grp:
-                role = current_user.role_for_group(grp)
-                if role in ('admin', 'member'):
-                    user_role = role
-                else:
-                    user_role = 'member'
+        if getattr(current_user, 'is_authenticated', False) and active_grp:
+            role = current_user.role_for_group(active_grp)
+            if role in ('admin', 'member'):
+                user_role = role
+            else:
+                user_role = 'member'
     except Exception as e:
         log.warning(f"[auth] Failed to determine user_role: {e}")
         user_role = "member"
@@ -5014,14 +5018,7 @@ def inject_active_credential():
     except Exception:
         active_year = None
     
-    active_group_name = None
-    try:
-        from auth import get_active_group
-        grp = get_active_group()
-        if grp:
-            active_group_name = getattr(grp, 'name', None)
-    except Exception:
-        active_group_name = None
+    active_group_name = getattr(active_grp, 'name', None) if active_grp else None
 
     # compute a display-friendly username (strip trailing _<id> appended for uniqueness)
     try:

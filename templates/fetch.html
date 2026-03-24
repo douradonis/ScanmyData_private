@@ -197,8 +197,16 @@
   }
 })(function() {
   // Initialize Flatpickr with Greek locale
-  flatpickr("#date_from", { locale: "el", dateFormat: "d/m/Y", allowInput: true });
-  flatpickr("#date_to", { locale: "el", dateFormat: "d/m/Y", allowInput: true });
+  try {
+    if (typeof window.flatpickr === 'function') {
+      flatpickr("#date_from", { locale: "el", dateFormat: "d/m/Y", allowInput: true });
+      flatpickr("#date_to", { locale: "el", dateFormat: "d/m/Y", allowInput: true });
+    } else {
+      console.warn('flatpickr not available on fetch init');
+    }
+  } catch (e) {
+    console.warn('Flatpickr init failed', e);
+  }
 
   // Lock credential dropdown to active credential
   const credentialSelect = document.getElementById('use_credential');

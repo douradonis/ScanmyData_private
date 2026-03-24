@@ -1911,6 +1911,38 @@
       border: 1px solid #0ea5e9;
       box-shadow: 0 2px 8px rgba(14, 165, 233, 0.2);
     }
+
+    /* ── Partial-nav progress bar ── */
+    #navProgressBar {
+      position: fixed;
+      top: 0; left: 0;
+      height: 3px;
+      width: 0%;
+      background: linear-gradient(90deg, #3b82f6 0%, #38bdf8 60%, #a78bfa 100%);
+      z-index: 99999;
+      opacity: 0;
+      pointer-events: none;
+      border-radius: 0 2px 2px 0;
+      box-shadow: 0 0 8px rgba(59,130,246,0.55);
+      transition: none;
+    }
+    [data-theme="dark"] #navProgressBar {
+      background: linear-gradient(90deg, #60a5fa 0%, #22d3ee 60%, #c4b5fd 100%);
+      box-shadow: 0 0 10px rgba(96,165,250,0.6);
+    }
+
+    /* ── Page shell transition ── */
+    #appShell.page-loading {
+      opacity: 0.5;
+      transition: opacity 0.15s ease;
+    }
+    @keyframes pageShellFadeIn {
+      from { opacity: 0; transform: translateY(5px); }
+      to   { opacity: 1; transform: translateY(0px); }
+    }
+    #appShell.page-entering {
+      animation: pageShellFadeIn 0.22s ease forwards;
+    }
   </style>
     
   {% block head_extra %}{% endblock %}
@@ -3085,9 +3117,56 @@
     })();
     
     (function(){
-      const ALLOWED_PATHS = new Set(['/', '/fetch', '/credentials', '/terms', '/privacy']);
+      const ALLOWED_PATHS = new Set(['/', '/fetch', '/credentials', '/search', '/terms', '/privacy']);
       let navInFlight = null;
       let pageCaptureTimer = null;
+
+      // ── Navigation progress bar ──────────────────────────────────────
+      const _navBar = (function() {
+        const el = document.createElement('div');
+        el.id = 'navProgressBar';
+        document.body ? document.body.prepend(el) : document.addEventListener('DOMContentLoaded', function(){ document.body.prepend(el); }, { once: true });
+        let _timer = null;
+        let _pct = 0;
+
+        function _setW(w, trans) {
+          el.style.transition = trans || 'none';
+          el.style.width = w + '%';
+        }
+
+        return {
+          start: function() {
+            clearInterval(_timer);
+            _pct = 0;
+            el.style.background = '';
+            _setW(0, 'none');
+            el.style.opacity = '1';
+            _timer = setInterval(function() {
+              _pct = _pct + (88 - _pct) * 0.12;
+              _setW(_pct, 'width 0.35s ease');
+            }, 200);
+          },
+          done: function() {
+            clearInterval(_timer);
+            _setW(100, 'width 0.18s ease');
+            setTimeout(function() {
+              el.style.transition = 'opacity 0.35s ease';
+              el.style.opacity = '0';
+              setTimeout(function() { _setW(0, 'none'); _pct = 0; }, 400);
+            }, 200);
+          },
+          fail: function() {
+            clearInterval(_timer);
+            el.style.background = '#ef4444';
+            _setW(100, 'width 0.15s ease');
+            setTimeout(function() {
+              el.style.transition = 'opacity 0.3s ease';
+              el.style.opacity = '0';
+              setTimeout(function() { el.style.background = ''; _setW(0, 'none'); _pct = 0; }, 350);
+            }, 300);
+          }
+        };
+      })();
 
       if (!window.__pageScopedListenerPatchInstalled) {
         window.__pageScopedListenerPatchInstalled = true;
@@ -3149,6 +3228,313 @@
         return cleaned || '/';
       }
 
+      function resetSearchPageGlobals(pathname) {
+        if (normalizePath(pathname) !== '/search') return;
+
+        // Search page includes several scripts with one-time guards that are valid
+        // for full reload, but block re-binding after partial DOM swaps.
+        const keysToReset = [
+          '__labelsPrimed',
+          '__rc_receipts_strict__',
+          '__FAST_FLOW_ATTACHED__',
+          '__REPEAT_FLOW_GUARD_ATTACHED__',
+          '__rc_direct_bypass__'
+        ];
+
+        for (const k of keysToReset) {
+          try { delete window[k]; } catch (_) { try { window[k] = undefined; } catch(_) {} }
+        }
+      }
+
+      function initSearchRepeatProfileHintSync(pathname) {
+        if (normalizePath(pathname) !== '/search') return;
+
+        const hint = document.getElementById('activeRepeatProfileHint');
+        const repeatSw = document.getElementById('repeatEntrySwitch');
+        if (!hint || !repeatSw) return;
+
+        const receiptsSw = document.getElementById('useReceiptsSwitch');
+        const profileSel = document.getElementById('charProfileSelect');
+
+        if (!window.__LAST_REPEAT_PROFILE_BY_MODE) {
+          window.__LAST_REPEAT_PROFILE_BY_MODE = { receipts: '', invoices: '' };
+        }
+
+        function currentModeKey() {
+          try {
+            if (receiptsSw) return receiptsSw.checked ? 'receipts' : 'invoices';
+            return (String(localStorage.getItem('UI:useReceipts') || '0') === '1') ? 'receipts' : 'invoices';
+          } catch (_) {
+            return 'invoices';
+          }
+        }
+
+        function currentVat() {
+          try {
+            const vat = String('{{ active_credential_vat or "" }}').trim();
+            if (vat) return vat;
+          } catch (_) {}
+          return '';
+        }
+
+        function readRememberedProfileByMode() {
+          try {
+            const vat = currentVat();
+            if (!vat) return '';
+            const mode = currentModeKey();
+            const key = 'repeat:selected_profile:' + mode + ':' + vat;
+            return String(localStorage.getItem(key) || '').trim();
+          } catch (_) {
+            return '';
+          }
+        }
+
+        function readCurrentProfileName() {
+          const remembered = readRememberedProfileByMode();
+          if (remembered) return remembered;
+          try {
+            const mode = currentModeKey();
+            const cachedByMode = String((window.__LAST_REPEAT_PROFILE_BY_MODE || {})[mode] || '').trim();
+            if (cachedByMode) return cachedByMode;
+          } catch (_) {}
+          try {
+            const opt = profileSel && profileSel.selectedOptions ? profileSel.selectedOptions[0] : null;
+            const raw = (opt && (opt.dataset.profileName || opt.textContent || opt.value)) || '';
+            return String(raw || '').trim();
+          } catch (_) {
+            return '';
+          }
+        }
+
+        function renderHint() {
+          const profileName = readCurrentProfileName();
+          const mode = currentModeKey();
+          const modeLabel = mode === 'receipts' ? 'Αποδείξεις' : 'Τιμολόγια';
+          const shouldShow = !!(repeatSw && repeatSw.checked);
+          if (shouldShow) {
+            hint.style.display = '';
+            hint.textContent = 'Ενεργό προφίλ επαναληψιμης (' + modeLabel + '): ' + (profileName || 'Γενικό');
+          } else {
+            hint.style.display = 'none';
+            hint.textContent = '';
+          }
+        }
+
+        if (repeatSw.dataset.hintSyncBound !== '1') {
+          repeatSw.dataset.hintSyncBound = '1';
+          repeatSw.addEventListener('change', renderHint);
+        }
+        if (receiptsSw && receiptsSw.dataset.hintSyncBound !== '1') {
+          receiptsSw.dataset.hintSyncBound = '1';
+          receiptsSw.addEventListener('change', renderHint);
+        }
+        if (profileSel && profileSel.dataset.hintSyncBound !== '1') {
+          profileSel.dataset.hintSyncBound = '1';
+          profileSel.addEventListener('change', function() {
+            try {
+              const opt = profileSel.selectedOptions ? profileSel.selectedOptions[0] : null;
+              const raw = (opt && (opt.dataset.profileName || opt.textContent || opt.value)) || '';
+              const mode = currentModeKey();
+              window.__LAST_REPEAT_PROFILE_BY_MODE[mode] = String(raw || '').trim();
+            } catch (_) {}
+            renderHint();
+          });
+        }
+
+        window.__searchRepeatHintRender = renderHint;
+
+        if (!window.__searchHintModeButtonsBound) {
+          window.__searchHintModeButtonsBound = true;
+          document.addEventListener('click', function(ev) {
+            const modeBtn = ev.target && ev.target.closest ? ev.target.closest('[data-receipt-mode]') : null;
+            if (!modeBtn) return;
+            setTimeout(function(){
+              try {
+                if (typeof window.__searchRepeatHintRender === 'function') {
+                  window.__searchRepeatHintRender();
+                }
+              } catch (_) {}
+            }, 0);
+          }, true);
+
+          window.addEventListener('useReceiptsChange', function(){
+            try {
+              if (typeof window.__searchRepeatHintRender === 'function') {
+                window.__searchRepeatHintRender();
+              }
+            } catch (_) {}
+          });
+
+          window.addEventListener('repeatStateChange', function(){
+            try {
+              if (typeof window.__searchRepeatHintRender === 'function') {
+                window.__searchRepeatHintRender();
+              }
+            } catch (_) {}
+          });
+        }
+
+        renderHint();
+        setTimeout(renderHint, 120);
+      }
+
+      function initSearchReceiptsOutlineSync(pathname) {
+        if (normalizePath(pathname) !== '/search') return;
+
+        const receiptsSw = document.getElementById('useReceiptsSwitch');
+        if (!receiptsSw) return;
+
+        function isReceiptsMode() {
+          try {
+            if (receiptsSw) return !!receiptsSw.checked;
+          } catch (_) {}
+          try {
+            return String(localStorage.getItem('UI:useReceipts') || '0') === '1';
+          } catch (_) {
+            return false;
+          }
+        }
+
+        function setOutlineStyle(el, on) {
+          if (!el) return;
+          if (on) {
+            // Use !important to win against late style writes from page scripts.
+            el.style.setProperty('outline', '2px solid orange', 'important');
+            el.style.setProperty('outline-offset', '0px', 'important');
+          } else {
+            el.style.removeProperty('outline');
+            el.style.removeProperty('outline-offset');
+          }
+        }
+
+        function applyOutline() {
+          const on = isReceiptsMode();
+          const urlInput = document.getElementById('scrapeUrlInput');
+          const markInput = document.getElementById('markInput');
+
+          // In receipts mode, highlight URL input if present; fallback to mark input
+          // during the short window before scrapeUrlInput is injected.
+          if (on) {
+            if (urlInput) {
+              setOutlineStyle(urlInput, true);
+              setOutlineStyle(markInput, false);
+            } else {
+              setOutlineStyle(markInput, true);
+            }
+            return;
+          }
+
+          // In invoices mode clear any residual highlights.
+          setOutlineStyle(urlInput, false);
+          setOutlineStyle(markInput, false);
+        }
+
+        if (receiptsSw.dataset.outlineSyncBound !== '1') {
+          receiptsSw.dataset.outlineSyncBound = '1';
+          receiptsSw.addEventListener('change', function() {
+            setTimeout(applyOutline, 0);
+            setTimeout(applyOutline, 60);
+            setTimeout(applyOutline, 180);
+          });
+        }
+
+        if (!window.__searchOutlineUseReceiptsBound) {
+          window.__searchOutlineUseReceiptsBound = true;
+          window.addEventListener('useReceiptsChange', function() {
+            setTimeout(applyOutline, 0);
+            setTimeout(applyOutline, 60);
+          });
+        }
+
+        // scrapeUrlInput may be created later by receipts scripts.
+        if (!window.__searchOutlineObserver) {
+          try {
+            window.__searchOutlineObserver = new MutationObserver(function(){ applyOutline(); });
+            window.__searchOutlineObserver.observe(document.body, { childList: true, subtree: true });
+          } catch (_) {}
+        }
+
+        applyOutline();
+        requestAnimationFrame(applyOutline);
+        setTimeout(applyOutline, 120);
+        setTimeout(applyOutline, 300);
+      }
+
+      function initSearchRepeatSwitchStateSync(pathname) {
+        if (normalizePath(pathname) !== '/search') return;
+
+        const repeatSw = document.getElementById('repeatEntrySwitch');
+        if (!repeatSw) return;
+
+        function readStored() {
+          try {
+            const v = localStorage.getItem('REPEAT:enabled');
+            if (v === '1' || v === 'true') return true;
+            if (v === '0' || v === 'false') return false;
+          } catch (_) {}
+          return null;
+        }
+
+        function persistCurrent() {
+          try {
+            localStorage.setItem('REPEAT:enabled', repeatSw.checked ? '1' : '0');
+          } catch (_) {}
+        }
+
+        function applyStoredState() {
+          const stored = readStored();
+          if (stored === null) {
+            // First visit fallback: seed storage from current DOM/server state.
+            persistCurrent();
+            return;
+          }
+
+          if (!!repeatSw.checked !== !!stored) {
+            repeatSw.checked = !!stored;
+            try {
+              repeatSw.dispatchEvent(new Event('change', { bubbles: true }));
+            } catch (_) {}
+          }
+        }
+
+        if (repeatSw.dataset.repeatPersistBound !== '1') {
+          repeatSw.dataset.repeatPersistBound = '1';
+          repeatSw.addEventListener('change', persistCurrent);
+        }
+
+        applyStoredState();
+        setTimeout(applyStoredState, 80);
+      }
+
+      function initFetchCredentialLockFallback(pathname) {
+        if (normalizePath(pathname) !== '/fetch') return;
+
+        const select = document.getElementById('use_credential');
+        const vatInput = document.getElementById('vat_input');
+        if (!select) return;
+
+        function lockUiIfActiveCredential() {
+          const hasActive = !!String(select.value || '').trim();
+          if (!hasActive) return;
+
+          select.disabled = true;
+          select.setAttribute('title', 'Κλειδωμένο στον ενεργό πελάτη');
+          select.style.cursor = 'not-allowed';
+          select.style.opacity = '0.7';
+
+          if (vatInput) {
+            vatInput.disabled = true;
+            vatInput.setAttribute('title', 'Κλειδωμένο στον ενεργό πελάτη');
+            vatInput.style.cursor = 'not-allowed';
+            vatInput.style.opacity = '0.7';
+          }
+        }
+
+        lockUiIfActiveCredential();
+        setTimeout(lockUiIfActiveCredential, 80);
+        setTimeout(lockUiIfActiveCredential, 240);
+      }
+
       function isAllowedUrl(url) {
         if (!url || url.origin !== window.location.origin) return false;
         return ALLOWED_PATHS.has(normalizePath(url.pathname));
@@ -3156,7 +3542,8 @@
 
       function shouldHandleLink(anchor, event) {
         if (!anchor) return false;
-        if (event.defaultPrevented) return false;
+        const isPrimaryNavLink = !!anchor.closest('.layout-header__nav, #sideMenu, .layout-header__active-customer, .layout-header__active-group');
+        if (event.defaultPrevented && !isPrimaryNavLink) return false;
         if (event.button !== 0) return false;
         if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return false;
         if (anchor.target && anchor.target !== '_self') return false;
@@ -3174,33 +3561,92 @@
         }
 
         if (!isAllowedUrl(url)) return false;
-        if (normalizePath(url.pathname) === '/search') return false;
         return true;
       }
 
-      async function runPageScripts(fromScriptsHost, targetScriptsHost) {
-        if (!targetScriptsHost) return;
-        targetScriptsHost.innerHTML = '';
-        if (!fromScriptsHost) return;
+      async function runPageScripts(fromShell, fromScriptsHost, targetScriptsHost) {
+        if (targetScriptsHost) targetScriptsHost.innerHTML = '';
 
-        const scripts = Array.from(fromScriptsHost.querySelectorAll('script'));
-        for (const oldScript of scripts) {
-          await new Promise((resolve, reject) => {
-            const script = document.createElement('script');
-            for (const attr of oldScript.attributes) {
-              script.setAttribute(attr.name, attr.value);
+        // Intercept document.addEventListener('DOMContentLoaded', ...) calls.
+        // In partial navigation DOMContentLoaded never fires again, so we queue
+        // these callbacks and fire them after all page scripts execute.
+        const _dclQueue = [];
+        const _origDocAEL = document.addEventListener.bind(document);
+        document.addEventListener = function(type, listener, options) {
+          if (type === 'DOMContentLoaded' && listener) {
+            if (typeof listener === 'function') {
+              _dclQueue.push(listener);
+              return;
             }
-
-            if (oldScript.src) {
-              script.onload = () => resolve();
-              script.onerror = () => reject(new Error('Failed loading script: ' + oldScript.src));
-            } else {
-              script.textContent = oldScript.textContent || '';
+            if (typeof listener.handleEvent === 'function') {
+              _dclQueue.push(function(evt) { listener.handleEvent(evt); });
+              return;
             }
+          }
+          return _origDocAEL(type, listener, options);
+        };
 
-            targetScriptsHost.appendChild(script);
-            if (!oldScript.src) resolve();
-          });
+        async function executeScripts(scripts, mode) {
+          for (const oldScript of scripts) {
+            await new Promise((resolve, reject) => {
+              const script = document.createElement('script');
+              for (const attr of oldScript.attributes) {
+                script.setAttribute(attr.name, attr.value);
+              }
+
+              if (oldScript.src) {
+                script.onload = () => resolve();
+                script.onerror = () => reject(new Error('Failed loading script: ' + oldScript.src));
+              } else {
+                script.textContent = oldScript.textContent || '';
+              }
+
+              if (mode === 'replace' && oldScript.parentNode) {
+                oldScript.parentNode.replaceChild(script, oldScript);
+              } else if (targetScriptsHost) {
+                targetScriptsHost.appendChild(script);
+              } else {
+                resolve();
+                return;
+              }
+
+              if (!oldScript.src) resolve();
+            });
+          }
+        }
+
+        function clonePageAssets(host) {
+          if (!host || !targetScriptsHost) return;
+          const assets = Array.from(host.querySelectorAll('style, link[rel="stylesheet"]'));
+          for (const oldEl of assets) {
+            try {
+              targetScriptsHost.appendChild(oldEl.cloneNode(true));
+            } catch (_) {}
+          }
+        }
+
+        try {
+          if (fromScriptsHost) {
+            // Include page-scoped CSS from scripts host (search page keeps toggle CSS there).
+            clonePageAssets(fromScriptsHost);
+          }
+          if (fromShell) {
+            const shellScripts = Array.from(fromShell.querySelectorAll('script'));
+            await executeScripts(shellScripts, 'replace');
+          }
+          if (fromScriptsHost) {
+            const hostScripts = Array.from(fromScriptsHost.querySelectorAll('script'));
+            await executeScripts(hostScripts, 'append');
+          }
+        } finally {
+          document.addEventListener = _origDocAEL;
+        }
+
+        if (_dclQueue.length) {
+          const dclEvent = new Event('DOMContentLoaded');
+          for (const fn of _dclQueue) {
+            try { fn(dclEvent); } catch(e) { console.warn('[partial-nav] DCL callback error', e); }
+          }
         }
       }
 
@@ -3216,16 +3662,31 @@
           return;
         }
 
-        const response = await fetch(url.toString(), {
-          credentials: 'same-origin',
-          headers: {
-            'X-Requested-With': 'partial-nav',
-            'X-Partial-Nav': '1'
-          },
-          signal: navInFlight.signal
-        });
+        // Start visual feedback immediately on click
+        _navBar.start();
+        shell.classList.add('page-loading');
+
+        let response;
+        try {
+          response = await fetch(url.toString(), {
+            credentials: 'same-origin',
+            headers: {
+              'X-Requested-With': 'partial-nav',
+              'X-Partial-Nav': '1'
+            },
+            signal: navInFlight.signal
+          });
+        } catch(fetchErr) {
+          _navBar.fail();
+          shell.classList.remove('page-loading');
+          if (fetchErr && fetchErr.name === 'AbortError') return;
+          window.location.href = url.toString();
+          return;
+        }
 
         if (!response.ok) {
+          _navBar.fail();
+          shell.classList.remove('page-loading');
           window.location.href = url.toString();
           return;
         }
@@ -3235,9 +3696,13 @@
         const nextShell = doc.getElementById('appShell');
         const nextScripts = doc.getElementById('appPageScripts');
         if (!nextShell) {
+          _navBar.fail();
+          shell.classList.remove('page-loading');
           window.location.href = url.toString();
           return;
         }
+
+        resetSearchPageGlobals(url.pathname);
 
         try {
           if (typeof window.__cleanupPageScripts === 'function') {
@@ -3249,8 +3714,17 @@
         cleanupPageScopedListeners();
         window.__cleanupPageScripts = null;
 
+        // Swap content and trigger enter animation
+        shell.classList.remove('page-loading');
         shell.innerHTML = nextShell.innerHTML;
         document.title = doc.title || document.title;
+
+        // Fade-in new content
+        shell.classList.add('page-entering');
+        shell.addEventListener('animationend', function _onEnd() {
+          shell.classList.remove('page-entering');
+          shell.removeEventListener('animationend', _onEnd);
+        }, { once: true });
 
         if (!options.replaceState) {
           history.pushState({ partialNav: true }, '', url.toString());
@@ -3269,8 +3743,20 @@
         }
 
         startPageListenerCapture();
-        await runPageScripts(nextScripts, scriptsHost);
-        stopPageListenerCaptureLater();
+        try {
+          await runPageScripts(shell, nextScripts, scriptsHost);
+        } catch (e) {
+          console.warn('page scripts execution failed after partial swap', e);
+        } finally {
+          stopPageListenerCaptureLater();
+        }
+
+        initSearchRepeatProfileHintSync(url.pathname);
+        initFetchCredentialLockFallback(url.pathname);
+        initSearchReceiptsOutlineSync(url.pathname);
+        initSearchRepeatSwitchStateSync(url.pathname);
+
+        _navBar.done();
 
         try {
           window.dispatchEvent(new CustomEvent('app:page-ready', {
@@ -3316,6 +3802,10 @@
             history.replaceState({ partialNav: true }, '', url.toString());
           } catch (_) {}
         }
+        initSearchRepeatProfileHintSync(url.pathname);
+        initFetchCredentialLockFallback(url.pathname);
+        initSearchReceiptsOutlineSync(url.pathname);
+        initSearchRepeatSwitchStateSync(url.pathname);
       });
     })();
 </script>
