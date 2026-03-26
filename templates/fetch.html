@@ -199,6 +199,8 @@
     fn();
   }
 })(function() {
+  let fetchFlatpickrInstances = [];
+
   function formatDateInputWithSlashes(raw) {
     const digits = String(raw || '').replace(/\D/g, '').slice(0, 8);
     const dd = digits.slice(0, 2);
@@ -234,13 +236,23 @@
     if (!fromInput || !toInput || typeof window.flatpickr !== 'function') return false;
 
     try {
+      fetchFlatpickrInstances.forEach(function(instance) {
+        if (instance && typeof instance.destroy === 'function') instance.destroy();
+      });
+      fetchFlatpickrInstances = [];
       if (fromInput._flatpickr) fromInput._flatpickr.destroy();
       if (toInput._flatpickr) toInput._flatpickr.destroy();
     } catch (_) {}
 
     try {
-      window.flatpickr(fromInput, { locale: 'el', dateFormat: 'd/m/Y', allowInput: true });
-      window.flatpickr(toInput, { locale: 'el', dateFormat: 'd/m/Y', allowInput: true });
+      const fromPicker = window.flatpickr(fromInput, { locale: 'el', dateFormat: 'd/m/Y', allowInput: true });
+      const toPicker = window.flatpickr(toInput, { locale: 'el', dateFormat: 'd/m/Y', allowInput: true });
+      fetchFlatpickrInstances = [fromPicker, toPicker].filter(Boolean);
+      fetchFlatpickrInstances.forEach(function(instance) {
+        if (instance && instance.calendarContainer) {
+          instance.calendarContainer.dataset.fetchFlatpickrOwned = '1';
+        }
+      });
       return true;
     } catch (e) {
       console.warn('Flatpickr init failed', e);
@@ -322,6 +334,17 @@
 
   function cleanupFetchPage() {
     clearLastFetchPolling();
+    try {
+      fetchFlatpickrInstances.forEach(function(instance) {
+        if (instance && typeof instance.destroy === 'function') instance.destroy();
+      });
+      fetchFlatpickrInstances = [];
+    } catch (_) {}
+    try {
+      document.querySelectorAll('.flatpickr-calendar[data-fetch-flatpickr-owned="1"]').forEach(function(node) {
+        node.remove();
+      });
+    } catch (_) {}
     if (pageAbortController) {
       try { pageAbortController.abort(); } catch(_) {}
     }

@@ -3626,6 +3626,24 @@
         setTimeout(initFlatpickr, 240);
       }
 
+      function cleanupTransientDatepickers() {
+        try {
+          document.querySelectorAll('input').forEach(function(input) {
+            try {
+              if (input && input._flatpickr && typeof input._flatpickr.destroy === 'function') {
+                input._flatpickr.destroy();
+              }
+            } catch (_) {}
+          });
+        } catch (_) {}
+
+        try {
+          document.querySelectorAll('.flatpickr-calendar').forEach(function(node) {
+            try { node.remove(); } catch (_) {}
+          });
+        } catch (_) {}
+      }
+
       function isAllowedUrl(url) {
         if (!url || url.origin !== window.location.origin) return false;
         return ALLOWED_PATHS.has(normalizePath(url.pathname));
@@ -3794,6 +3812,7 @@
         }
 
         resetSearchPageGlobals(url.pathname);
+        cleanupTransientDatepickers();
 
         try {
           if (typeof window.__cleanupPageScripts === 'function') {
