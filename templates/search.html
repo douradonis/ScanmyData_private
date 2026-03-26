@@ -6450,6 +6450,16 @@ async function partiallyReloadInvoiceTable() {
     }, 50);
   };
 
+  const syncDownloadControls = (fileExists) => {
+    try {
+      const controls = document.getElementById('listDownloadControls');
+      if (!controls) return;
+      controls.classList.toggle('hidden', !fileExists);
+    } catch (e) {
+      console.warn('Download controls sync failed:', e);
+    }
+  };
+
   try {
     const tableRes = await fetch('/list/fragment', { method: 'GET', credentials: 'same-origin' });
     if (tableRes.ok) {
@@ -6458,6 +6468,7 @@ async function partiallyReloadInvoiceTable() {
         const container = document.getElementById('summary-container');
         if (container) {
           container.innerHTML = data.table_html;
+          syncDownloadControls(!!data.file_exists);
           reinitTable();
           return true;
         }
@@ -6475,8 +6486,13 @@ async function partiallyReloadInvoiceTable() {
       const doc = new DOMParser().parseFromString(html, 'text/html');
       const fresh = doc.getElementById('summary-container');
       const container = document.getElementById('summary-container');
+      const freshControls = doc.getElementById('listDownloadControls');
+      const controls = document.getElementById('listDownloadControls');
       if (fresh && container) {
         container.innerHTML = fresh.innerHTML;
+        if (freshControls && controls) {
+          controls.className = freshControls.className;
+        }
         reinitTable();
         return true;
       }

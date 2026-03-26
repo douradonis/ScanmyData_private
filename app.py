@@ -14022,7 +14022,7 @@ def list_fragment():
         if not exists:
             table_html = '<div class="p-3 text-gray-500">Δεν βρέθηκαν εγγραφές στο epsilon_invoices.json.</div>'
 
-        return jsonify({"ok": True, "table_html": table_html})
+        return jsonify({"ok": True, "table_html": table_html, "file_exists": bool(exists)})
     except Exception as exc:
         current_app.logger.exception('list_fragment failed')
         return jsonify({'ok': False, 'error': str(exc)}), 500

@@ -3,8 +3,7 @@
     <h3 class="text-xl font-semibold text-gray-800">Λίστα Παραστατικών</h3>
 
     <div class="flex gap-2 items-center flex-wrap">
-      {% if file_exists %}
-      <div class="relative">
+      <div id="listDownloadControls" class="relative{% if not file_exists %} hidden{% endif %}">
         <button id="downloadToggle" class="px-4 py-2 bg-[#0284c7] text-white rounded-lg shadow hover:bg-[#0369a1] transition flex items-center gap-2" type="button" aria-haspopup="true" aria-expanded="false">
           ⬇️ Κατέβασμα .xlsx
           <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
@@ -16,7 +15,6 @@
           <button id="epsilonExport" class="w-full text-left px-4 py-2 hover:bg-gray-100 transition">Epsilon Excel</button>
         </div>
       </div>
-      {% endif %}
       <a class="px-4 py-2 bg-gray-200 text-gray-800 rounded-lg shadow hover:bg-gray-300 transition hidden" href="{{ url_for('fetch') }}">⬅ Λήψη Παραστατικών</a>
     </div>
   </div>

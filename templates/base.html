@@ -2636,6 +2636,15 @@
               checkmark.classList.remove('hidden');
             }
             dispatchFiscalYearChanged(year);
+            try {
+              if (typeof window.__partialReloadCurrentPage === 'function') {
+                await window.__partialReloadCurrentPage();
+              } else {
+                window.location.reload();
+              }
+            } catch (_) {
+              window.location.reload();
+            }
           }
         } catch {
           // Keep button visible on error
@@ -3877,6 +3886,20 @@
 
         window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
       }
+
+      window.__partialNavigateTo = async function(urlLike, options) {
+        const targetUrl = urlLike instanceof URL ? urlLike : new URL(String(urlLike || window.location.href), window.location.href);
+        if (!isAllowedUrl(targetUrl)) {
+          window.location.href = targetUrl.toString();
+          return false;
+        }
+        await swapPage(targetUrl, options || { replaceState: true });
+        return true;
+      };
+
+      window.__partialReloadCurrentPage = async function() {
+        return window.__partialNavigateTo(window.location.href, { replaceState: true });
+      };
 
       document.addEventListener('click', function(event) {
         const anchor = event.target && event.target.closest ? event.target.closest('a[href]') : null;
