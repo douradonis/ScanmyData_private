@@ -2130,30 +2130,249 @@
     {% block content %}{% endblock %}
 
     <script>
-    // poll for global notifications and display as flash banners
-    async function pollGlobalNotifs(){
-      try{
-        const res = await fetch('/api/global_notifications', {credentials:'same-origin'});
-        if(res.ok){
-          const data = await res.json();
-          if(data.msgs && data.msgs.length){
-            data.msgs.forEach(msg=>{
-              const div = document.createElement('div');
-              div.className = 'flash-banner flash-success';
-              div.textContent = msg;
-              div.setAttribute('data-flash','');
-              div.setAttribute('data-ttl','6000');
-              const container = document.getElementById('flashContainer');
-              if(container) container.prepend(div);
-              makeDismissable(div);
-            });
-          }
+    // Global notifications + global fetch-progress banner (cross-page, partial-reload resilient)
+    (function(){
+      const FETCH_TARGET_KEY = 'scanmydata:fetchProgressTarget:v1';
+      const FETCH_SNAPSHOT_KEY = 'scanmydata:fetchProgressSnapshot:v1';
+      const FETCH_FLASH_ID = 'globalFetchProgressFlash';
+
+      function readJson(key){
+        try {
+          const raw = localStorage.getItem(key);
+          return raw ? (JSON.parse(raw) || null) : null;
+        } catch(_) {
+          return null;
         }
-      }catch(e){console.warn('notif poll failed', e);}
-    }
-    {% if current_user and current_user.is_authenticated %}
-    setInterval(pollGlobalNotifs, 5000);
-    {% endif %}
+      }
+
+      function writeJson(key, value){
+        try {
+          if (!value) {
+            localStorage.removeItem(key);
+            return;
+          }
+          localStorage.setItem(key, JSON.stringify(value));
+        } catch(_) {}
+      }
+
+      function readFetchTarget(){
+        const t = readJson(FETCH_TARGET_KEY) || {};
+        const credential = String(t.credential || '').trim();
+        const vat = String(t.vat || '').trim();
+        if (!credential && !vat) return null;
+        return {
+          credential,
+          vat,
+          updated_at: t.updated_at || null,
+        };
+      }
+
+      function setFetchTarget(payload){
+        const p = payload || {};
+        const credential = String(p.credential || '').trim();
+        const vat = String(p.vat || '').trim();
+        if (!credential && !vat) {
+          writeJson(FETCH_TARGET_KEY, null);
+          return;
+        }
+        writeJson(FETCH_TARGET_KEY, {
+          credential,
+          vat,
+          updated_at: new Date().toISOString(),
+        });
+      }
+
+      function clearFetchTarget(){
+        writeJson(FETCH_TARGET_KEY, null);
+      }
+
+      function setFetchSnapshot(state){
+        if (!state) {
+          writeJson(FETCH_SNAPSHOT_KEY, null);
+          return;
+        }
+        writeJson(FETCH_SNAPSHOT_KEY, {
+          status: String(state.status || 'not_started'),
+          percent: Math.max(0, Math.min(100, Number(state.percent || 0))),
+          message: String(state.message || ''),
+          credential: String(state.credential || ''),
+          vat: String(state.vat || ''),
+          updated_at: new Date().toISOString(),
+        });
+      }
+
+      function readFetchSnapshot(){
+        return readJson(FETCH_SNAPSHOT_KEY) || null;
+      }
+
+      function ensureFlashContainer(){
+        return document.getElementById('flashContainer') || document.body;
+      }
+
+      function clearGlobalFetchProgressFlash(){
+        const existing = document.getElementById(FETCH_FLASH_ID);
+        if (existing) existing.remove();
+      }
+
+      function upsertGlobalFetchProgressFlash(state){
+        const status = String(state.status || 'not_started');
+        if (status === 'not_started') {
+          clearGlobalFetchProgressFlash();
+          return;
+        }
+
+        const container = ensureFlashContainer();
+        if (!container) return;
+
+        let el = document.getElementById(FETCH_FLASH_ID);
+        if (!el) {
+          el = document.createElement('div');
+          el.id = FETCH_FLASH_ID;
+          el.setAttribute('data-flash', '');
+          container.prepend(el);
+        }
+
+        const pct = Math.max(0, Math.min(100, Number(state.percent || 0)));
+        const msg = String(state.message || '').trim();
+        const baseText = 'Πρόοδος λήψης: ' + pct + '%';
+        const fullText = msg ? (baseText + ' — ' + msg) : baseText;
+
+        if (status === 'running') {
+          el.className = 'flash-banner flash-info';
+          el.setAttribute('data-ttl', '0');
+        } else if (status === 'error') {
+          el.className = 'flash-banner flash-error';
+          el.setAttribute('data-ttl', '9000');
+        } else {
+          el.className = 'flash-banner flash-success';
+          el.setAttribute('data-ttl', '9000');
+        }
+        el.textContent = fullText;
+      }
+
+      async function pollGlobalNotifs(){
+        try{
+          const res = await fetch('/api/global_notifications', {credentials:'same-origin'});
+          if(res.ok){
+            const data = await res.json();
+            if(data.msgs && data.msgs.length){
+              data.msgs.forEach(msg=>{
+                const div = document.createElement('div');
+                div.className = 'flash-banner flash-success';
+                div.textContent = msg;
+                div.setAttribute('data-flash','');
+                div.setAttribute('data-ttl','6000');
+                const container = ensureFlashContainer();
+                if(container) container.prepend(div);
+              });
+            }
+          }
+        }catch(e){console.warn('notif poll failed', e);}
+      }
+
+      async function refreshLastFetchFromServer(target){
+        if (!target || (!target.credential && !target.vat)) return;
+        const qp = new URLSearchParams();
+        if (target.credential) qp.set('credential', target.credential);
+        if (target.vat) qp.set('vat', target.vat);
+        try {
+          const res = await fetch('/api/last_fetch_date?' + qp.toString(), { credentials:'same-origin' });
+          if (!res.ok) return;
+          const data = await res.json().catch(() => null);
+          if (!data) return;
+          const newText = data.last_fetch_date || 'δεν υπάρχει';
+          const el = document.getElementById('lastFetchInfo');
+          if (el && newText) {
+            el.textContent = 'Τελευταία λήψη: ' + newText;
+          }
+        } catch (_) {}
+      }
+
+      async function pollGlobalFetchProgress(){
+        const target = readFetchTarget();
+        if (!target) {
+          const snap = readFetchSnapshot();
+          if (!snap || String(snap.status || '') !== 'running') clearGlobalFetchProgressFlash();
+          return;
+        }
+        await refreshLastFetchFromServer(target);
+
+        const query = new URLSearchParams();
+        if (target.credential) query.set('credential', target.credential);
+        if (target.vat) query.set('vat', target.vat);
+        if (!query.toString()) {
+          clearFetchTarget();
+          clearGlobalFetchProgressFlash();
+          return;
+        }
+
+        try {
+          const res = await fetch('/api/fetch_progress?' + query.toString(), { credentials:'same-origin' });
+          if (!res.ok) return;
+          const data = await res.json().catch(() => ({}));
+          const state = {
+            status: String(data.status || 'not_started'),
+            percent: Number(data.percent || 0),
+            message: String(data.message || ''),
+            credential: target.credential,
+            vat: target.vat,
+          };
+
+          setFetchSnapshot(state);
+          upsertGlobalFetchProgressFlash(state);
+
+          if (state.status === 'completed' || state.status === 'error' || state.status === 'not_started') {
+            clearFetchTarget();
+          }
+        } catch (e) {
+          console.warn('global fetch progress poll failed', e);
+        }
+      }
+
+      window.__setGlobalFetchProgressTarget = function(payloadOrCredential, maybeVat){
+        if (typeof payloadOrCredential === 'string') {
+          setFetchTarget({ credential: payloadOrCredential, vat: maybeVat || '' });
+          return;
+        }
+        setFetchTarget(payloadOrCredential || {});
+      };
+
+      window.__setGlobalFetchProgressSnapshot = function(state){
+        setFetchSnapshot(state || null);
+        if (state) upsertGlobalFetchProgressFlash(state);
+      };
+
+      window.__clearGlobalFetchProgressTarget = function(){
+        clearFetchTarget();
+        setFetchSnapshot(null);
+        clearGlobalFetchProgressFlash();
+      };
+
+      const bootSnapshot = readFetchSnapshot();
+      if (bootSnapshot && String(bootSnapshot.status || '') === 'running') {
+        upsertGlobalFetchProgressFlash(bootSnapshot);
+      }
+
+      window.addEventListener('storage', function(ev){
+        if (!ev || !ev.key) return;
+        if (ev.key === FETCH_SNAPSHOT_KEY) {
+          const snap = readFetchSnapshot();
+          if (snap) upsertGlobalFetchProgressFlash(snap);
+          else clearGlobalFetchProgressFlash();
+        }
+        if (ev.key === FETCH_TARGET_KEY && !readFetchTarget()) {
+          const snap = readFetchSnapshot();
+          if (!snap || String(snap.status || '') !== 'running') clearGlobalFetchProgressFlash();
+        }
+      });
+
+      {% if current_user and current_user.is_authenticated %}
+      pollGlobalNotifs();
+      pollGlobalFetchProgress();
+      setInterval(pollGlobalNotifs, 5000);
+      setInterval(pollGlobalFetchProgress, 1500);
+      {% endif %}
+    })();
     </script>
     
     <!-- FOOTER -->

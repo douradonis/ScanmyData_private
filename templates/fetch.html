@@ -81,7 +81,7 @@
 
       <!-- Κουμπιά (ίδια σειρά) -->
       <div class="flex items-center gap-2 pt-2">
-        <button type="submit" class="bg-sky-600 hover:bg-sky-700 text-white font-semibold py-2 px-4 rounded-lg shadow">Ανάκτηση</button>
+        <button id="fetchSubmitBtn" type="submit" title="Εκκίνηση λήψης παραστατικών" class="bg-sky-600 hover:bg-sky-700 text-white font-semibold py-2 px-4 rounded-lg shadow">Ανάκτηση</button>
         <button type="button" id="togglePreviewBtn" class="bg-gray-100 hover:bg-gray-200 text-gray-800 font-medium py-2 px-3 rounded-lg border">Εμφάνιση Preview</button>
         <div class="text-sm text-gray-500 ml-2">Preview: πρώτες 40 εγγραφές</div>
       </div>
@@ -311,8 +311,10 @@
   const credentialSelect = document.getElementById('use_credential');
   const lastFetchInfo = document.getElementById('lastFetchInfo');
   const fetchForm = document.querySelector('form[method="POST"]');
+  const fetchSubmitBtn = document.getElementById('fetchSubmitBtn');
   const waitOverlay = document.getElementById('waitOverlay');
   let lastFetchPollTimer = null;
+  let fetchProgressTimer = null;
   const pageAbortController = typeof AbortController !== 'undefined' ? new AbortController() : null;
   const pageSignal = pageAbortController ? pageAbortController.signal : undefined;
 
@@ -332,8 +334,131 @@
     lastFetchPollTimer = null;
   }
 
+  function clearFetchProgressPolling() {
+    if (!fetchProgressTimer) return;
+    clearInterval(fetchProgressTimer);
+    fetchProgressTimer = null;
+  }
+
+  function setFetchSubmitRunning(isRunning, tooltipText) {
+    if (!fetchSubmitBtn) return;
+    fetchSubmitBtn.disabled = !!isRunning;
+    fetchSubmitBtn.setAttribute('aria-disabled', isRunning ? 'true' : 'false');
+    fetchSubmitBtn.dataset.running = isRunning ? '1' : '0';
+    fetchSubmitBtn.title = tooltipText || (isRunning ? 'Η λήψη βρίσκεται ακόμα σε διαδικασία λήψης.' : 'Εκκίνηση λήψης παραστατικών');
+    fetchSubmitBtn.style.opacity = isRunning ? '0.65' : '';
+    fetchSubmitBtn.style.cursor = isRunning ? 'not-allowed' : '';
+  }
+
+  function upsertFetchProgressFlash(message, percent, type) {
+    const host = document.querySelector('.max-w-14xl');
+    if (!host) return;
+
+    let flash = document.getElementById('fetchProgressFlash');
+    if (!flash) {
+      flash = document.createElement('div');
+      flash.id = 'fetchProgressFlash';
+      flash.className = 'flash-banner mb-4 relative px-4 py-2 rounded-lg';
+      host.insertBefore(flash, host.firstChild);
+    }
+
+    const tone = type === 'error'
+      ? 'flash-error bg-red-100 text-red-800'
+      : (type === 'success' ? 'flash-success bg-green-100 text-green-800' : 'bg-sky-100 text-sky-800');
+    flash.className = 'flash-banner mb-4 relative px-4 py-2 rounded-lg ' + tone;
+
+    const pct = Math.max(0, Math.min(100, Number(percent || 0)));
+    flash.textContent = 'Πρόοδος λήψης: ' + pct + '% — ' + (message || 'Σε εξέλιξη...');
+  }
+
+  function clearFetchProgressFlash() {
+    const flash = document.getElementById('fetchProgressFlash');
+    if (flash) flash.remove();
+  }
+
+  function getFetchProgressQuery() {
+    const vatInput = document.getElementById('vat_input');
+    const credential = (credentialSelect && credentialSelect.value ? credentialSelect.value : '').trim();
+    const vat = (vatInput && vatInput.value ? vatInput.value : '').trim();
+    const query = new URLSearchParams();
+    if (credential) query.set('credential', credential);
+    if (vat) query.set('vat', vat);
+    return query;
+  }
+
+  async function pollFetchProgressOnce(query) {
+    const q = query || getFetchProgressQuery();
+    if (!q || !q.toString()) {
+      setFetchSubmitRunning(false, 'Εκκίνηση λήψης παραστατικών');
+      clearFetchProgressFlash();
+      try {
+        if (typeof window.__clearGlobalFetchProgressTarget === 'function') {
+          window.__clearGlobalFetchProgressTarget();
+        }
+      } catch(_) {}
+      return { status: 'not_started', percent: 0, message: '' };
+    }
+
+    const res = await fetch('/api/fetch_progress?' + q.toString(), { credentials: 'same-origin' });
+    const data = await res.json().catch(() => ({}));
+    const status = String(data.status || 'not_started');
+    const percent = Number(data.percent || 0);
+    const message = String(data.message || '');
+    const credential = String(q.get('credential') || '').trim();
+    const vat = String(q.get('vat') || '').trim();
+
+    try {
+      if (typeof window.__setGlobalFetchProgressTarget === 'function') {
+        window.__setGlobalFetchProgressTarget({ credential, vat });
+      }
+      if (typeof window.__setGlobalFetchProgressSnapshot === 'function') {
+        window.__setGlobalFetchProgressSnapshot({ status, percent, message, credential, vat });
+      }
+      if (status === 'completed' || status === 'error' || status === 'not_started') {
+        if (typeof window.__setGlobalFetchProgressTarget === 'function') {
+          window.__setGlobalFetchProgressTarget({});
+        }
+      }
+    } catch(_) {}
+
+    if (status === 'running') {
+      setFetchSubmitRunning(true, 'Η λήψη βρίσκεται ακόμα σε διαδικασία λήψης.');
+      upsertFetchProgressFlash(message || 'Η λήψη βρίσκεται ακόμα σε διαδικασία λήψης.', percent, 'info');
+    } else if (status === 'completed') {
+      setFetchSubmitRunning(false, 'Εκκίνηση λήψης παραστατικών');
+      upsertFetchProgressFlash(message || 'Η λήψη ολοκληρώθηκε.', 100, 'success');
+    } else if (status === 'error') {
+      setFetchSubmitRunning(false, 'Εκκίνηση λήψης παραστατικών');
+      upsertFetchProgressFlash(message || 'Σφάλμα κατά τη λήψη.', Math.max(percent, 1), 'error');
+    } else {
+      setFetchSubmitRunning(false, 'Εκκίνηση λήψης παραστατικών');
+      clearFetchProgressFlash();
+    }
+
+    return { status, percent, message };
+  }
+
+  function startFetchProgressPolling(query) {
+    clearFetchProgressPolling();
+
+    const tick = async function() {
+      try {
+        const state = await pollFetchProgressOnce(query);
+        if (state.status !== 'running') {
+          clearFetchProgressPolling();
+        }
+      } catch (err) {
+        console.warn('Fetch progress polling failed', err);
+      }
+    };
+
+    fetchProgressTimer = setInterval(tick, 1500);
+    tick();
+  }
+
   function cleanupFetchPage() {
     clearLastFetchPolling();
+    clearFetchProgressPolling();
     try {
       fetchFlatpickrInstances.forEach(function(instance) {
         if (instance && typeof instance.destroy === 'function') instance.destroy();
@@ -479,6 +604,7 @@
     }
   } catch(e) {}
   loadLastFetch();
+  startFetchProgressPolling(getFetchProgressQuery());
   
   // Αποτρέψου αλλαγή του credential αν είναι κλειδωμένο
   credentialSelect.addEventListener('change', (e) => {
@@ -507,14 +633,21 @@
         vatInput.style.opacity = '';
       }
       loadLastFetch();
+      startFetchProgressPolling(getFetchProgressQuery());
     }
   });
 
   // also reload last fetch when VAT input changes
   const vatInputEl = document.getElementById('vat_input');
   if (vatInputEl) {
-    vatInputEl.addEventListener('blur', loadLastFetch, pageSignal ? { signal: pageSignal } : undefined);
-    vatInputEl.addEventListener('change', loadLastFetch, pageSignal ? { signal: pageSignal } : undefined);
+    vatInputEl.addEventListener('blur', function() {
+      loadLastFetch();
+      startFetchProgressPolling(getFetchProgressQuery());
+    }, pageSignal ? { signal: pageSignal } : undefined);
+    vatInputEl.addEventListener('change', function() {
+      loadLastFetch();
+      startFetchProgressPolling(getFetchProgressQuery());
+    }, pageSignal ? { signal: pageSignal } : undefined);
   }
   
   // Αποθήκευσε την αρχική τιμή
@@ -564,6 +697,11 @@
     fetchForm.addEventListener('submit', async function(e){
       e.preventDefault();
 
+      if (fetchSubmitBtn && fetchSubmitBtn.dataset.running === '1') {
+        upsertFetchProgressFlash('Η λήψη βρίσκεται ακόμα σε διαδικασία λήψης.', 1, 'info');
+        return;
+      }
+
       try {
         waitOverlay.style.display = 'flex';
         waitOverlay.setAttribute('aria-hidden', 'false');
@@ -574,7 +712,20 @@
       const fallbackVat = (document.getElementById('vat_input')?.value || '').trim();
       const requestCredential = String(formData.get('use_credential') || fallbackCredential || '');
       const requestVat = String(formData.get('vat_number') || fallbackVat || '');
+      const progressQuery = new URLSearchParams();
+      if (requestCredential) progressQuery.set('credential', requestCredential);
+      if (requestVat) progressQuery.set('vat', requestVat);
+
+      try {
+        if (typeof window.__setGlobalFetchProgressTarget === 'function') {
+          window.__setGlobalFetchProgressTarget({ credential: requestCredential, vat: requestVat });
+        }
+      } catch(_) {}
+
       const previousValue = await loadLastFetch({ credentialName: requestCredential, vat: requestVat });
+
+      setFetchSubmitRunning(true, 'Η λήψη βρίσκεται ακόμα σε διαδικασία λήψης.');
+      upsertFetchProgressFlash('Η λήψη ξεκίνησε.', 1, 'info');
 
       try {
         const response = await fetch(fetchForm.getAttribute('action') || window.location.pathname, {
@@ -593,11 +744,14 @@
         }
 
         showFetchFlash(data.message || 'Η λήψη ξεκίνησε.', 'success');
+        startFetchProgressPolling(progressQuery);
         startLastFetchPolling(previousValue, {
           credentialName: requestCredential,
           vat: requestVat
         });
       } catch (err) {
+        setFetchSubmitRunning(false, 'Εκκίνηση λήψης παραστατικών');
+        upsertFetchProgressFlash(err.message || 'Αποτυχία εκκίνησης λήψης.', 1, 'error');
         showFetchFlash(err.message || 'Αποτυχία εκκίνησης λήψης.', 'error');
       } finally {
         try {

@@ -25,6 +25,8 @@ import json
 import traceback
 import base64
 import re
+import time
+import errno
 from urllib.parse import urlsplit, urlparse, urlunparse
 from logging.handlers import RotatingFileHandler
 import datetime
@@ -4301,8 +4303,25 @@ def json_write(path, obj):
             except Exception:
                 # some file systems may not support fsync; ignore if fails
                 pass
-        # atomic replace
-        os.replace(tmp, path)
+        # atomic replace with Windows-safe retry (handles transient file locks)
+        def _replace_with_retry(src, dst, retries=5, base_delay=0.08):
+            for attempt in range(retries):
+                try:
+                    os.replace(src, dst)
+                    return
+                except PermissionError as e:
+                    if attempt == retries - 1:
+                        raise
+                    time.sleep(base_delay * (2 ** attempt))
+                except OSError as e:
+                    if e.errno in (errno.EBUSY, errno.EACCES, errno.ETXTBSY):
+                        if attempt == retries - 1:
+                            raise
+                        time.sleep(base_delay * (2 ** attempt))
+                    else:
+                        raise
+
+        _replace_with_retry(tmp, path)
         return True
     except Exception as e:
         try:
@@ -8443,6 +8462,41 @@ def get_customer_docs_file(vat):
 # ---------------- Notifications (broadcast) ----------------
 # simple in-memory list of messages; cleared as they are fetched by clients.
 global_notifications = []
+fetch_progress_lock = threading.Lock()
+fetch_progress_state = {}
+
+
+def _set_fetch_progress_state(fetch_key: str, status: str, percent: int, message: str, **extra) -> None:
+    """Store in-memory progress for a running fetch job."""
+    key = str(fetch_key or "").strip()
+    if not key:
+        return
+
+    pct = max(0, min(100, int(percent or 0)))
+    payload = {
+        "status": str(status or "not_started"),
+        "percent": pct,
+        "message": str(message or ""),
+        "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    payload.update(extra or {})
+
+    with fetch_progress_lock:
+        prev = fetch_progress_state.get(key, {})
+        if "started_at" in prev and "started_at" not in payload:
+            payload["started_at"] = prev.get("started_at")
+        fetch_progress_state[key] = payload
+
+
+def _get_fetch_progress_state(fetch_key: str) -> Dict[str, Any]:
+    key = str(fetch_key or "").strip()
+    if not key:
+        return {"status": "not_started", "percent": 0, "message": ""}
+    with fetch_progress_lock:
+        current = fetch_progress_state.get(key)
+        if not current:
+            return {"status": "not_started", "percent": 0, "message": ""}
+        return dict(current)
 
 @app.route('/api/global_notifications', methods=['GET'])
 def api_global_notifications():
@@ -8453,6 +8507,18 @@ def api_global_notifications():
         return jsonify({"msgs": msgs}), 200
     except Exception:
         return jsonify({"msgs": []}), 500
+
+
+@app.route('/api/fetch_progress', methods=['GET'])
+def api_fetch_progress():
+    """Return current fetch progress for credential/vat key."""
+    try:
+        credential = (request.args.get('credential') or '').strip()
+        vat = (request.args.get('vat') or '').strip()
+        fetch_key = _get_fetch_tracking_key(credential, vat)
+        return jsonify(_get_fetch_progress_state(fetch_key)), 200
+    except Exception as e:
+        return jsonify({"status": "error", "percent": 0, "message": str(e)}), 500
 
 
 # ---------------- Fetch page (updated with per-customer summary) ----------------
@@ -8524,17 +8590,25 @@ def fetch():
 
         # perform the actual fetch+save in background so the request can
         # return immediately and avoid timeouts.
-        def _do_fetch(aade_user, aade_key, vat, d1, d2, selected, group_dir):
+        def _do_fetch(aade_user, aade_key, vat, d1, d2, selected, group_dir, fetch_key):
             # store the captured group directory in thread-local storage so that
             # any subsequent calls to ``group_path``/``get_group_base_dir``
             # inside this worker use the correct folder even though the Flask
             # request context has gone away.
+            added_docs = 0
+            added_summaries = 0
+            all_rows = []
+            summary_list = []
+            seen_marks = set()
+            completed_ok = False
+
             try:
                 _set_thread_group_base_dir(group_dir)
             except Exception:
                 pass
 
             try:
+                _set_fetch_progress_state(fetch_key, "running", 5, "Ξεκίνησε η διαδικασία λήψης.", started_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
                 all_rows, summary_list = request_docs(
                     date_from=d1,
                     date_to=d2,
@@ -8544,10 +8618,12 @@ def fetch():
                     debug=True,
                     save_excel=False
                 )
-                added_docs = 0
-                added_summaries = 0
-                seen_marks = set()
-                for d in all_rows:
+                total_rows = len(all_rows)
+                total_summaries = len(summary_list)
+                _set_fetch_progress_state(fetch_key, "running", 20, f"Έγινε λήψη {total_rows} παραστατικών. Επεξεργασία...")
+
+                docs_step = max(1, total_rows // 25) if total_rows else 1
+                for idx, d in enumerate(all_rows, start=1):
                     if vat:
                         d["AFM_counterpart"] = vat
                     if d.get("mark"):
@@ -8555,20 +8631,29 @@ def fetch():
                     if append_doc_to_customer_file(d, vat):
                         added_docs += 1
 
-                for s in summary_list:
+                    if idx == 1 or idx == total_rows or idx % docs_step == 0:
+                        docs_progress = 20 + int((idx / max(total_rows, 1)) * 55)
+                        _set_fetch_progress_state(fetch_key, "running", docs_progress, f"Επεξεργασία παραστατικών {idx}/{total_rows}.")
+
+                sums_step = max(1, total_summaries // 20) if total_summaries else 1
+                for s_idx, s in enumerate(summary_list, start=1):
                     if append_summary_to_customer_file(s, vat):
                         added_summaries += 1
+
+                    if s_idx == 1 or s_idx == total_summaries or s_idx % sums_step == 0:
+                        sum_progress = 78 + int((s_idx / max(total_summaries, 1)) * 14)
+                        _set_fetch_progress_state(fetch_key, "running", sum_progress, f"Επεξεργασία summary {s_idx}/{total_summaries}.")
 
                 if vat and seen_marks:
                     try:
                         legacy = _is_legacy_fetch_mode_enabled()
                         if not legacy:
+                            _set_fetch_progress_state(fetch_key, "running", 94, "Καθαρισμός παλιών εγγραφών...")
                             prune_customer_invoices(vat, seen_marks, date_from=d1, date_to=d2)
                             prune_customer_summaries(vat, seen_marks, date_from=d1, date_to=d2)
                     except Exception:
                         pass
 
-                fetch_key = _get_fetch_tracking_key(selected, vat)
                 if fetch_key:
                     set_last_fetch_date(fetch_key)
 
@@ -8598,21 +8683,48 @@ def fetch():
                                 pass
                 except Exception:
                     pass
+                completed_ok = True
+                _set_fetch_progress_state(
+                    fetch_key,
+                    "completed",
+                    100,
+                    f"Η λήψη ολοκληρώθηκε: {added_docs} έγγραφα, {added_summaries} συνοψίσεις.",
+                    added_docs=added_docs,
+                    added_summaries=added_summaries,
+                    fetched_count=len(all_rows),
+                )
             except Exception:
                 log.exception("Fetch error (background)")
+                _set_fetch_progress_state(fetch_key, "error", 100, "Σφάλμα κατά τη λήψη. Ελέγξτε τα logs.")
             # broadcast notification for any listening clients
             try:
-                global_notifications.append(f"Λήψη ολοκληρώθηκε για ΑΦΜ {vat}: {added_docs} έγγραφα, {added_summaries} συνοψίσεις.")
+                if completed_ok:
+                    global_notifications.append(f"Λήψη ολοκληρώθηκε για ΑΦΜ {vat}: {added_docs} έγγραφα, {added_summaries} συνοψίσεις.")
+                else:
+                    global_notifications.append(f"Λήψη απέτυχε για ΑΦΜ {vat}. Δείτε τα logs.")
             except Exception:
                 pass
 
         # spawn thread and return early.  capture the current group directory
         # so the worker can continue to write to the same location.
+        fetch_key = _get_fetch_tracking_key(selected, vat)
+        current_progress = _get_fetch_progress_state(fetch_key)
+        if current_progress.get("status") == "running":
+            error = "Υπάρχει ήδη ενεργή λήψη για αυτόν τον πελάτη."
+            if wants_json:
+                return jsonify({"ok": False, "error": error, "status": "running"}), 409
+            return safe_render("fetch.html", credentials=creds, message=message,
+                               error=error, preview=preview, active_page="fetch",
+                               active_credential=active_name,
+                               last_fetch_date_display=initial_last_fetch_date)
+
+        _set_fetch_progress_state(fetch_key, "running", 1, "Η λήψη ξεκίνησε.", started_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
+
         group_dir = get_group_base_dir()
         try:
             t = threading.Thread(
                 target=_do_fetch,
-                args=(aade_user, aade_key, vat, d1, d2, selected, group_dir),
+                args=(aade_user, aade_key, vat, d1, d2, selected, group_dir, fetch_key),
                 daemon=True,
             )
             t.start()
@@ -8634,6 +8746,7 @@ def fetch():
                 "message": message,
                 "credential": selected,
                 "vat": vat,
+                "fetch_key": fetch_key,
                 "last_fetch_date": current_last_fetch_date,
                 "last_fetch_raw": current_last_fetch_raw,
             })

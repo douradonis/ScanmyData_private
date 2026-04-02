@@ -1035,7 +1035,7 @@ document.getElementById('epsilonExport')?.addEventListener('click', function(){
 <!-- Live-update polling for shared active client -->
 <script>
 (function(){
-  const POLL_INTERVAL = 6000; // ms
+  const POLL_INTERVAL = 30000; // ms (slowed down for resource savings)
   let pollTimer = null;
   let lastEventsHash = '';
   const CURRENT_USER_EMAIL = "{{ current_user.email if current_user and current_user.is_authenticated else '' }}";

@@ -2458,13 +2458,9 @@ if (typeof window !== 'undefined') {
         const btn = ev.target.closest('#summaryModal button, #summaryModal input[type="submit"]');
         if (!btn) return;
         // ignore close/cancel so they don't accidentally trigger a save
-        if (btn.matches('.modal-summary-close, .modal-cancel-btn')){
-          ev.preventDefault();
-          ev.stopPropagation();
-          return;
-        }
+        if (btn.matches('#modalCloseX, #modalCloseBtn, .modal-summary-close, .modal-cancel-btn, [data-modal-close]')) return;
         const txt=(btn.textContent||'').toLowerCase();
-        if (btn.matches('.modal-save-btn')||btn.type==='submit'||txt.includes('αποθήκευση')){
+        if (btn.matches('#saveSummaryBtn, #saveSummaryForm button[type="submit"], #saveSummaryForm input[type="submit"], .modal-save-btn') || txt.includes('αποθήκευση')){
           ev.preventDefault(); ev.stopImmediatePropagation();
           handlePrecheck().then(()=>{
             try{
@@ -5692,6 +5688,7 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
   modalCloseBtns.forEach(b => b?.addEventListener('click', function(e){
     e.preventDefault();
     e.stopPropagation();
+    try { window.__RC_BLOCK_SUMMARY_SAVE_UNTIL = Date.now() + 1800; } catch(_) {}
     try { clearReceiptSearchCacheOnClose(); } catch(_) {}
     hideSummaryModal();
     removeForceEditParamFromUrl();
@@ -7836,8 +7833,9 @@ function readMappingFromUI(){
     try {
       const btn = e.target.closest('#summaryModal button, #summaryModal input[type="submit"]');
       if (!btn) return;
+      if (btn.matches('#modalCloseX, #modalCloseBtn, .modal-summary-close, .modal-cancel-btn, [data-modal-close]')) return;
       const txt = (btn.textContent || '').trim().toLowerCase();
-      const isSaveLike = btn.matches('.modal-save-btn') || btn.type === 'submit' || txt.includes('αποθήκευση') || txt.includes('αποθηκευση');
+      const isSaveLike = btn.matches('#saveSummaryBtn, #saveSummaryForm button[type="submit"], #saveSummaryForm input[type="submit"], .modal-save-btn') || txt.includes('αποθήκευση') || txt.includes('αποθηκευση');
       if (!isSaveLike) return;
 
       // Intercept and run the same pre-check as the form submit handler

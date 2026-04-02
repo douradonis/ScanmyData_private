@@ -190,6 +190,7 @@
     document.addEventListener('click', function(e){
         const trigger = e.target && e.target.closest ? e.target.closest('#saveSummaryBtn, #saveSummaryForm button[type="submit"]') : null;
         if (!trigger) return;
+        if ((window.__RC_BLOCK_SUMMARY_SAVE_UNTIL || 0) > Date.now()) return;
         const form = document.getElementById('saveSummaryForm');
         if (!form) return;
         e.preventDefault();
@@ -200,6 +201,11 @@
     document.addEventListener('submit', function(e){
         const form = e && e.target && e.target.id === 'saveSummaryForm' ? e.target : null;
         if (!form) return;
+        if ((window.__RC_BLOCK_SUMMARY_SAVE_UNTIL || 0) > Date.now()) {
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+        }
         e.preventDefault();
         e.stopPropagation();
         void forceAjaxSave(form);
