@@ -815,6 +815,34 @@ def _text_of(el):
         return el.get_text(" ", strip=True)
     return str(el).strip()
 
+def _clean_issuer_name(raw):
+    if raw is None:
+        return None
+    text = re.sub(r"\s+", " ", str(raw)).strip(" \t\r\n:-")
+    if not text:
+        return None
+    low = text.lower()
+    noise_markers = [
+        "ευχαριστούμε που χρησιμοποιείτε τις υπηρεσίες",
+        "αφμ εκδότη",
+        "διεύθυνση εκδότη",
+        "επωνυμία πελάτη",
+        "αφμ πελάτη",
+        "επάγγελμα",
+    ]
+    if sum(marker in low for marker in noise_markers) >= 2:
+        return None
+    if low in {
+        "εκδότη",
+        "επωνυμία",
+        "επωνυμία εκδότη",
+        "supplier",
+        "seller",
+        "issuer",
+    }:
+        return None
+    return text
+
 def _extract_input_or_text(soup, *ids_or_names):
     for key in ids_or_names:
         if not key:
@@ -858,6 +886,47 @@ def _extract_mydatapi_url_from_text(text, base_url=None):
             else:
                 continue
         return candidate
+    return None
+
+def _extract_xml_fragment(text):
+    if not text:
+        return None
+    patterns = [
+        r'(<\?xml[^<]*<InvoicesDoc[\s\S]*?</InvoicesDoc>)',
+        r'(<\?xml[^<]*<invoice[\s\S]*?</invoice>)',
+        r'(<InvoicesDoc[\s\S]*?</InvoicesDoc>)',
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, flags=re.I)
+        if m:
+            return m.group(1)
+    return None
+
+def _extract_vat_from_primer_xml(root, seller_vat=None):
+    candidates = []
+    for el in root.iter():
+        tag = el.tag.split('}')[-1].lower()
+        if tag in ('vatnumber', 'vat', 'afm', 'companyid'):
+            txt = (el.text or '').strip()
+            if txt:
+                m = VAT_RE.search(txt)
+                if m:
+                    candidates.append(m.group(0))
+    if seller_vat:
+        for vat in candidates:
+            if vat != seller_vat:
+                return vat
+    if candidates:
+        return candidates[-1]
+    return None
+
+def _extract_mark_from_primer_xml(root):
+    for el in root.iter():
+        tag = el.tag.split('}')[-1].lower()
+        if tag == 'mark':
+            txt = (el.text or '').strip()
+            if txt and re.fullmatch(r'\d{15}', txt):
+                return txt
     return None
 
 def _extract_from_jsonld(soup):
@@ -1082,7 +1151,7 @@ def scrape_mydatapi(url, timeout=12, debug=False):
                 nxt = p.find_next(["input","td","span"])
                 if nxt:
                     iname = nxt.get("value") or nxt.get_text(" ", strip=True)
-    out["issuer_name"] = (iname.strip() if iname else None)
+    out["issuer_name"] = _clean_issuer_name(iname)
     # progressive aa
     paa = _extract_input_or_text(soup, "saa", "s_aa", "saa", "saa_input", "s_aa")
     if not paa:
@@ -1119,9 +1188,43 @@ def scrape_mydatapi(url, timeout=12, debug=False):
                     comp = obj.get("seller") or obj.get("provider") or obj.get("sellerOrganization")
                     if isinstance(comp, dict):
                         iname_c = comp.get("name") or comp.get("legalName")
-                        if iname_c: out["issuer_name"] = iname_c
+                        if iname_c:
+                            out["issuer_name"] = _clean_issuer_name(iname_c)
             except Exception:
                 continue
+
+    page_text = soup.get_text(" ", strip=True)
+    if not out["doc_type"]:
+        m_doc = re.search(r"(?:Είδος\s*Παραστατικού|Type|Document|Invoice\s*Type)[\s:]*([^\n<]+)", page_text, re.I)
+        if m_doc:
+            out["doc_type"] = m_doc.group(1).strip()
+    if not out["total_amount"]:
+        m_total = re.search(r"(?:Σύνολο|Συνολική αξία|Συνολικό ποσό|Πληρωτέο ποσό|Amount\s*Due|Total)[\s:]*€?\s*([0-9][0-9\.,]+)", page_text, re.I)
+        if m_total:
+            out["total_amount"] = _clean_amount_to_comma(m_total.group(1))
+    if not out["issue_date"]:
+        m_date = re.search(r"(?:Ημερομηνία.*Έκδοσης|Ημερομηνία|IssueDate|DateIssued|Issue\s*Date)[\s:]*([0-9]{1,2}[\/\-\.][0-9]{1,2}[\/\-\.][0-9]{4}|[0-9]{4}-[0-9]{2}-[0-9]{2})", page_text, re.I)
+        if m_date:
+            out["issue_date"] = _norm_date_to_ddmmyyyy(m_date.group(1))
+    if not out["issuer_vat"]:
+        m_vat = re.search(r"Α\.?Φ\.?Μ\.?[:\s]*([0-9]{9})", page_text, re.I)
+        if m_vat:
+            out["issuer_vat"] = m_vat.group(1)
+    if not out["issuer_name"]:
+        m_name = re.search(r"(?:Επωνυμία|Supplier|Seller|Issuer)[\s:]+([^\n<]+)", page_text, re.I)
+        if m_name:
+            out["issuer_name"] = _clean_issuer_name(m_name.group(1))
+    if not out["progressive_aa"]:
+        m_aa = re.search(r"(?:Αρ\.\?\s*Παραστατικού|Προοδευτικ(?:ός|ο)\s*α\/?α|Invoice\s*No|ΑΑ)[\s:]*([A-Za-z0-9\-_/]+)", page_text, re.I)
+        if m_aa:
+            out["progressive_aa"] = m_aa.group(1).strip()
+    if not out["MARK"]:
+        m_mark = MARK_RE.search(page_text)
+        if m_mark:
+            out["MARK"] = m_mark.group(0)
+
+    out["issuer_name"] = _clean_issuer_name(out.get("issuer_name"))
+
     _merge_vat_analysis(out, _extract_vat_breakdown_from_html(soup, html))
     _reconcile_single_rate_vat_with_total(out)
 
@@ -2638,6 +2741,157 @@ def scrape_megasoft(url, timeout=20, debug=False):
     return out
 
 
+def _extract_mydatapi_link_from_page(html, base_url=None):
+    if not html:
+        return None
+    mydatapi_url = _extract_mydatapi_url_from_text(html, base_url=base_url)
+    if mydatapi_url:
+        return mydatapi_url
+    soup = BeautifulSoup(html, "html.parser")
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if "mydatapi.aade.gr" in href and "TimologioQR/QRInfo" in href:
+            return urljoin(base_url or "", href)
+    for btn in soup.find_all("button"):
+        link = btn.find("a", href=True)
+        if link:
+            href = link["href"].strip()
+            if "mydatapi.aade.gr" in href and "TimologioQR/QRInfo" in href:
+                return urljoin(base_url or "", href)
+    return None
+
+
+def _extract_primer_mark_from_url(url):
+    parsed = urlparse(url)
+    segment = parsed.path.rstrip("/").split("/")[-1]
+    if re.fullmatch(r"\d{15}", segment):
+        return segment
+    m = re.search(r"/(\d{15})(?:[/?#]|$)", url)
+    return m.group(1) if m else None
+
+
+def scrape_iview(url, timeout=20, debug=False):
+    out = {
+        "issuer_vat": None, "issue_date": None, "issuer_name": None,
+        "progressive_aa": None, "doc_type": None, "total_amount": None,
+        "is_invoice": False, "MARK": None, "source": "IView", "vat_analysis": None,
+        "vat_analysis_inferred": False
+    }
+    try:
+        html = _fetch_url_text(url, timeout=timeout, debug=debug)
+    except Exception as e:
+        if debug:
+            print("iview fetch error:", e)
+        return out
+
+    mydatapi_url = _extract_mydatapi_link_from_page(html, base_url=url)
+    if mydatapi_url:
+        if debug:
+            print("iview resolved myDATA URL:", mydatapi_url)
+        mydata_out = scrape_mydatapi(mydatapi_url, timeout=timeout, debug=debug)
+        if isinstance(mydata_out, dict):
+            out["MARK"] = _normalize_mark_value(mydata_out.get("MARK"))
+            afm = (mydata_out.get("issuer_vat") or mydata_out.get("ΑΦΜ Πελάτη") or mydata_out.get("ΑΦΜ") or "").strip()
+            out["issuer_vat"] = re.sub(r"\D", "", afm) if afm and afm != "N/A" else None
+            out["doc_type"] = (mydata_out.get("doc_type") or mydata_out.get("Είδος Παραστατικού") or "").strip() or None
+            out["issue_date"] = _norm_date_to_ddmmyyyy(mydata_out.get("issue_date") or mydata_out.get("Ημερομηνία") or mydata_out.get("Ημερομηνία Έκδοσης") or "") if (mydata_out.get("issue_date") or mydata_out.get("Ημερομηνία") or mydata_out.get("Ημερομηνία Έκδοσης")) else None
+            out["total_amount"] = _clean_amount_to_comma(mydata_out.get("total_amount") or mydata_out.get("Συνολική αξία") or mydata_out.get("Συνολικό ποσό") or "") if (mydata_out.get("total_amount") or mydata_out.get("Συνολική αξία") or mydata_out.get("Συνολικό ποσό")) else None
+            out["issuer_name"] = (mydata_out.get("issuer_name") or mydata_out.get("Επωνυμία") or "").strip() or None
+            out["progressive_aa"] = (mydata_out.get("progressive_aa") or mydata_out.get("Α/Α") or mydata_out.get("ΑΑ") or "").strip() or None
+            if out["doc_type"] and re.search(r"τιμολό?γιο|invoice", out["doc_type"], re.I):
+                out["is_invoice"] = True
+            out["source"] = "IView->MyData"
+    return out
+
+
+def scrape_primer(url, timeout=20, debug=False):
+    out = {
+        "issuer_vat": None, "issue_date": None, "issuer_name": None,
+        "progressive_aa": None, "doc_type": None, "total_amount": None,
+        "is_invoice": False, "MARK": None, "source": "Primer MyData", "vat_analysis": None,
+        "vat_analysis_inferred": False
+    }
+    mark = _extract_primer_mark_from_url(url)
+    if mark:
+        out["MARK"] = mark
+    try:
+        html = _fetch_url_text(url, timeout=timeout, debug=debug)
+    except Exception as e:
+        if debug:
+            print("primer fetch error:", e)
+        return out
+
+    mydatapi_url = _extract_mydatapi_link_from_page(html, base_url=url)
+    if mydatapi_url:
+        if debug:
+            print("primer resolved myDATA URL:", mydatapi_url)
+        mydata_out = scrape_mydatapi(mydatapi_url, timeout=timeout, debug=debug)
+        if isinstance(mydata_out, dict):
+            extracted_mark = _normalize_mark_value(mydata_out.get("MARK"))
+            if extracted_mark:
+                out["MARK"] = out["MARK"] or extracted_mark
+            afm = (mydata_out.get("issuer_vat") or mydata_out.get("ΑΦΜ Πελάτη") or mydata_out.get("ΑΦΜ") or "").strip()
+            out["issuer_vat"] = re.sub(r"\D", "", afm) if afm and afm != "N/A" else None
+            out["doc_type"] = (mydata_out.get("doc_type") or mydata_out.get("Είδος Παραστατικού") or "").strip() or None
+            out["issue_date"] = _norm_date_to_ddmmyyyy(mydata_out.get("issue_date") or mydata_out.get("Ημερομηνία") or mydata_out.get("Ημερομηνία Έκδοσης") or "") if (mydata_out.get("issue_date") or mydata_out.get("Ημερομηνία") or mydata_out.get("Ημερομηνία Έκδοσης")) else None
+            out["total_amount"] = _clean_amount_to_comma(mydata_out.get("total_amount") or mydata_out.get("Συνολική αξία") or mydata_out.get("Συνολικό ποσό") or "") if (mydata_out.get("total_amount") or mydata_out.get("Συνολική αξία") or mydata_out.get("Συνολικό ποσό")) else None
+            out["issuer_name"] = (mydata_out.get("issuer_name") or mydata_out.get("Επωνυμία") or "").strip() or None
+            out["progressive_aa"] = (mydata_out.get("progressive_aa") or mydata_out.get("Α/Α") or mydata_out.get("ΑΑ") or "").strip() or None
+            if out["doc_type"] and re.search(r"τιμολό?γιο|invoice", out["doc_type"], re.I):
+                out["is_invoice"] = True
+            out["source"] = "Primer MyData->MyData"
+
+    xml_fragment = _extract_xml_fragment(html)
+    if xml_fragment:
+        try:
+            root = ET.fromstring(xml_fragment.encode("utf-8"))
+            extracted = _extract_from_ubl_root(root)
+            for key, value in extracted.items():
+                if value and not out.get(key):
+                    out[key] = value
+            extracted_mark = _extract_mark_from_primer_xml(root)
+            if extracted_mark:
+                out["MARK"] = out["MARK"] or extracted_mark
+
+            seller_vat = None
+            issuer = root.find('.//issuer') or root.find('.//{*}issuer')
+            if issuer is not None:
+                seller_el = issuer.find('.//vatNumber') or issuer.find('.//{*}vatNumber') or issuer.find('.//vatnumber')
+                if seller_el is not None and seller_el.text:
+                    m = VAT_RE.search(seller_el.text.strip())
+                    if m:
+                        seller_vat = m.group(0)
+
+            afm = _extract_vat_from_primer_xml(root, seller_vat=seller_vat)
+            if afm and not out.get("issuer_vat"):
+                out["issuer_vat"] = afm
+        except Exception as e:
+            if debug:
+                print("primer xml parse error:", e)
+
+    if not out.get("issuer_vat"):
+        soup = BeautifulSoup(html, "html.parser")
+        for lbl in soup.find_all(string=re.compile(r"Α\.?Φ\.?Μ\.?", re.I)):
+            parent = getattr(lbl, "parent", None)
+            if not parent:
+                continue
+            text = parent.get_text(" ", strip=True)
+            m = re.search(r"Α\.?Φ\.?Μ\.?[:\s]*([0-9]{9})", text, flags=re.I)
+            if m:
+                out["issuer_vat"] = m.group(1)
+                break
+
+    if not out.get("issuer_vat"):
+        soup = BeautifulSoup(html, "html.parser")
+        page_text = soup.get_text(" ", strip=True)
+        m = re.search(r"\b([0-9]{9})\b", page_text)
+        if m:
+            out["issuer_vat"] = m.group(1)
+
+    out["issuer_name"] = _clean_issuer_name(out.get("issuer_name"))
+    return out
+
+
 def scrape_eskap(url, timeout=20, debug=False):
     """
     ESKAP invoice pages.
@@ -3355,6 +3609,12 @@ def detect_and_scrape(url, timeout=20, debug=False):
         return _finalize_detect_result(result)
     if "parochos.gr" in domain:
         result = scrape_epsilon(url, timeout=timeout, debug=debug)  # Χρησιμοποιεί το ίδιο API
+        return _finalize_detect_result(result)
+    if "mydata.primer.gr" in domain or "primer.gr" in domain:
+        result = scrape_primer(url, timeout=timeout, debug=debug)
+        return _finalize_detect_result(result)
+    if "iview.gr" in domain:
+        result = scrape_iview(url, timeout=timeout, debug=debug)
         return _finalize_detect_result(result)
     if "pegcloud.io" in domain or "pegcloud" in domain:
         result = scrape_pegcloud(url, timeout=timeout, debug=debug)

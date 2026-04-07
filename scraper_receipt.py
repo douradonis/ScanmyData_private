@@ -23,6 +23,16 @@ except ImportError:
     _analysis_einvoicing_gr = None
 
 try:
+    from scraper_receipt_analysis import scrape_iview as _analysis_iview
+except ImportError:
+    _analysis_iview = None
+
+try:
+    from scraper_receipt_analysis import scrape_primer as _analysis_primer
+except ImportError:
+    _analysis_primer = None
+
+try:
     from scraper_receipt_analysis import detect_and_scrape as _analysis_detect_and_scrape
 except ImportError:
     _analysis_detect_and_scrape = None
@@ -94,6 +104,33 @@ def scrape_einvoicing_gr(url, timeout=15, debug=False):
         res.pop("vat_analysis", None)
         res.pop("vat_analysis_inferred", None)
     return res
+
+
+def _strip_analysis_fields(res):
+    if isinstance(res, dict):
+        res.pop("vat_analysis", None)
+        res.pop("vat_analysis_inferred", None)
+    return res
+
+
+def scrape_iview(url, timeout=15, debug=False):
+    if not _analysis_iview and not _analysis_detect_and_scrape:
+        raise RuntimeError("scrape_iview implementation not available")
+    if _analysis_iview:
+        res = _analysis_iview(url, timeout=timeout, debug=debug)
+    else:
+        res = _analysis_detect_and_scrape(url, timeout=timeout, debug=debug)
+    return _strip_analysis_fields(res)
+
+
+def scrape_primer(url, timeout=15, debug=False):
+    if not _analysis_primer and not _analysis_detect_and_scrape:
+        raise RuntimeError("scrape_primer implementation not available")
+    if _analysis_primer:
+        res = _analysis_primer(url, timeout=timeout, debug=debug)
+    else:
+        res = _analysis_detect_and_scrape(url, timeout=timeout, debug=debug)
+    return _strip_analysis_fields(res)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1952,6 +1989,10 @@ def detect_and_scrape(url, timeout=20, debug=False):
         return scrape_simpleinvoicing(url, timeout=timeout, debug=debug)
     if "eskap.gr" in domain or "eskap" in domain:
         return scrape_eskap(url, timeout=timeout, debug=debug)
+    if "mydata.primer.gr" in domain or "primer.gr" in domain:
+        return scrape_primer(url, timeout=timeout, debug=debug)
+    if "iview.gr" in domain:
+        return scrape_iview(url, timeout=timeout, debug=debug)
     if "megasoft" in domain or "invoicelink" in domain:
         try:
             from scraper_receipt_analysis import scrape_megasoft as _scrape_megasoft

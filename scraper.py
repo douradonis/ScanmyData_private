@@ -1313,6 +1313,152 @@ def scrape_vsgr(url):
     return marks, counterpart_vat
 
 
+# -------------------- PRIMER --------------------
+def _extract_primer_mark_from_url(url):
+    parsed = urlparse(url)
+    segment = parsed.path.rstrip("/").split("/")[-1]
+    if re.fullmatch(r"\d{15}", segment):
+        return segment
+    m = re.search(r"/(\d{15})(?:[/?#]|$)", url)
+    return m.group(1) if m else None
+
+
+def scrape_primer(url):
+    """
+    Επιστρέφει (marks, counterpart_vat) για URL τύπου mydata.primer.gr.
+    Το MARK μπορεί να είναι ήδη ενσωματωμένο στο URL, ενώ το ΑΦΜ
+    πελάτη αναζητείται στη σελίδα ή στο embedded mydatapi flow.
+    """
+    mark = _extract_primer_mark_from_url(url)
+    sess = requests.Session()
+    sess.headers.update(HEADERS)
+
+    try:
+        r = sess.get(url, timeout=15)
+        r.raise_for_status()
+        html = r.text
+    except Exception as e:
+        print(f"[RequestError] {e}")
+        return [mark] if mark else [], None
+
+    mydatapi_url = _extract_mydatapi_url_from_text(html, r.url)
+    if mydatapi_url:
+        try:
+            data = scrape_mydatapi(mydatapi_url, debug=False)
+            if data:
+                extracted_mark = data.get("MARK")
+                if extracted_mark and extracted_mark != "N/A":
+                    mark = mark or extracted_mark.strip()
+                afm = data.get("ΑΦΜ Πελάτη") or data.get("ΑΦΜ")
+                if afm and afm != "N/A":
+                    return ([mark] if mark else []), re.sub(r"\D", "", afm)
+        except Exception:
+            pass
+
+    xml_fragment = _extract_xml_fragment(html)
+    if xml_fragment:
+        try:
+            root = ET.fromstring(xml_fragment.encode('utf-8'))
+            extracted_mark = _extract_mark_from_primer_xml(root)
+            if extracted_mark:
+                mark = mark or extracted_mark
+            seller_vat = None
+            issuer = root.find('.//issuer') or root.find('.//{*}issuer')
+            if issuer is not None:
+                seller_el = issuer.find('.//vatNumber') or issuer.find('.//{*}vatNumber') or issuer.find('.//vatnumber')
+                if seller_el is not None and seller_el.text:
+                    m = VAT_RE.search(seller_el.text.strip())
+                    if m:
+                        seller_vat = m.group(0)
+            afm = _extract_vat_from_primer_xml(root, seller_vat=seller_vat)
+            if afm:
+                return ([mark] if mark else []), afm
+        except Exception:
+            pass
+
+    # Προτίμηση σε εμφανή ΑΦΜ με ετικέτα
+    soup = BeautifulSoup(html, "html.parser")
+    counterpart_vat = None
+    for lbl in soup.find_all(string=re.compile(r"Α\.?Φ\.?Μ\.?", re.I)):
+        parent = lbl.parent
+        if parent:
+            text = parent.get_text(" ", strip=True)
+            m = re.search(r"Α\.?Φ\.?Μ\.?[:\s]*([0-9]{9})", text, flags=re.I)
+            if m:
+                counterpart_vat = m.group(1)
+                break
+    if not counterpart_vat:
+        page_text = soup.get_text(" ", strip=True)
+        m = re.search(r"\b([0-9]{9})\b", page_text)
+        if m:
+            counterpart_vat = m.group(1)
+
+    if counterpart_vat:
+        counterpart_vat = re.sub(r"\D", "", counterpart_vat)
+
+    return ([mark] if mark else []), counterpart_vat
+
+
+def _extract_xml_fragment(text):
+    if not text:
+        return None
+    # Pages may include raw myDATA XML in the page source when the myDATA view
+    # is selected. Extract the XML block so we can parse it directly.
+    patterns = [
+        r'(<\?xml[^<]*<InvoicesDoc[\s\S]*?</InvoicesDoc>)',
+        r'(<\?xml[^<]*<invoice[\s\S]*?</invoice>)',
+        r'(<InvoicesDoc[\s\S]*?</InvoicesDoc>)',
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, flags=re.I)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _parse_xml_content_for_marks_and_vat(html):
+    xml_fragment = _extract_xml_fragment(html)
+    if not xml_fragment:
+        return None
+    try:
+        root = ET.fromstring(xml_fragment.encode('utf-8'))
+        marks, vat = _extract_from_root(root)
+        if marks or vat:
+            return marks, vat
+    except Exception:
+        pass
+    return None
+
+
+def _extract_vat_from_primer_xml(root, seller_vat=None):
+    candidates = []
+    for el in root.iter():
+        tag = el.tag.split('}')[-1].lower()
+        if tag in ('vatnumber', 'vat', 'afm', 'companyid'):
+            txt = (el.text or '').strip()
+            if txt:
+                m = VAT_RE.search(txt)
+                if m:
+                    candidates.append(m.group(0))
+    if seller_vat:
+        for vat in candidates:
+            if vat != seller_vat:
+                return vat
+    if candidates:
+        return candidates[-1]
+    return None
+
+
+def _extract_mark_from_primer_xml(root):
+    for el in root.iter():
+        tag = el.tag.split('}')[-1].lower()
+        if tag == 'mark':
+            txt = (el.text or '').strip()
+            if txt and re.fullmatch(r'\d{15}', txt):
+                return txt
+    return None
+
+
 # -------------------- MEGASOFT --------------------
 def scrape_megasoft(url):
     """
@@ -1339,6 +1485,10 @@ def scrape_megasoft(url):
 
     if not html:
         return [], None
+
+    xml_result = _parse_xml_content_for_marks_and_vat(html)
+    if xml_result:
+        return xml_result
 
     soup = BeautifulSoup(html, "html.parser")
     mydatapi_url = _extract_mydatapi_url_from_text(html, base)
@@ -1434,6 +1584,9 @@ def scrape_megasoft(url):
             try:
                 rr = sess.get(target, timeout=20, allow_redirects=True)
                 rr.raise_for_status()
+                xml_result = _parse_xml_content_for_marks_and_vat(rr.text)
+                if xml_result:
+                    return xml_result
                 mydatapi_url = _extract_mydatapi_url_from_text(rr.url, rr.url) or _extract_mydatapi_url_from_text(rr.text, rr.url)
                 if mydatapi_url:
                     break
@@ -1459,6 +1612,51 @@ def scrape_megasoft(url):
         return marks, counterpart_vat
 
     # Do not return AFM from blind QrCode decode fallback: often misleading.
+    return [], None
+
+
+def scrape_iview(url):
+    """
+    Επιστρέφει (marks, counterpart_vat) για URLs τύπου iview.gr.
+    Ακολουθεί τον σύνδεσμο mydatapi που βρίσκεται στο button/anchor και
+    συνεχίζει με το scrape_mydatapi για να διαβάσει MARK και ΑΦΜ.
+    """
+    sess = requests.Session()
+    sess.headers.update(HEADERS)
+    try:
+        r = sess.get(url, timeout=15)
+        r.raise_for_status()
+        html = r.text
+    except Exception as e:
+        print(f"[RequestError] {e}")
+        return [], None
+
+    mydatapi_url = _extract_mydatapi_url_from_text(html, r.url)
+    if not mydatapi_url:
+        soup = BeautifulSoup(html, "html.parser")
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            if "mydatapi.aade.gr" in href and "TimologioQR/QRInfo" in href:
+                mydatapi_url = urljoin(r.url, href)
+                break
+        if not mydatapi_url:
+            for btn in soup.find_all("button"):
+                link = btn.find("a", href=True)
+                if link:
+                    href = link["href"].strip()
+                    if "mydatapi.aade.gr" in href and "TimologioQR/QRInfo" in href:
+                        mydatapi_url = urljoin(r.url, href)
+                        break
+
+    if mydatapi_url:
+        data = scrape_mydatapi(mydatapi_url, debug=False)
+        mark = (data.get("MARK") or "").strip()
+        afm = (data.get("ΑΦΜ Πελάτη") or "").strip()
+        if afm == "N/A":
+            afm = None
+        marks = [mark] if mark and mark != "N/A" else []
+        return marks, afm
+
     return [], None
 
 
@@ -1516,6 +1714,14 @@ def main():
     elif "vs.gr" in domain:
         source = "VS.gr"
         marks, counterpart_vat = scrape_vsgr(url)
+
+    elif "mydata.primer.gr" in domain or "primer.gr" in domain:
+        source = "Primer MyData"
+        marks, counterpart_vat = scrape_primer(url)
+
+    elif "iview.gr" in domain:
+        source = "IView"
+        marks, counterpart_vat = scrape_iview(url)
 
     elif "megasoft" in domain or "invoicelink" in domain:
         source = "Megasoft"
