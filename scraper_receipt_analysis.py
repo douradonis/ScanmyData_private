@@ -3,6 +3,7 @@
 import re
 import json
 import base64
+import html as html_lib
 import requests
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -464,6 +465,7 @@ def _extract_vat_breakdown_from_xml_root(root):
         return result
     return {}
 
+
 def _extract_vat_breakdown_from_html(soup, html_text=""):
     if soup is None:
         return {}
@@ -773,6 +775,45 @@ def _reconcile_single_rate_vat_with_total(target):
         "net_amount": _float_to_comma(net_new),
         "vat_amount": _float_to_comma(vat_new),
         "gross_amount": _float_to_comma(total_val),
+    }
+    target["vat_analysis_inferred"] = True
+
+
+def _infer_vat_analysis_from_total(target):
+    """Best-effort fallback when source page has total but no VAT rows.
+
+    This intentionally marks output as inferred.
+    """
+    if not isinstance(target, dict):
+        return
+    if isinstance(target.get("vat_analysis"), dict) and target.get("vat_analysis"):
+        return
+
+    total_val = _amount_to_float(target.get("total_amount"))
+    if total_val is None or total_val <= 0:
+        return
+
+    doc_text = " ".join(
+        str(x or "")
+        for x in (target.get("doc_type"), target.get("source"), target.get("progressive_aa"))
+    )
+
+    # For retail receipt-like docs (e.g. 11.1 / ΑΛΠ) default to 24% as
+    # a practical fallback only when nothing explicit is available.
+    if not re.search(r"\b11\.1\b|αλπ|απόδειξ|αποδειξ|λιανικ|receipt", doc_text, re.I):
+        return
+
+    rate_key = "24"
+    denom = 1.0 + (float(rate_key) / 100.0)
+    net_val = total_val / denom
+    vat_val = total_val - net_val
+
+    target["vat_analysis"] = {
+        rate_key: {
+            "net_amount": _float_to_comma(net_val),
+            "vat_amount": _float_to_comma(vat_val),
+            "gross_amount": _float_to_comma(total_val),
+        }
     }
     target["vat_analysis_inferred"] = True
 
@@ -1227,6 +1268,7 @@ def scrape_mydatapi(url, timeout=12, debug=False):
 
     _merge_vat_analysis(out, _extract_vat_breakdown_from_html(soup, html))
     _reconcile_single_rate_vat_with_total(out)
+    _infer_vat_analysis_from_total(out)
 
     if out["doc_type"] and re.search(r"τιμολό?γιο|τιμολογιο|τιμολόγιο", out["doc_type"], re.I):
         out["is_invoice"] = True
@@ -2758,7 +2800,86 @@ def _extract_mydatapi_link_from_page(html, base_url=None):
             href = link["href"].strip()
             if "mydatapi.aade.gr" in href and "TimologioQR/QRInfo" in href:
                 return urljoin(base_url or "", href)
+
+    # dynamic viewers often keep the myDATA link inside onclick/script blocks
+    for el in soup.find_all(True):
+        onclick = str(el.get("onclick") or "")
+        if not onclick:
+            continue
+        direct = _extract_mydatapi_url_from_text(onclick, base_url=base_url)
+        if direct:
+            return direct
+
+    for sc in soup.find_all("script"):
+        txt = sc.string or sc.get_text() or ""
+        direct = _extract_mydatapi_url_from_text(txt, base_url=base_url)
+        if direct:
+            return direct
     return None
+
+
+def _extract_dynamic_candidate_urls(html, base_url=None):
+    if not html:
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+    candidates = []
+
+    def _add(url_candidate):
+        if not url_candidate:
+            return
+        c = str(url_candidate).strip().strip('"\'')
+        if not c:
+            return
+        if c.startswith("javascript:") or c.startswith("mailto:"):
+            return
+        if c.startswith("/"):
+            if not base_url:
+                return
+            c = urljoin(base_url, c)
+        elif not re.match(r"^https?://", c, flags=re.I):
+            if base_url:
+                c = urljoin(base_url, c)
+            else:
+                return
+        candidates.append(c)
+
+    for a in soup.find_all("a", href=True):
+        href = (a.get("href") or "").strip()
+        txt = (a.get_text(" ", strip=True) or "")
+        blob = f"{href} {txt}".lower()
+        if re.search(r"mydata|timologioqr|qrinfo|requestdocs|xml|print|selection|raw", blob, re.I):
+            _add(href)
+
+    for iframe in soup.find_all("iframe", src=True):
+        _add(iframe.get("src"))
+    for emb in soup.find_all("embed", src=True):
+        _add(emb.get("src"))
+
+    onclick_patterns = [
+        r"printPage\(\s*['\"]([^'\"]+)['\"]\s*\)",
+        r"(?:window\.open|location\.href|window\.location(?:\.href)?)\s*\(?\s*['\"]([^'\"]+)['\"]",
+        r"(?:url|href|src)\s*[:=]\s*['\"]([^'\"]+)['\"]",
+    ]
+    for el in soup.find_all(True):
+        onclick = str(el.get("onclick") or "")
+        if not onclick:
+            continue
+        for pat in onclick_patterns:
+            for m in re.finditer(pat, onclick, re.I):
+                _add(m.group(1))
+
+    for sc in soup.find_all("script"):
+        txt = sc.string or sc.get_text() or ""
+        direct_myd = _extract_mydatapi_url_from_text(txt, base_url=base_url)
+        if direct_myd:
+            _add(direct_myd)
+        for pat in onclick_patterns:
+            for m in re.finditer(pat, txt, re.I):
+                _add(m.group(1))
+
+    seen = set()
+    return [u for u in candidates if u and not (u in seen or seen.add(u))]
 
 
 def _extract_primer_mark_from_url(url):
@@ -2798,9 +2919,15 @@ def scrape_iview(url, timeout=20, debug=False):
             out["total_amount"] = _clean_amount_to_comma(mydata_out.get("total_amount") or mydata_out.get("Συνολική αξία") or mydata_out.get("Συνολικό ποσό") or "") if (mydata_out.get("total_amount") or mydata_out.get("Συνολική αξία") or mydata_out.get("Συνολικό ποσό")) else None
             out["issuer_name"] = (mydata_out.get("issuer_name") or mydata_out.get("Επωνυμία") or "").strip() or None
             out["progressive_aa"] = (mydata_out.get("progressive_aa") or mydata_out.get("Α/Α") or mydata_out.get("ΑΑ") or "").strip() or None
+            if isinstance(mydata_out.get("vat_analysis"), dict) and mydata_out.get("vat_analysis"):
+                out["vat_analysis"] = mydata_out.get("vat_analysis")
+                out["vat_analysis_inferred"] = bool(mydata_out.get("vat_analysis_inferred", False))
+            else:
+                _infer_vat_analysis_from_total(out)
             if out["doc_type"] and re.search(r"τιμολό?γιο|invoice", out["doc_type"], re.I):
                 out["is_invoice"] = True
             out["source"] = "IView->MyData"
+    _ensure_vat_analysis(out)
     return out
 
 
@@ -2821,7 +2948,314 @@ def scrape_primer(url, timeout=20, debug=False):
             print("primer fetch error:", e)
         return out
 
+    def _fetch_primer_public_data(identifier):
+        ident = str(identifier or "").strip()
+        if not ident:
+            return {}
+        endpoints = [
+            "https://mydata-backend.primer.gr/api/public/mydatasearch",
+            "https://mydata.primer.gr/api/public/mydatasearch",
+        ]
+        payload = {"identifier": ident}
+        last_err = None
+        for ep in endpoints:
+            try:
+                rr = requests.post(ep, json=payload, timeout=max(10, timeout))
+                rr.raise_for_status()
+                data = rr.json()
+                if str(data.get("status") or "") != "200":
+                    continue
+                return data.get("data") or {}
+            except Exception as e:
+                last_err = e
+                continue
+        if debug and last_err is not None:
+            print("primer public API error:", last_err)
+        return {}
+
+    parsed_url = urlparse(url)
+    last_seg = parsed_url.path.rstrip("/").split("/")[-1] if parsed_url.path else ""
+    primer_identifiers = []
+    if re.fullmatch(r"\d{15}", last_seg):
+        primer_identifiers.append(last_seg)
+    if re.fullmatch(r"[A-Fa-f0-9]{40}", last_seg):
+        primer_identifiers.append(last_seg)
+    if out.get("MARK"):
+        primer_identifiers.append(str(out.get("MARK")))
+    seen_ids = set()
+    primer_identifiers = [x for x in primer_identifiers if x and not (x in seen_ids or seen_ids.add(x))]
+
+    primer_data = {}
+    for ident in primer_identifiers:
+        primer_data = _fetch_primer_public_data(ident)
+        if primer_data:
+            break
+
+    if isinstance(primer_data, dict) and primer_data:
+        mark_val = primer_data.get("mark")
+        normalized_mark = _normalize_mark_value(mark_val)
+        if normalized_mark:
+            out["MARK"] = normalized_mark
+
+        issuer = primer_data.get("issuer") if isinstance(primer_data.get("issuer"), dict) else {}
+        header = primer_data.get("invoiceHeader") if isinstance(primer_data.get("invoiceHeader"), dict) else {}
+        summary = primer_data.get("invoiceSummary") if isinstance(primer_data.get("invoiceSummary"), dict) else {}
+
+        out["issuer_vat"] = out.get("issuer_vat") or re.sub(r"\D", "", str(issuer.get("vatNumber") or "")) or None
+        out["issuer_name"] = out.get("issuer_name") or _clean_issuer_name(issuer.get("companyName") or issuer.get("companySmallName"))
+        out["issue_date"] = out.get("issue_date") or _norm_date_to_ddmmyyyy(header.get("issueDate") or "")
+        out["progressive_aa"] = out.get("progressive_aa") or (str(header.get("aa") or "").strip() or None)
+        out["doc_type"] = out.get("doc_type") or (str(header.get("invoiceType") or "").strip() or None)
+
+        gross_total = summary.get("totalGrossValue")
+        if gross_total is None:
+            gross_total = primer_data.get("total")
+        if gross_total is not None:
+            out["total_amount"] = out.get("total_amount") or _clean_amount_to_comma(gross_total)
+
+        vat_map = {}
+        cat_to_rate = {
+            "1": "24", "2": "13", "3": "6", "4": "17",
+            "5": "9", "6": "4", "7": "0", "8": "0",
+        }
+        for row in (primer_data.get("invoiceDetails") or []):
+            if not isinstance(row, dict):
+                continue
+            rate = row.get("vatPercent") or row.get("vatRate")
+            if rate is None:
+                rate = cat_to_rate.get(str(row.get("vatCategory") or "").strip())
+            rate_key = _normalize_vat_rate_key(rate)
+            if not rate_key:
+                continue
+            net_v = _amount_to_float(row.get("netValue"))
+            vat_v = _amount_to_float(row.get("vatAmount"))
+            gross_v = _amount_to_float(row.get("lineGrossValue"))
+            if gross_v is None and net_v is not None and vat_v is not None:
+                gross_v = net_v + vat_v
+            bucket = vat_map.setdefault(rate_key, {"net": 0.0, "vat": 0.0, "gross": 0.0})
+            if net_v is not None:
+                bucket["net"] += net_v
+            if vat_v is not None:
+                bucket["vat"] += vat_v
+            if gross_v is not None:
+                bucket["gross"] += gross_v
+
+        if vat_map:
+            extracted = {
+                k: {
+                    "net_amount": _float_to_comma(v["net"]),
+                    "vat_amount": _float_to_comma(v["vat"]),
+                    "gross_amount": _float_to_comma(v["gross"]),
+                }
+                for k, v in vat_map.items()
+            }
+            extracted["__inferred__"] = False
+            _merge_vat_analysis(out, extracted)
+            _reconcile_single_rate_vat_with_total(out)
+
+        if out.get("source") == "Primer MyData":
+            out["source"] = "Primer Public API"
+
+    def _render_with_browser(target_url):
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception:
+            return None, None, [], target_url
+
+        timeout_ms = int(max(timeout, 8) * 1000)
+        found = {"url": None}
+        captured_payloads = []
+        final_url = target_url
+
+        def _is_interesting_url(u):
+            return bool(re.search(r"mydata|mydatapi|primer|timologioqr|xml|invoice|/api/", str(u or ""), re.I))
+
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                context = browser.new_context(ignore_https_errors=True)
+                page = context.new_page()
+
+                def _capture_request(req):
+                    ru = req.url
+                    if ("mydatapi.aade.gr" in ru or "mydata.aade.gr" in ru) and "TimologioQR/QRInfo" in ru:
+                        found["url"] = ru
+
+                def _capture_response(resp):
+                    try:
+                        ru = resp.url
+                        if not _is_interesting_url(ru):
+                            return
+                        ctype = (resp.headers.get("content-type") or "").lower()
+                        if not any(tok in ctype for tok in ("xml", "json", "text", "html")):
+                            return
+                        body = resp.text() or ""
+                        if body:
+                            captured_payloads.append(body)
+                        if not found.get("url"):
+                            maybe = _extract_mydatapi_url_from_text(body, base_url=ru)
+                            if maybe:
+                                found["url"] = maybe
+                    except Exception:
+                        return
+
+                page.on("request", _capture_request)
+                page.on("response", _capture_response)
+
+                page.goto(target_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 18000))
+                except Exception:
+                    pass
+                page.wait_for_timeout(3000)
+
+                rendered_html = page.content()
+                final_url = page.url
+                myd_url = _extract_mydatapi_url_from_text(page.url, base_url=page.url) or \
+                          _extract_mydatapi_url_from_text(rendered_html, base_url=page.url) or \
+                          found.get("url")
+
+                if not myd_url:
+                    selectors = [
+                        "a:has-text('MyData')",
+                        "button:has-text('MyData')",
+                        "a:has-text('myDATA')",
+                        "button:has-text('myDATA')",
+                        "a:has-text('Εκτύπωση')",
+                        "button:has-text('Εκτύπωση')",
+                        "a:has-text('Print')",
+                        "button:has-text('Print')",
+                        "a:has-text('XML')",
+                        "button:has-text('XML')",
+                    ]
+                    for sel in selectors:
+                        loc = page.locator(sel)
+                        if loc.count() <= 0:
+                            continue
+                        try:
+                            with page.expect_popup(timeout=3500) as popinfo:
+                                loc.first.click(timeout=3500)
+                            pop = popinfo.value
+                            try:
+                                pop.wait_for_load_state("domcontentloaded", timeout=7000)
+                            except Exception:
+                                pass
+                            pop_html = pop.content()
+                            if pop_html:
+                                captured_payloads.append(pop_html)
+                            maybe = _extract_mydatapi_url_from_text(pop.url, base_url=pop.url) or \
+                                    _extract_mydatapi_url_from_text(pop_html, base_url=pop.url) or \
+                                    found.get("url")
+                            if maybe:
+                                myd_url = maybe
+                                break
+                        except Exception:
+                            try:
+                                loc.first.click(timeout=3500)
+                                page.wait_for_timeout(1500)
+                                rendered_html = page.content()
+                                final_url = page.url
+                                if rendered_html:
+                                    captured_payloads.append(rendered_html)
+                                maybe = _extract_mydatapi_url_from_text(page.url, base_url=page.url) or \
+                                        _extract_mydatapi_url_from_text(rendered_html, base_url=page.url) or \
+                                        found.get("url")
+                                if maybe:
+                                    myd_url = maybe
+                                    break
+                            except Exception:
+                                continue
+
+                browser.close()
+                return rendered_html, myd_url, captured_payloads, final_url
+        except Exception as e:
+            if debug:
+                print("primer browser fallback error:", e)
+        return None, None, captured_payloads, final_url
+
+    def _extract_xml_and_urls(payload):
+        if not payload:
+            return None, []
+        found_urls = []
+        raw = str(payload)
+        variants = [raw]
+        unescaped = html_lib.unescape(str(payload))
+        if unescaped != variants[0]:
+            variants.append(unescaped)
+        slash_unescaped = raw.replace("\\/", "/").replace("\\u002F", "/").replace("\\u003A", ":")
+        if slash_unescaped not in variants:
+            variants.append(slash_unescaped)
+        slash_unescaped2 = unescaped.replace("\\/", "/").replace("\\u002F", "/").replace("\\u003A", ":")
+        if slash_unescaped2 not in variants:
+            variants.append(slash_unescaped2)
+
+        for txt in variants:
+            xml_candidate = _extract_xml_fragment(txt)
+            if xml_candidate:
+                return xml_candidate, []
+            stripped = txt.lstrip()
+            if stripped.startswith("<?xml") and re.search(r"<InvoicesDoc[\s\S]*?</InvoicesDoc>", stripped, re.I):
+                return txt, []
+
+            for m in re.finditer(r"https?://[^\s\"'<>]+", txt):
+                raw_u = m.group(0).strip().strip('"\'(),;')
+                u = raw_u.replace("&amp;", "&")
+                low = u.lower()
+                if "mydata.primer.gr" in low or "mydatapi.aade.gr" in low or "/download" in low or low.endswith(".xml"):
+                    found_urls.append(u)
+
+            # Some dynamic APIs return only UID, not a full URL.
+            for m in re.finditer(r"\b([A-F0-9]{40})\b", txt):
+                uid = m.group(1)
+                found_urls.append(f"https://mydata.primer.gr/{uid}")
+
+        seen_urls = set()
+        return None, [u for u in found_urls if u and not (u in seen_urls or seen_urls.add(u))]
+
     mydatapi_url = _extract_mydatapi_link_from_page(html, base_url=url)
+
+    # Dynamic Primer viewers can expose useful data only through secondary
+    # "mydata selection" / print / raw-xml endpoints.
+    secondary_payloads = []
+    candidate_urls = _extract_dynamic_candidate_urls(html, base_url=url)
+    sess = requests.Session()
+    sess.headers.update(HEADERS)
+    for cu in candidate_urls:
+        try:
+            rr = sess.get(cu, timeout=timeout, allow_redirects=True)
+            rr.raise_for_status()
+            rr.encoding = rr.apparent_encoding or "utf-8"
+            payload = rr.text or ""
+            secondary_payloads.append(payload)
+
+            if not mydatapi_url:
+                mydatapi_url = _extract_mydatapi_link_from_page(payload, base_url=rr.url) or \
+                              _extract_mydatapi_url_from_text(payload, base_url=rr.url)
+        except Exception:
+            continue
+
+    # JS-only Primer pages may expose myDATA links and XML only after runtime render.
+    rendered_html, browser_myd, browser_payloads, browser_url = _render_with_browser(url)
+    if browser_payloads:
+        secondary_payloads.extend(browser_payloads)
+    if rendered_html:
+        secondary_payloads.append(rendered_html)
+        for cu in _extract_dynamic_candidate_urls(rendered_html, base_url=browser_url or url):
+            try:
+                rr = sess.get(cu, timeout=timeout, allow_redirects=True)
+                rr.raise_for_status()
+                rr.encoding = rr.apparent_encoding or "utf-8"
+                payload = rr.text or ""
+                if payload:
+                    secondary_payloads.append(payload)
+                if not mydatapi_url:
+                    mydatapi_url = _extract_mydatapi_link_from_page(payload, base_url=rr.url) or \
+                                  _extract_mydatapi_url_from_text(payload, base_url=rr.url)
+            except Exception:
+                continue
+    if not mydatapi_url and browser_myd:
+        mydatapi_url = browser_myd
+
     if mydatapi_url:
         if debug:
             print("primer resolved myDATA URL:", mydatapi_url)
@@ -2839,9 +3273,56 @@ def scrape_primer(url, timeout=20, debug=False):
             out["progressive_aa"] = (mydata_out.get("progressive_aa") or mydata_out.get("Α/Α") or mydata_out.get("ΑΑ") or "").strip() or None
             if out["doc_type"] and re.search(r"τιμολό?γιο|invoice", out["doc_type"], re.I):
                 out["is_invoice"] = True
-            out["source"] = "Primer MyData->MyData"
+            if out.get("source") == "Primer MyData":
+                out["source"] = "Primer MyData->MyData"
 
     xml_fragment = _extract_xml_fragment(html)
+    if not xml_fragment:
+        for payload in secondary_payloads:
+            xml_fragment = _extract_xml_fragment(payload)
+            if xml_fragment:
+                break
+
+    if not xml_fragment:
+        for payload in [html] + secondary_payloads:
+            t = (payload or "").lstrip()
+            if t.startswith("<?xml") or re.search(r"<InvoicesDoc[\s\S]*?</InvoicesDoc>", t, re.I):
+                xml_fragment = payload
+                break
+
+    # Follow dynamic links found inside payloads (e.g. downloadingInvoiceUrl)
+    # and parse XML directly from those endpoints.
+    if not xml_fragment:
+        xml_fetch_urls = []
+        for payload in [html] + secondary_payloads:
+            maybe_xml, urls = _extract_xml_and_urls(payload)
+            if maybe_xml:
+                xml_fragment = maybe_xml
+                break
+            xml_fetch_urls.extend(urls)
+
+        if not xml_fragment and xml_fetch_urls:
+            seen_urls = set()
+            queue = [u for u in xml_fetch_urls if u and not (u in seen_urls or seen_urls.add(u))]
+            for cu in queue[:20]:
+                try:
+                    rr = sess.get(cu, timeout=timeout, allow_redirects=True)
+                    rr.raise_for_status()
+                    rr.encoding = rr.apparent_encoding or "utf-8"
+                    payload = rr.text or ""
+                    if payload:
+                        secondary_payloads.append(payload)
+                    maybe_xml, extra_urls = _extract_xml_and_urls(payload)
+                    if maybe_xml:
+                        xml_fragment = maybe_xml
+                        break
+                    for eu in extra_urls:
+                        if eu not in seen_urls and len(queue) < 40:
+                            seen_urls.add(eu)
+                            queue.append(eu)
+                except Exception:
+                    continue
+
     if xml_fragment:
         try:
             root = ET.fromstring(xml_fragment.encode("utf-8"))
@@ -2865,6 +3346,10 @@ def scrape_primer(url, timeout=20, debug=False):
             afm = _extract_vat_from_primer_xml(root, seller_vat=seller_vat)
             if afm and not out.get("issuer_vat"):
                 out["issuer_vat"] = afm
+
+            # VAT analysis should come from XML invoiceDetails when available.
+            _merge_vat_analysis(out, _extract_vat_breakdown_from_xml_root(root))
+            _reconcile_single_rate_vat_with_total(out)
         except Exception as e:
             if debug:
                 print("primer xml parse error:", e)
@@ -2889,6 +3374,7 @@ def scrape_primer(url, timeout=20, debug=False):
             out["issuer_vat"] = m.group(1)
 
     out["issuer_name"] = _clean_issuer_name(out.get("issuer_name"))
+    _ensure_vat_analysis(out)
     return out
 
 

@@ -7,9 +7,6 @@ curl -v \
 
   
 page tour
-vat_analysis με https://mydatapi.aade.gr/myDATA/TimologioQR/QRInfo?q=wG%2fk%2fcnnxP5S8Ycw5ZMqDSJHbPl4hEqAHurtFWr7ZqPJQDXS922Xkxw5k5%2bjwedThHTnmCcOBXK5lRgmLKn0z%2fQVKLTmlkK8wzNN7LQ%2ffrM%3d;;
-
-https://mydata.primer.gr/400012888691186 αποδειξεις;;
 στησιμο excel απο το epsilon_invoices
 partial reload δεν κραταει τις ρυθμισεις πινακα
 να αφαιρεθει απο τον πινακα το φπα κατηγορια
