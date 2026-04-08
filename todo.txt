@@ -7,6 +7,4 @@ curl -v \
 
   
 page tour
-στησιμο excel απο το epsilon_invoices
-partial reload δεν κραταει τις ρυθμισεις πινακα
-να αφαιρεθει απο τον πινακα το φπα κατηγορια
+

@@ -2683,6 +2683,59 @@ function showFlash(message, type='info', timeout=3000){
     if (timeout) el.setAttribute('data-ttl', String(timeout));
     el.textContent = message;
     container.appendChild(el);
+
+    // Hard guard: after successful epsilon reclassification, always wipe MARK/URL state.
+    // This prevents intermittent refills caused by async listeners/race conditions.
+    try {
+      const msgTxt = String(message || '').toLowerCase();
+      const isReclassSuccess = (type === 'success') && /ενημερώθηκε.*epsilon/.test(msgTxt);
+      if (isReclassSuccess) {
+        try { window.__RC_CLEAR_MARK_AFTER_SAVE = true; } catch(_) {}
+        try { window.__RC_LAST_SEARCH_MARK_OR_URL = ''; } catch(_) {}
+        try { window.__RC_PENDING_FORCE_SUMMARY = null; } catch(_) {}
+        try { window.__RC_BLOCK_REPEAT_AUTOSUBMIT = false; } catch(_) {}
+
+        const doWipe = () => {
+          try {
+            if (typeof window.clearSearchInputs === 'function') {
+              window.clearSearchInputs();
+            } else {
+              const markEl = document.getElementById('markInput');
+              const urlEl = document.getElementById('scrapeUrlInput');
+              const hiddenUrl = document.getElementById('scrapeUrlField');
+              if (markEl) {
+                markEl.value = '';
+                try { markEl.dispatchEvent(new Event('input', { bubbles: true })); } catch(_) {}
+              }
+              if (urlEl) {
+                urlEl.value = '';
+                try { urlEl.dispatchEvent(new Event('input', { bubbles: true })); } catch(_) {}
+              }
+              if (hiddenUrl) {
+                hiddenUrl.value = '';
+                hiddenUrl.removeAttribute('data-mark');
+              }
+            }
+          } catch(_) {}
+
+          try {
+            const b = document.getElementById('existingBanner');
+            if (b) b.style.display = 'none';
+          } catch(_) {}
+
+          try {
+            if (window.history && typeof window.history.replaceState === 'function') {
+              const u = new URL(window.location.href);
+              ['mark','url','payload','scrape_url','mark_id','force_edit','allow_edit_existing'].forEach(k => u.searchParams.delete(k));
+              window.history.replaceState({}, document.title, u.pathname + (u.search ? u.search : '') + u.hash);
+            }
+          } catch(_) {}
+        };
+
+        doWipe();
+        setTimeout(doWipe, 120);
+      }
+    } catch(_) {}
   } catch(e){ console.warn('showFlash failed', e); }
 }
 
@@ -5113,10 +5166,25 @@ async function __rc_debug_repeat_log(eventName, details){
 })();
 
 // --- εφαρμογή του ενεργού mapping στις γραμμές + auto submit ---
+function rcHasActiveExistingBanner(){
+  try {
+    const b = document.getElementById('existingBanner');
+    if (!b) return false;
+    return b.style.display !== 'none' && !b.classList.contains('hidden');
+  } catch(_) { return false; }
+}
+
 async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
   const input = document.getElementById('summaryJsonInput');
   const form  = document.getElementById('saveSummaryForm');
   if (!input || !form) return false;
+
+  // Hard stop: when existing-MARK yellow flow is active, never autosubmit.
+  try {
+    if (window.__RC_BLOCK_REPEAT_AUTOSUBMIT || rcHasActiveExistingBanner()) {
+      return false;
+    }
+  } catch(_) {}
 
   let obj;
   try { obj = JSON.parse(input.value || '{}'); } catch(e){ obj = {}; }
@@ -5354,7 +5422,7 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
         const receiptsOn = !!(useReceiptsSwitch && useReceiptsSwitch.checked);
           // ΝΕΟ: Αν υπάρχει το yellow box (ALLOW_EDIT_EXISTING = true και όχι force_edit), μην κάνε αυτόματη καταχώρηση
           // Περίμενε τον χρήστη να επιλέξει (Επιβεβαίωση ή Άκυρο)
-          const hasYellowBox = ALLOW_EDIT_EXISTING && !FORCE_EDIT;
+          const hasYellowBox = (ALLOW_EDIT_EXISTING && !FORCE_EDIT) || rcHasActiveExistingBanner() || !!window.__RC_BLOCK_REPEAT_AUTOSUBMIT;
           if (!receiptsOn && !FORCE_EDIT && !hasYellowBox) {
             const did = await applyMappingToSummaryAndSubmitUsingMapping(mapping);
           if (did) {
@@ -5444,6 +5512,7 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
     }
     const strong = banner.querySelector('strong');
     if (strong) strong.textContent = String(markText || '').trim();
+    banner.dataset.mark = String(markText || '').trim();
     banner.style.display = '';
     rcBindExistingBannerButtons();
     return banner;
@@ -5505,6 +5574,7 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
       if (typeof showFlash === 'function') showFlash('Συμπλήρωσε MARK ή URL.', 'error', 3500);
       return;
     }
+    try { window.__RC_LAST_SEARCH_MARK_OR_URL = typedMark; } catch(_){ }
 
     form.dataset.invoiceSubmitting = '1';
     try {
@@ -5527,7 +5597,10 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
         return;
       }
 
+      try { window.__RC_BLOCK_REPEAT_AUTOSUBMIT = !!j.allow_edit_existing; } catch(_) {}
+
       const resolvedMark = String((j.mark || typedMark) || '').trim();
+      try { window.__RC_LAST_SEARCH_MARK_OR_URL = resolvedMark || typedMark; } catch(_){ }
       if (window.__RC_CLEAR_MARK_AFTER_SAVE) {
         if (markInput) {
           markInput.value = '';
@@ -5592,14 +5665,21 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
           try { if (typeof clearSearchInputs === 'function') clearSearchInputs(); } catch(_) {}
           try { if (typeof clearReceiptSearchCacheOnClose === 'function') clearReceiptSearchCacheOnClose(); } catch(_) {}
         }
-        return;
+        if (!j.allow_edit_existing) {
+          return;
+        }
       }
 
       if (j.allow_edit_existing) {
         rcEnsureExistingBanner(resolvedMark || typedMark);
+        try {
+          const sm = document.getElementById('summaryModal');
+          if (sm) sm.style.display = 'none';
+        } catch(_) {}
       } else {
         const b = document.getElementById('existingBanner');
         if (b) b.style.display = 'none';
+        try { window.__RC_BLOCK_REPEAT_AUTOSUBMIT = false; } catch(_) {}
       }
 
       if (j.allow_edit_existing) {
@@ -5642,7 +5722,12 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
   }
 
   async function rcHandleForceEditClick(){
-    const markValRaw = (document.getElementById('markInput')?.value || '{{ mark or "" }}').trim();
+    const markValRaw = (
+      document.getElementById('markInput')?.value
+      || document.getElementById('existingBanner')?.dataset?.mark
+      || window.__RC_LAST_SEARCH_MARK_OR_URL
+      || '{{ mark or "" }}'
+    ).trim();
     const markVal = encodeURIComponent(markValRaw || '');
     if (!markVal){ await showModalAlert('Σφάλμα', 'Δεν δόθηκε MARK για επιβεβαίωση.'); return; }
     const b = document.getElementById('existingBanner');
@@ -11178,10 +11263,6 @@ document.addEventListener('DOMContentLoaded', () => {
         try { await partiallyReloadInvoiceTable(); } catch(_) {}
       };
       saveForm.addEventListener('ajax:done', () => { void finalizeWithoutReload(); }, { once:true });
-      saveForm.addEventListener('submit', () => {
-        // safety fallback only; main save handlers already perform partial refresh
-        setTimeout(() => { void finalizeWithoutReload(); }, 1800);
-      }, { once:true });
     }
 
     // If receipts + repeat are ON, suppress the "Λήφθηκε..." toast and auto-save
@@ -11473,6 +11554,8 @@ document.addEventListener('click', function(e){
       removeForceEditParamFromUrl();
     } catch (_) {}
   }
+
+  try { window.clearSearchInputs = clearSearchInputs; } catch(_) {}
 
   function buildCleanUrl(){
     try {

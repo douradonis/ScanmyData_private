@@ -959,10 +959,16 @@ document.addEventListener('click', function(e){
             if (j && j.ok && j.table_html) {
               const container = document.getElementById('summary-container');
               if (container) {
+                let prevPageSize = null;
+                try {
+                  if (window.FBP_TABULATOR && typeof window.FBP_TABULATOR.getPageSize === 'function') {
+                    prevPageSize = Number(window.FBP_TABULATOR.getPageSize()) || null;
+                  }
+                } catch(_) { prevPageSize = null; }
                 container.innerHTML = j.table_html;
                 setTimeout(() => {
                   try {
-                    if (typeof window.FBP_INIT_TABULATOR === 'function') window.FBP_INIT_TABULATOR();
+                    if (typeof window.FBP_INIT_TABULATOR === 'function') window.FBP_INIT_TABULATOR({ pageSize: prevPageSize });
                     else if (typeof window.FBP_REINIT === 'function') window.FBP_REINIT();
                   } catch(_){ }
                 }, 40);
@@ -1011,12 +1017,13 @@ document.addEventListener('click', function(e){
 <script>
 // Απλή και ασφαλής αποθήκευση της επιλογής "Εγγραφές/σελίδα".
 (function(){
-  const KEY = 'fbp_tab_page_len';
+  const scopeVat = String("{{ active_credential_vat|default('', true) }}" || '').trim() || 'default';
+  const KEY = `fbp_tab_state:vat:${scopeVat}:page_len`;
   document.addEventListener('DOMContentLoaded', function(){
     const sel = document.getElementById('pageLengthSelect');
     if(!sel) return;
     try {
-      const saved = parseInt(localStorage.getItem(KEY) || '', 10);
+      const saved = parseInt(localStorage.getItem(KEY) || localStorage.getItem('fbp_tab_page_len') || '', 10);
       if (Number.isFinite(saved) && saved > 0) sel.value = String(saved);
     } catch(_) {}
     sel.addEventListener('change', function(){
@@ -1112,9 +1119,15 @@ document.getElementById('epsilonExport')?.addEventListener('click', function(){
           const container = document.getElementById('summary-container');
           if(newContainer && container){
             const newHtml = newContainer.innerHTML;
+            let prevPageSize = null;
+            try {
+              if (window.FBP_TABULATOR && typeof window.FBP_TABULATOR.getPageSize === 'function') {
+                prevPageSize = Number(window.FBP_TABULATOR.getPageSize()) || null;
+              }
+            } catch(_) { prevPageSize = null; }
             try{ container.querySelectorAll('.dataTables_wrapper, .tabulator-wrapper').forEach(el=>el.remove()); }catch(_){ }
             container.innerHTML = newHtml;
-            try{ setTimeout(()=>{ if(window.FBP_INIT_TABULATOR) window.FBP_INIT_TABULATOR(); }, 30); }catch(_){ }
+            try{ setTimeout(()=>{ if(window.FBP_INIT_TABULATOR) window.FBP_INIT_TABULATOR({ pageSize: prevPageSize }); }, 30); }catch(_){ }
             return;
           }
         }
@@ -1128,9 +1141,15 @@ document.getElementById('epsilonExport')?.addEventListener('click', function(){
           if(j && j.ok && j.table_html){
             const container = document.getElementById('summary-container');
             if(container){
+              let prevPageSize = null;
+              try {
+                if (window.FBP_TABULATOR && typeof window.FBP_TABULATOR.getPageSize === 'function') {
+                  prevPageSize = Number(window.FBP_TABULATOR.getPageSize()) || null;
+                }
+              } catch(_) { prevPageSize = null; }
               try{ container.querySelectorAll('.dataTables_wrapper, .tabulator-wrapper').forEach(el=>el.remove()); }catch(_){ }
               container.innerHTML = j.table_html;
-              try{ setTimeout(()=>{ if(window.FBP_INIT_TABULATOR) window.FBP_INIT_TABULATOR(); }, 30); }catch(_){ }
+              try{ setTimeout(()=>{ if(window.FBP_INIT_TABULATOR) window.FBP_INIT_TABULATOR({ pageSize: prevPageSize }); }, 30); }catch(_){ }
             }
           }
         }
@@ -1513,9 +1532,31 @@ document.getElementById('epsilonExport')?.addEventListener('click', function(){
     return sign+intPart+','+decPart;
   }
 
+  function getStateScope(){
+    try{
+      const vat = String("{{ active_credential_vat|default('', true) }}" || '').trim();
+      if(vat) return `vat:${vat}`;
+    }catch(_){ }
+    return 'vat:default';
+  }
+
+  function stateKey(suffix){
+    return `fbp_tab_state:${getStateScope()}:${suffix}`;
+  }
+
+  function lsGetJson(key, fallback){
+    try{
+      const raw = localStorage.getItem(key);
+      if(!raw) return fallback;
+      return JSON.parse(raw);
+    }catch(_){
+      return fallback;
+    }
+  }
+
   // Extract Tabulator init into a re-usable function so partial reloads
   // can reinitialize / restore selection reliably.
-  window.FBP_INIT_TABULATOR = function(){
+  window.FBP_INIT_TABULATOR = function(opts){
     try{
       // Destroy previous instance if present
       try{
@@ -1536,9 +1577,15 @@ document.getElementById('epsilonExport')?.addEventListener('click', function(){
       const markColIndex = findMarkCol(thead);
       // attempt to restore user-set column widths from localStorage
       let storedWidths = {};
-      try{ storedWidths = JSON.parse(localStorage.getItem('fbp_tab_col_widths') || '{}') || {}; }catch(_){ storedWidths = {}; }
+      try{
+        storedWidths = lsGetJson(stateKey('col_widths'), null);
+        // migration fallback for old global key
+        if(!storedWidths || typeof storedWidths !== 'object'){
+          storedWidths = lsGetJson('fbp_tab_col_widths', {}) || {};
+        }
+      }catch(_){ storedWidths = {}; }
 
-      const columns = buildColumnsFromThead(thead).map((col, i)=>{
+      let columns = buildColumnsFromThead(thead).map((col, i)=>{
         const isNum = detectNumericHeader(col.title);
         const isDate = /ημερ|date|ημ\.|ημ$/i.test(col.title);
         const colDef = Object.assign({}, col, { hozAlign: (i===0? 'left' : (isNum? 'right' : 'left')), headerSort: true, resizable:true });
@@ -1600,7 +1647,11 @@ document.getElementById('epsilonExport')?.addEventListener('click', function(){
 
       // restore column order from localStorage (field names array) if present
       try{
-        const storedOrder = JSON.parse(localStorage.getItem('fbp_tab_col_order') || '[]') || [];
+        let storedOrder = lsGetJson(stateKey('col_order'), null);
+        // migration fallback for old global key
+        if(!Array.isArray(storedOrder) || !storedOrder.length){
+          storedOrder = lsGetJson('fbp_tab_col_order', []) || [];
+        }
         if(Array.isArray(storedOrder) && storedOrder.length){
           const remaining = columns.slice();
           const ordered = [];
@@ -1624,38 +1675,31 @@ document.getElementById('epsilonExport')?.addEventListener('click', function(){
           const table = cell.getTable();
           const box = document.createElement('input'); 
           box.type='checkbox';
+
+          function getCurrentPageMarks(){
+            try{
+              const activeData = table.getData('active') || table.getData() || [];
+              const pgSize = Math.max(1, Number(table.getPageSize && table.getPageSize()) || activeData.length || 1);
+              const curPage = Math.max(1, Number(table.getPage && table.getPage()) || 1);
+              const start = (curPage - 1) * pgSize;
+              return activeData
+                .slice(start, start + pgSize)
+                .map(r => (r && r._mark) ? String(r._mark).trim() : '')
+                .filter(Boolean);
+            }catch(_){
+              return [];
+            }
+          }
+
           box.addEventListener('change', ()=>{
-            // Get ONLY the rows in the current page/viewport
-            let paginatedRows = [];
-            let totalRows = 0;
-            try {
-              const allRows = table.getRows();
-              totalRows = allRows.length;
-              
-              paginatedRows = allRows.filter(row => {
-                try {
-                  const el = row.getElement();
-                  // offsetParent is null if element is display:none or not in document
-                  return el && el.offsetParent !== null;
-                } catch(e) {
-                  return false;
-                }
-              });
-              
-              console.log(`[Tabulator SelectAll] Total rows: ${totalRows}, Visible rows: ${paginatedRows.length}, Checked: ${box.checked}`);
-            } catch(e) {
-              console.warn('Error getting paginated rows:', e);
-              // Fallback: if filtering fails, don't select all to avoid selecting hidden rows
-              paginatedRows = [];
+            const marks = getCurrentPageMarks();
+            if(box.checked) {
+              table.selectRow(marks);
+              console.log(`[Tabulator SelectAll] Selected ${marks.length} rows on current page`);
             }
-            
-            if(box.checked) { 
-              table.selectRow(paginatedRows);
-              console.log(`[Tabulator SelectAll] Selected ${paginatedRows.length} rows`);
-            }
-            else { 
-              table.deselectRow(paginatedRows);
-              console.log(`[Tabulator SelectAll] Deselected ${paginatedRows.length} rows`);
+            else {
+              table.deselectRow(marks);
+              console.log(`[Tabulator SelectAll] Deselected ${marks.length} rows on current page`);
             }
           });
           return box;
@@ -1691,7 +1735,19 @@ document.getElementById('epsilonExport')?.addEventListener('click', function(){
 
       // page length from localStorage
       let pageSize = 10;
-      try{ const stored = localStorage.getItem('fbp_tab_page_len'); if(stored) pageSize = parseInt(stored,10) || 10; }catch(_){ }
+      try{
+        const forced = opts && Number(opts.pageSize);
+        if(Number.isFinite(forced) && forced > 0){
+          pageSize = Math.max(1, Math.floor(forced));
+        }
+      }catch(_){ }
+      try{
+        if(!(opts && Number(opts.pageSize) > 0)){
+          let stored = localStorage.getItem(stateKey('page_len'));
+          if(!stored) stored = localStorage.getItem('fbp_tab_page_len');
+          if(stored) pageSize = parseInt(stored,10) || 10;
+        }
+      }catch(_){ }
 
       // Rows are already read in reverse order above
 
@@ -1714,6 +1770,20 @@ document.getElementById('epsilonExport')?.addEventListener('click', function(){
         // paginationSizeSelector removed to hide Tabulator's built-in page-size menu
       });
 
+      // Restore sorting state (field + dir) per active client.
+      try{
+        let storedSort = lsGetJson(stateKey('sorters'), null);
+        if(!Array.isArray(storedSort) || !storedSort.length){
+          storedSort = lsGetJson('fbp_tab_sorters', []) || [];
+        }
+        if(Array.isArray(storedSort) && storedSort.length){
+          const validSort = storedSort.filter(s => s && s.field && (s.dir === 'asc' || s.dir === 'desc'));
+          if(validSort.length){
+            tab.setSort(validSort);
+          }
+        }
+      }catch(_){ }
+
       // STATUS / PAGE-LENGTH UI: page label already in markup, just wire persistence
       try{
         const pageLabel = document.querySelector('#pageLengthSelect');
@@ -1729,7 +1799,19 @@ document.getElementById('epsilonExport')?.addEventListener('click', function(){
           try{
             const cols = tab.getColumns();
             const order = cols.map(c=> { try{ return c.getField(); }catch(_){ return null; } }).filter(x=>x);
-            try{ localStorage.setItem('fbp_tab_col_order', JSON.stringify(order)); }catch(_){}
+            try{ localStorage.setItem(stateKey('col_order'), JSON.stringify(order)); }catch(_){ }
+          }catch(_){ }
+        });
+      }catch(_){ }
+
+      // Persist sorting whenever user changes it.
+      try{
+        tab.on('dataSorted', function(sorters){
+          try{
+            const clean = (Array.isArray(sorters) ? sorters : [])
+              .map(s => ({ field: s && s.field, dir: s && s.dir }))
+              .filter(s => s.field && (s.dir === 'asc' || s.dir === 'desc'));
+            localStorage.setItem(stateKey('sorters'), JSON.stringify(clean));
           }catch(_){ }
         });
       }catch(_){ }
@@ -1980,7 +2062,7 @@ document.getElementById('epsilonExport')?.addEventListener('click', function(){
             cols.forEach(c => {
               try{ const f = c.getField(); if(f) mapping[f] = c.getWidth(); }catch(_){ }
             });
-            try{ localStorage.setItem('fbp_tab_col_widths', JSON.stringify(mapping)); }catch(_){ }
+            try{ localStorage.setItem(stateKey('col_widths'), JSON.stringify(mapping)); }catch(_){ }
           }catch(_){ }
         });
       }catch(_){ }
@@ -1998,7 +2080,7 @@ document.getElementById('epsilonExport')?.addEventListener('click', function(){
           lenSel.value = String(pageSize);
           lenSel.addEventListener('change', ()=>{
             const v = parseInt(lenSel.value, 10) || 10;
-            try{ localStorage.setItem('fbp_tab_page_len', String(v)); }catch(_){ }
+            try{ localStorage.setItem(stateKey('page_len'), String(v)); }catch(_){ }
             try{ tab.setPageSize(v); }catch(_){ }
           });
         }

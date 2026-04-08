@@ -165,6 +165,66 @@ def float_from_comma(value):
     except Exception:
         return 0.0
 
+
+INVOICE_TYPE_LABELS = {
+    "1.1": "Τιμολόγιο Πώλησης",
+    "1.2": "Τιμολόγιο Πώλησης / Ενδοκοινοτικές Παραδόσεις",
+    "1.3": "Τιμολόγιο Πώλησης / Παραδόσεις Τρίτων Χωρών",
+    "1.4": "Τιμολόγιο Πώλησης / Πώληση για Λογαριασμό Τρίτων",
+    "1.5": "Τιμολόγιο Πώλησης / Εκκαθάριση Πωλήσεων Τρίτων",
+    "1.6": "Τιμολόγιο Πώλησης / Συμπληρωματικό Παραστατικό",
+    "2.1": "Τιμολόγιο Παροχής Υπηρεσιών",
+    "2.2": "Τιμολόγιο Παροχής / Ενδοκοινοτική Παροχή Υπηρεσιών",
+    "2.3": "Τιμολόγιο Παροχής / Παροχή Υπηρεσιών σε λήπτη Τρίτης Χώρας",
+    "2.4": "Τιμολόγιο Παροχής / Συμπληρωματικό Παραστατικό",
+    "3.1": "Τίτλος Κτήσης (μη υπόχρεος Εκδότης)",
+    "3.2": "Τίτλος Κτήσης (άρνηση έκδοσης από υπόχρεο Εκδότη)",
+    "5.1": "Πιστωτικό Τιμολόγιο / Συσχετιζόμενο",
+    "5.2": "Πιστωτικό Τιμολόγιο / Μη Συσχετιζόμενο",
+    "6.1": "Στοιχείο Αυτοπαράδοσης",
+    "6.2": "Στοιχείο Ιδιοχρησιμοποίησης",
+    "7.1": "Συμβόλαιο - Έσοδο",
+    "8.1": "Ενοίκια - Έσοδο",
+    "8.2": "Τέλος ανθεκτικότητας κλιματικής κρίσης",
+    "8.4": "Απόδειξη Είσπραξης POS",
+    "8.5": "Απόδειξη Επιστροφής POS",
+    "8.6": "Δελτίο Παραγγελίας Εστίασης",
+    "9.3": "Δελτίο Αποστολής",
+    "11.1": "ΑΛΠ",
+    "11.2": "ΑΠΥ",
+    "11.3": "Απλοποιημένο Τιμολόγιο",
+    "11.4": "Πιστωτικό Στοιχείο Λιανικής",
+    "11.5": "Απόδειξη Λιανικής Πώλησης για Λογαριασμό Τρίτων",
+    "13.1": "Έξοδα - Αγορές Λιανικών Συναλλαγών ημεδαπής / αλλοδαπής",
+    "13.2": "Παροχή Λιανικών Συναλλαγών ημεδαπής / αλλοδαπής",
+    "13.3": "Κοινόχρηστα",
+    "13.4": "Συνδρομές",
+    "13.30": "Παραστατικά Οντότητας ως Αναγράφονται από την ίδια",
+    "13.31": "Πιστωτικό Στοιχείο Λιανικής ημεδαπής / αλλοδαπής",
+    "14.1": "Τιμολόγιο / Ενδοκοινοτικές Αποκτήσεις",
+    "14.2": "Τιμολόγιο / Αποκτήσεις Τρίτων Χωρών",
+    "14.3": "Τιμολόγιο / Ενδοκοινοτική Λήψη Υπηρεσιών",
+    "14.4": "Τιμολόγιο / Λήψη Υπηρεσιών Τρίτων Χωρών",
+    "14.5": "ΕΦΚΑ και λοιποί Ασφαλιστικοί Οργανισμοί",
+    "14.30": "Παραστατικά Οντότητας ως Αναγράφονται από την ίδια",
+    "14.31": "Πιστωτικό ημεδαπής / αλλοδαπής",
+    "15.1": "Συμβόλαιο - Έξοδο",
+    "16.1": "Ενοίκιο Έξοδο",
+    "17.1": "Μισθοδοσία",
+    "17.2": "Αποσβέσεις",
+    "17.3": "Λοιπές Εγγραφές Τακτοποίησης Εσόδων - Λογιστική Βάση",
+    "17.4": "Λοιπές Εγγραφές Τακτοποίησης Εσόδων - Φορολογική Βάση",
+    "17.5": "Λοιπές Εγγραφές Τακτοποίησης Εξόδων - Λογιστική Βάση",
+    "17.6": "Λοιπές Εγγραφές Τακτοποίησης Εξόδων - Φορολογική Βάση",
+}
+
+
+def map_invoice_type_label(value: Any) -> str:
+    code = str(value or "").strip()
+    if not code:
+        return ""
+    return INVOICE_TYPE_LABELS.get(code, code)
+
 # --- Compatibility shim: unify invoice-scraper vs receipt-scraper usage ---
 # Αυτό το snippet προσπαθεί να χρησιμοποιήσει:
 # 1) scrape_receipt από module scraper (αν υπάρχει) ή
@@ -4960,7 +5020,33 @@ def _build_table_rows_from_epsilon(vat: str, fiscal_year: Optional[int] = None) 
         )
         if is_cash_movement:
             continue
-        tipo_excel = 'ΑΠΟΔΕΙΞΗ' if is_receipt else (issue_type or 'ΤΙΜΟΛΟΓΙΟ')
+        mapped_issue_type = map_invoice_type_label(issue_type)
+        tipo_excel = 'ΑΠΟΔΕΙΞΗ' if is_receipt else (mapped_issue_type or 'ΤΙΜΟΛΟΓΙΟ')
+        characteristic_category = str(
+            rec.get('χαρακτηρισμός')
+            or rec.get('χαρακτηρισμος')
+            or rec.get('characteristic')
+            or rec.get('category')
+            or rec.get('classification')
+            or ''
+        ).strip()
+        if not characteristic_category and lines:
+            line_categories = []
+            for ln in lines:
+                if not isinstance(ln, dict):
+                    continue
+                line_cat = str(
+                    ln.get('category')
+                    or ln.get('χαρακτηρισμός')
+                    or ln.get('χαρακτηρισμος')
+                    or ln.get('characteristic')
+                    or ''
+                ).strip()
+                if not line_cat:
+                    continue
+                if line_cat not in line_categories:
+                    line_categories.append(line_cat)
+            characteristic_category = ', '.join(line_categories)
 
         row = {
             'MARK': mark,
@@ -4970,7 +5056,7 @@ def _build_table_rows_from_epsilon(vat: str, fiscal_year: Optional[int] = None) 
             'Αριθμός': str(rec.get('number') or rec.get('AA') or rec.get('aa') or rec.get('progressive_aa') or '').strip(),
             'Ημερομηνία': str(rec.get('issueDate') or rec.get('issue_date') or '').strip(),
             'Είδος': tipo_excel,
-            'ΦΠΑ_ΚΑΤΗΓΟΡΙΑ': str(rec.get('vatCategory') or '').strip(),
+            'Κατηγορία Χαρακτηρισμού': characteristic_category,
             'Καθαρή Αξία': f"{net:.2f}".replace('.', ','),
             'ΦΠΑ': f"{vat_val:.2f}".replace('.', ','),
             'Σύνολο': f"{total:.2f}".replace('.', ','),
@@ -14271,19 +14357,50 @@ def epsilon_preview():
     )
 
     # Έλεγχος ασυμφωνίας: εγγραφές στο epsilon json που δεν υπάρχουν στο invoices.xlsx
+    # Normalize MARK values aggressively to avoid false positives (e.g. "... .0" from Excel).
     missing_excel_marks: List[str] = []
     missing_excel_rows: List[Dict[str, Any]] = []
+    def _normalize_mark_token(v: Any) -> str:
+        s = str(v or '').strip()
+        if not s:
+            return ''
+        if s.lower() in {'nan', 'none', 'null'}:
+            return ''
+        s = s.replace(',', '').strip()
+        # Excel may expose numeric MARK cells as float-like strings (e.g. 4000... .0)
+        m_float_like = re.fullmatch(r'\d+\.0+', s)
+        if m_float_like:
+            s = s.split('.', 1)[0]
+        # Keep only canonical 15-digit marks when possible.
+        m_digits = re.search(r'\b\d{15}\b', s)
+        if m_digits:
+            return m_digits.group(0)
+        return s
     try:
         excel_path = excel_path_for(vat=vat)
         if os.path.exists(excel_path):
             df_excel = pd.read_excel(excel_path, engine="openpyxl", dtype=str).fillna("")
-            excel_marks = set(df_excel.get("MARK", pd.Series(dtype=str)).astype(str).str.strip().tolist())
-            preview_marks = [str(r.get("MARK") or "").strip() for r in (rows or []) if str(r.get("MARK") or "").strip()]
+            excel_marks = {
+                _normalize_mark_token(x)
+                for x in df_excel.get("MARK", pd.Series(dtype=str)).astype(str).tolist()
+                if _normalize_mark_token(x)
+            }
+
+            # Compare against raw epsilon cache MARKs (more reliable than transformed preview rows).
+            epsilon_cache = load_epsilon_cache_for_vat(str(vat or '')) or []
+            preview_marks = []
+            for rec in epsilon_cache:
+                if not isinstance(rec, dict):
+                    continue
+                mk = _normalize_mark_token(_get_mark_from_epsilon_item(rec))
+                if mk:
+                    preview_marks.append(mk)
+
             missing_excel_marks = sorted({m for m in preview_marks if m not in excel_marks})
             if missing_excel_marks:
                 rows_by_mark: Dict[str, List[Dict[str, Any]]] = {}
                 for r in (rows or []):
-                    mk = str(r.get("MARK") or "").strip()
+                    mk = _normalize_mark_token(r.get("MARK"))
                     if not mk:
                         continue
                     rows_by_mark.setdefault(mk, []).append(r)
