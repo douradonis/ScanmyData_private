@@ -114,9 +114,6 @@
       if (typeof isReceiptModeAnalysisStrict === 'function' && isReceiptModeAnalysisStrict()) return true;
     } catch(_) {}
     try {
-      if (typeof isReceipts === 'function' && typeof isRepeat === 'function' && isReceipts() && isRepeat()) return true;
-    } catch(_) {}
-    try {
       var mode = receiptMode();
       if (mode === 'analysis') return true;
     } catch(_) {}

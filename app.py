@@ -4950,6 +4950,27 @@ def _pfloat_any(v) -> float:
 def _build_table_rows_from_epsilon(vat: str, fiscal_year: Optional[int] = None) -> List[Dict[str, str]]:
     rows: List[Dict[str, str]] = []
     eps = load_epsilon_cache_for_vat(str(vat or '')) or []
+    cred = get_cred_by_vat(str(vat or '').strip()) or {}
+    category_labels = _category_labels_for_client(cred)
+
+    def _map_category_label(raw_value: Any) -> str:
+        raw = str(raw_value or '').strip()
+        if not raw:
+            return ''
+        parts = [p.strip() for p in raw.split(',') if str(p or '').strip()]
+        mapped: List[str] = []
+        seen: set[str] = set()
+        for part in parts or [raw]:
+            key = str(part).strip()
+            if not key:
+                continue
+            lbl = category_labels.get(key) or category_labels.get(key.lower()) or key
+            if lbl in seen:
+                continue
+            seen.add(lbl)
+            mapped.append(lbl)
+        return ', '.join(mapped)
+
     selected_year = None
     try:
         if fiscal_year is not None:
@@ -5030,6 +5051,7 @@ def _build_table_rows_from_epsilon(vat: str, fiscal_year: Optional[int] = None) 
             or rec.get('classification')
             or ''
         ).strip()
+        characteristic_category = _map_category_label(characteristic_category)
         if not characteristic_category and lines:
             line_categories = []
             for ln in lines:
@@ -5044,8 +5066,9 @@ def _build_table_rows_from_epsilon(vat: str, fiscal_year: Optional[int] = None) 
                 ).strip()
                 if not line_cat:
                     continue
-                if line_cat not in line_categories:
-                    line_categories.append(line_cat)
+                mapped_line_cat = _map_category_label(line_cat)
+                if mapped_line_cat and mapped_line_cat not in line_categories:
+                    line_categories.append(mapped_line_cat)
             characteristic_category = ', '.join(line_categories)
 
         row = {
