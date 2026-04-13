@@ -8,3 +8,6 @@ curl -v \
   
 page tour
 
+☁️ Firebase Sync Settings
+ δεν φερνει τις αποθηκευμενες σωστα προσυμπληρωμενες (ενω το 📧 Email Provider Configuration
+τα φερνει σωστα, καντο να κανει fetch τις ρυθμισεις του sync οπως εδω)

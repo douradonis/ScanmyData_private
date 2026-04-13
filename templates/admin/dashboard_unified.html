@@ -290,7 +290,7 @@
         
         <div class="mb-4">
           <label class="block text-sm font-medium text-gray-700 mb-2">Επιλέξτε Πάροχο Email</label>
-          <select id="email-provider-select" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-sky-500 focus:border-sky-500">
+          <select id="email-provider-select" title="Email Provider" aria-label="Email Provider" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-sky-500 focus:border-sky-500">
             <option value="smtp">SMTP (Traditional Email)</option>
             <option value="resend">Resend API (Modern)</option>
             <option value="oauth2_outlook">OAuth2 Outlook</option>
@@ -368,28 +368,40 @@
         <h3 class="text-lg font-bold mb-4">☁️ Firebase Sync Settings</h3>
         
         <div class="space-y-4">
-          <!-- Sync Enabled Toggle -->
-          <div class="flex items-center justify-between p-3 bg-gray-50 rounded border border-gray-200">
+          <!-- Sync Mode -->
+          <div class="p-3 bg-gray-50 rounded border border-gray-200">
             <div>
-              <label class="font-medium text-gray-700">Ενεργοποίηση Συγχρονισμού</label>
-              <p class="text-xs text-gray-500 mt-1">Τα δεδομένα συγχρονίζονται κατά τη σύνδεση/αποσύνδεση από προεπιλογή. Ενεργοποιήστε για περιοδική συγχώνευση κάθε N δευτερόλεπτα.</p>
+              <label for="sync-mode" class="font-medium text-gray-700">Mode Συγχρονισμού</label>
+              <p class="text-xs text-gray-500 mt-1">Επίλεξε αν το Firebase push-pull backup θα γίνεται στο login/logout ή με χρονοπρογραμματισμένο scheduler.</p>
             </div>
-            <input type="checkbox" id="sync-enabled" class="w-6 h-6 text-sky-600" />
+            <select id="sync-mode" class="mt-3 w-full px-3 py-2 border border-gray-300 rounded-md">
+              <option value="login_logout">Login / Logout</option>
+              <option value="scheduled">Scheduled</option>
+            </select>
           </div>
 
-          <!-- Sync Interval Slider -->
-          <div class="p-3 bg-gray-50 rounded border border-gray-200">
+          <!-- Sync Interval -->
+          <div id="sync-interval-wrap" class="p-3 bg-gray-50 rounded border border-gray-200">
             <label class="block font-medium text-gray-700 mb-2">
-              Διάστημα Συγχρονισμού: <span id="syncIntervalValue" class="text-sky-600 font-bold">60</span>δ
+              Πρόγραμμα Συγχρονισμού: κάθε <span id="syncIntervalValue" class="text-sky-600 font-bold">60 δευτερόλεπτα</span>
             </label>
-            <input 
-              type="range" 
-              id="sync-interval" 
-              class="w-full h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer accent-sky-600"
-              min="10" max="3600" value="60" step="10"
-              oninput="document.getElementById('syncIntervalValue').textContent = this.value"
-            />
-            <p class="text-xs text-gray-500 mt-2">10 δευτ. (έντονο) έως 60 λεπτά (απαλό)</p>
+            <div class="flex gap-3 items-center flex-wrap">
+              <input 
+                type="number"
+                id="sync-interval-value"
+                aria-label="Αριθμητική τιμή προγράμματος συγχρονισμού"
+                title="Αριθμητική τιμή προγράμματος συγχρονισμού"
+                class="w-32 px-3 py-2 border border-gray-300 rounded-md"
+                min="1" value="60" step="1"
+              />
+              <select id="sync-interval-unit" aria-label="Μονάδα διαστήματος συγχρονισμού" title="Μονάδα διαστήματος συγχρονισμού" class="px-3 py-2 border border-gray-300 rounded-md">
+                <option value="seconds">δευτερόλεπτα</option>
+                <option value="minutes">λεπτά</option>
+                <option value="hours">ώρες</option>
+                <option value="days">ημέρες</option>
+              </select>
+            </div>
+            <p class="text-xs text-gray-500 mt-2">Υποστηρίζεται και αραιό scheduler, π.χ. 1 push-pull την ημέρα.</p>
           </div>
 
           <!-- Smart Sync Toggle -->
@@ -398,7 +410,7 @@
               <label class="font-medium text-gray-700">Έξυπνη Ανίχνευση Αρχείων</label>
               <p class="text-xs text-gray-500 mt-1">Συγχρονίζει μόνο τα τροποποιημένα αρχεία (βάσει mtime). <strong>Εξαιρούνται</strong> οι υποφάκελοι <code>epsilon</code> και <code>excel</code>, που πάντα ανανεώνονται με σύνδεση/αποσύνδεση.</p>
             </div>
-            <input type="checkbox" id="smart-sync" class="w-6 h-6 text-sky-600" checked />
+            <input type="checkbox" id="smart-sync" aria-label="Έξυπνη Ανίχνευση Αρχείων" title="Έξυπνη Ανίχνευση Αρχείων" class="w-6 h-6 text-sky-600" checked />
           </div>
 
           <!-- Current Status -->
@@ -469,8 +481,11 @@ function showTab(tabName) {
   
   // Show selected tab
   document.getElementById(tabName).classList.remove('hidden');
-  event.target.classList.add('border-b-2', 'border-sky-600', 'text-sky-600');
-  event.target.classList.remove('border-transparent', 'text-gray-600');
+  const clickedButton = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+  if (clickedButton) {
+    clickedButton.classList.add('border-b-2', 'border-sky-600', 'text-sky-600');
+    clickedButton.classList.remove('border-transparent', 'text-gray-600');
+  }
   
   // Load data for specific tabs
   if (tabName === 'users') loadUsers();
@@ -482,6 +497,7 @@ function showTab(tabName) {
   else if (tabName === 'backups') loadBackups();
   else if (tabName === 'email') loadEmailUsers();
   else if (tabName === 'firebase_usage') loadFirebaseUsage();
+  else if (tabName === 'settings') loadFirebaseSyncSettings();
 }
 
 // ==================== OVERVIEW TAB ====================
@@ -2208,45 +2224,85 @@ async function loadFirebaseUsage() {
 // ==================== FIREBASE SYNC SETTINGS ====================
 async function loadFirebaseSyncSettings() {
   try {
-    const res = await fetch('/api/admin/firebase-sync-settings');
-    const json = await res.json();
-    if (!json.success) throw new Error('Αποτυχία φόρτωσης ρυθμίσεων');
+    const res = await fetch('/admin/api/firebase-sync-settings');
+    const json = await res.json().catch(() => null);
+    if (!res.ok || !json || !json.success || !json.data) throw new Error((json && json.error) ? json.error : 'Αποτυχία φόρτωσης ρυθμίσεων');
     
-    document.getElementById('sync-enabled').checked = json.data.enabled || false;
-    document.getElementById('sync-interval').value = json.data.interval || 60;
-    document.getElementById('syncIntervalValue').textContent = json.data.interval || 60;
-    document.getElementById('smart-sync').checked = json.data.smart_sync !== false;
-    
-    // Update status
-    const statusDiv = document.getElementById('sync-status-text');
-    const status = json.data.enabled ? '✅ Ο συγχρονισμός είναι ΕΝΕΡΓΟΣ' : '⏸️ Ο συγχρονισμός είναι ΑΝΕΝΕΡΓΟΣ';
-    const freq = json.data.enabled ? ` (κάθε ${json.data.interval}δ)` : ' (συγχρονισμός μόνο κατά σύνδεση/αποσύνδεση)';
-    const smartStatus = json.data.smart_sync ? ' | Έξυπνος έλεγχος ΕΝΤΟΣ' : ' | Έξυπνος έλεγχος ΕΚΤΟΣ';
-    statusDiv.textContent = status + freq + smartStatus;
+    applyFirebaseSyncSettingsToUi(json.data);
   } catch (err) {
     console.error('Σφάλμα φόρτωσης ρυθμίσεων συγχρονισμού', err);
-    document.getElementById('sync-status-text').textContent = '❌ Αποτυχία φόρτωσης';
+    try {
+      document.getElementById('sync-mode').value = 'login_logout';
+      document.getElementById('sync-interval-value').value = 60;
+      document.getElementById('sync-interval-unit').value = 'seconds';
+      document.getElementById('smart-sync').checked = true;
+      updateFirebaseSyncUi();
+      updateFirebaseSyncLabel();
+    } catch (_) {}
+    document.getElementById('sync-status-text').textContent = '⚠️ Φορτώθηκαν προεπιλεγμένες ρυθμίσεις (fallback)';
   }
+}
+
+function updateFirebaseSyncLabel() {
+  const valueEl = document.getElementById('sync-interval-value');
+  const unitEl = document.getElementById('sync-interval-unit');
+  const labelEl = document.getElementById('syncIntervalValue');
+  if (!valueEl || !unitEl || !labelEl) return;
+  const value = parseInt(valueEl.value || '1', 10) || 1;
+  const unit = unitEl.value || 'seconds';
+  const labels = {
+    seconds: value === 1 ? 'δευτερόλεπτο' : 'δευτερόλεπτα',
+    minutes: value === 1 ? 'λεπτό' : 'λεπτά',
+    hours: value === 1 ? 'ώρα' : 'ώρες',
+    days: value === 1 ? 'ημέρα' : 'ημέρες',
+  };
+  labelEl.textContent = `${value} ${labels[unit] || unit}`;
+}
+
+function applyFirebaseSyncSettingsToUi(data) {
+  if (!data) return;
+  document.getElementById('sync-mode').value = data.mode || (data.enabled ? 'scheduled' : 'login_logout');
+  document.getElementById('sync-interval-value').value = data.schedule_value || 60;
+  document.getElementById('sync-interval-unit').value = data.schedule_unit || 'seconds';
+  document.getElementById('smart-sync').checked = data.smart_sync !== false;
+  updateFirebaseSyncUi();
+  updateFirebaseSyncLabel();
+
+  const statusDiv = document.getElementById('sync-status-text');
+  const scheduled = (data.mode || '') === 'scheduled';
+  const status = scheduled ? '✅ Ο συγχρονισμός είναι ΕΝΕΡΓΟΣ (scheduled)' : '⏸️ Ο συγχρονισμός είναι ΑΝΕΝΕΡΓΟΣ (sync μόνο σε login/logout)';
+  const freq = scheduled ? ` | κάθε ${data.schedule_value || 60} ${data.schedule_unit || 'seconds'}` : '';
+  const smartStatus = data.smart_sync ? ' | Έξυπνος έλεγχος ΕΝΤΟΣ' : ' | Έξυπνος έλεγχος ΕΚΤΟΣ';
+  const source = data.settings_source ? ` | Source: ${data.settings_source}` : '';
+  statusDiv.textContent = status + freq + smartStatus + source;
+}
+
+function updateFirebaseSyncUi() {
+  const modeEl = document.getElementById('sync-mode');
+  const intervalWrap = document.getElementById('sync-interval-wrap');
+  if (!modeEl || !intervalWrap) return;
+  if (modeEl.value === 'scheduled') intervalWrap.classList.remove('hidden');
+  else intervalWrap.classList.add('hidden');
 }
 
 async function saveFirebaseSyncSettings() {
   try {
-    const enabled = document.getElementById('sync-enabled').checked;
-    const interval = parseInt(document.getElementById('sync-interval').value);
+    const mode = document.getElementById('sync-mode').value || 'login_logout';
+    const scheduleValue = parseInt(document.getElementById('sync-interval-value').value || '1', 10) || 1;
+    const scheduleUnit = document.getElementById('sync-interval-unit').value || 'seconds';
     const smartSync = document.getElementById('smart-sync').checked;
     
-    const res = await fetch('/api/admin/firebase-sync-settings', {
+    const res = await fetch('/admin/api/firebase-sync-settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled, interval, smart_sync: smartSync })
+      body: JSON.stringify({ mode, enabled: mode === 'scheduled', schedule_value: scheduleValue, schedule_unit: scheduleUnit, smart_sync: smartSync })
     });
     
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'Save failed');
-    
-    showSuccessModal('✅ Αποθήκευση', 'Οι ρυθμίσεις συγχρονισμού αποθηκεύτηκαν! Φόρτωση ξανά...', () => {
-      location.reload();
-    });
+
+    if (json.data) applyFirebaseSyncSettingsToUi(json.data);
+    showSuccessModal('✅ Αποθήκευση', 'Οι ρυθμίσεις συγχρονισμού αποθηκεύτηκαν.');
   } catch (err) {
     console.error('Error saving sync settings', err);
     showErrorModal('❌ Σφάλμα', 'Αποτυχία αποθήκευσης ρυθμίσεων: ' + err.message);
@@ -2255,6 +2311,12 @@ async function saveFirebaseSyncSettings() {
 
 // ==================== INITIALIZATION ====================
 window.addEventListener('load', function() {
+  const modeEl = document.getElementById('sync-mode');
+  if (modeEl) modeEl.addEventListener('change', updateFirebaseSyncUi);
+  const valueEl = document.getElementById('sync-interval-value');
+  const unitEl = document.getElementById('sync-interval-unit');
+  if (valueEl) valueEl.addEventListener('input', updateFirebaseSyncLabel);
+  if (unitEl) unitEl.addEventListener('change', updateFirebaseSyncLabel);
   loadStats();
   loadUsers();
   loadEmailConfiguration();

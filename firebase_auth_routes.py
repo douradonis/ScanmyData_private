@@ -497,8 +497,10 @@ def firebase_login():
             # Exactly one group: auto-set as active and continue
             session['active_group'] = user_groups[0].name
             flash(f'Καλώς ήρθατε!', 'success')
-            # Start lazy-pull via sync page
-            return redirect(url_for('firebase_auth.sync_start_pull', group=session['active_group']))
+            # Optional lazy-pull via sync page (admin-toggleable policy)
+            if utils.firebase_sync_login_logout_enabled():
+                return redirect(url_for('firebase_auth.sync_start_pull', group=session['active_group']))
+            return redirect(url_for('home'))
         else:
             # Multiple groups: redirect to list to select one
             session.pop('active_group', None)  # Clear any stale active_group
@@ -553,11 +555,10 @@ def firebase_logout():
         {'email': email}
     )
     
-    # Instead of doing a blocking sync here, redirect to a small page that
-    # performs the push with a progress modal and then completes logout.
+    # Optional push-on-logout flow (admin-toggleable policy).
     try:
         active_group_name = session.get('active_group')
-        if active_group_name:
+        if active_group_name and utils.firebase_sync_login_logout_enabled():
             # redirect to the sync page which will call the push API and then logout
             return redirect(url_for('firebase_auth.sync_start_push', group=active_group_name))
     except Exception:

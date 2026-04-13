@@ -261,11 +261,13 @@ def login():
             if len(user_groups) == 1:
                 session['active_group'] = user_groups[0].name
                 flash('Συνδεθήκατε επιτυχώς', 'success')
-                # Start a pull sync with progress modal
-                try:
-                    return redirect(url_for('firebase_auth.sync_start_pull', group=session.get('active_group')))
-                except Exception:
-                    return redirect(url_for('home'))
+                # Optional pull sync on login (admin-toggleable policy)
+                if utils.firebase_sync_login_logout_enabled():
+                    try:
+                        return redirect(url_for('firebase_auth.sync_start_pull', group=session.get('active_group')))
+                    except Exception:
+                        return redirect(url_for('home'))
+                return redirect(url_for('home'))
             else:
                 if user_groups:
                     flash('Επίλεξε ενεργή ομάδα για να συνεχίσεις.', 'info')
@@ -274,12 +276,13 @@ def login():
                 return redirect(url_for('auth.list_groups'))
 
         flash('Συνδεθήκατε επιτυχώς', 'success')
-        # If there's an active group, start pull sync page to show progress
+        # If there's an active group, optionally start pull sync page
         if session.get('active_group'):
-            try:
-                return redirect(url_for('firebase_auth.sync_start_pull', group=session.get('active_group')))
-            except Exception:
-                pass
+            if utils.firebase_sync_login_logout_enabled():
+                try:
+                    return redirect(url_for('firebase_auth.sync_start_pull', group=session.get('active_group')))
+                except Exception:
+                    pass
         return redirect(request.args.get('next') or url_for('home'))
 
     # GET -> render login form
@@ -289,10 +292,10 @@ def login():
 @auth_bp.route('/logout')
 @login_required
 def logout():
-    # Instead of blocking logout by syncing here, redirect to a push-sync page
+    # Optional push sync on logout (admin-toggleable policy)
     try:
         active_group_name = session.get('active_group')
-        if active_group_name:
+        if active_group_name and utils.firebase_sync_login_logout_enabled():
             return redirect(url_for('firebase_auth.sync_start_push', group=active_group_name))
     except Exception:
         current_app.logger.exception('Failed to initiate sync-on-logout')

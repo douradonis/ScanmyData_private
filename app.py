@@ -14702,6 +14702,172 @@ def _extract_aa_from_msg(msg: str) -> str:
 def _looks_like_receipt(rec: dict) -> bool:
     t = f"{rec.get('DOCTYPE','')} {rec.get('type','')} {rec.get('category','')}".lower()
     return any(k in t for k in ("receipt", "αποδειξ", "λιαν"))
+
+
+DELETE_UNDO_MAX = 5
+DELETE_UNDO_TTL_SECONDS = 60 * 60
+DELETE_UNDO_STACKS: Dict[str, List[Dict[str, Any]]] = {}
+
+
+def _delete_undo_scope_key() -> str:
+    try:
+        active = get_active_credential_from_session() or {}
+        vat = str(active.get("vat") or "default").strip() or "default"
+    except Exception:
+        vat = "default"
+    try:
+        uid = str(getattr(current_user, "id", "") or getattr(current_user, "pw_hash", "") or "anon").strip() or "anon"
+    except Exception:
+        uid = "anon"
+    return f"{uid}:{vat}"
+
+
+def _cleanup_delete_undo_stack(scope_key: str):
+    now = int(time.time())
+    stack = DELETE_UNDO_STACKS.get(scope_key) or []
+    stack = [e for e in stack if int(e.get("created_ts") or 0) >= (now - DELETE_UNDO_TTL_SECONDS)]
+    if stack:
+        DELETE_UNDO_STACKS[scope_key] = stack[:DELETE_UNDO_MAX]
+    else:
+        DELETE_UNDO_STACKS.pop(scope_key, None)
+
+
+def _push_delete_undo_entry(entry: Dict[str, Any]):
+    scope_key = _delete_undo_scope_key()
+    _cleanup_delete_undo_stack(scope_key)
+    stack = DELETE_UNDO_STACKS.get(scope_key) or []
+    stack.insert(0, entry)
+    DELETE_UNDO_STACKS[scope_key] = stack[:DELETE_UNDO_MAX]
+
+
+def _extract_mark_from_any(item: Any) -> str:
+    if not isinstance(item, dict):
+        return ""
+    for k in ("mark", "MARK", "invoice_id", "Αριθμός Μητρώου", "id"):
+        if k in item and item.get(k) not in (None, ""):
+            return str(item.get(k)).strip()
+    return ""
+
+
+def _find_delete_undo_entry(scope_key: str, token: str):
+    _cleanup_delete_undo_stack(scope_key)
+    stack = DELETE_UNDO_STACKS.get(scope_key) or []
+    for idx, e in enumerate(stack):
+        if str(e.get("token") or "") == str(token or ""):
+            return stack, idx, e
+    return stack, -1, None
+
+
+@app.route("/delete/undo", methods=["POST"])
+def delete_undo():
+    is_ajax_request = (
+        (request.headers.get("X-Requested-With", "").lower() == "xmlhttprequest")
+        or (request.args.get("ajax") == "1")
+        or (request.form.get("ajax") == "1")
+    )
+    token = str(request.form.get("token") or request.args.get("token") or "").strip()
+    if not token:
+        payload = request.get_json(silent=True) or {}
+        token = str(payload.get("token") or "").strip()
+
+    if not token:
+        msg = "Δεν βρέθηκε ενέργεια για αναίρεση."
+        if is_ajax_request:
+            return jsonify({"ok": False, "error": msg}), 400
+        flash(msg, "error")
+        return redirect(url_for("search"))
+
+    scope_key = _delete_undo_scope_key()
+    stack, idx, entry = _find_delete_undo_entry(scope_key, token)
+    if idx < 0 or not entry:
+        msg = "Η ενέργεια αναίρεσης έληξε ή δεν υπάρχει."
+        if is_ajax_request:
+            return jsonify({"ok": False, "error": msg}), 404
+        flash(msg, "error")
+        return redirect(url_for("search"))
+
+    restored_excel = 0
+    restored_epsilon = 0
+
+    try:
+        excel_rows = entry.get("excel_rows") if isinstance(entry.get("excel_rows"), list) else []
+        excel_columns = entry.get("excel_columns") if isinstance(entry.get("excel_columns"), list) else []
+        excel_path = str(entry.get("excel_path") or "").strip()
+        if excel_rows and excel_path:
+            import pandas as pd
+            restore_df = pd.DataFrame(excel_rows)
+            if excel_columns:
+                for c in excel_columns:
+                    if c not in restore_df.columns:
+                        restore_df[c] = ""
+                restore_df = restore_df[excel_columns]
+            if os.path.exists(excel_path):
+                cur_df = pd.read_excel(excel_path, engine="openpyxl", dtype=str).fillna("")
+                cur_df.columns = [str(c).strip() for c in cur_df.columns.astype(str)]
+                if "MARK" in cur_df.columns and "MARK" in restore_df.columns:
+                    existing_marks = set(cur_df["MARK"].astype(str).str.strip().tolist())
+                    restore_df = restore_df[~restore_df["MARK"].astype(str).str.strip().isin(existing_marks)]
+                if not restore_df.empty:
+                    merged = pd.concat([cur_df, restore_df], ignore_index=True)
+                    merged.to_excel(excel_path, index=False, engine="openpyxl")
+                    restored_excel = int(restore_df.shape[0])
+            else:
+                out_df = restore_df.copy()
+                out_df.to_excel(excel_path, index=False, engine="openpyxl")
+                restored_excel = int(out_df.shape[0])
+    except Exception:
+        log.exception("delete_undo: failed restoring Excel for token=%s", token)
+
+    try:
+        snapshots = entry.get("epsilon_snapshots") if isinstance(entry.get("epsilon_snapshots"), list) else []
+        for snap in snapshots:
+            if not isinstance(snap, dict):
+                continue
+            vat_code = str(snap.get("vat") or "").strip()
+            rows = snap.get("rows") if isinstance(snap.get("rows"), list) else []
+            if not rows:
+                continue
+            try:
+                eps_path = epsilon_file_path_for(vat_code) if vat_code else ""
+            except Exception:
+                eps_path = ""
+            if not eps_path:
+                continue
+            try:
+                cache = json_read(eps_path) or []
+            except Exception:
+                cache = []
+            existing_marks = set(_extract_mark_from_any(it) for it in cache if isinstance(it, dict))
+            to_add = [r for r in rows if _extract_mark_from_any(r) and _extract_mark_from_any(r) not in existing_marks]
+            if not to_add:
+                continue
+            new_cache = cache + to_add
+            try:
+                if globals().get("_safe_save_epsilon_cache"):
+                    _safe_save_epsilon_cache(vat_code, new_cache)
+                else:
+                    json_write(eps_path, new_cache)
+                restored_epsilon += len(to_add)
+            except Exception:
+                log.exception("delete_undo: failed restoring epsilon cache for vat=%s", vat_code)
+    except Exception:
+        log.exception("delete_undo: failed restoring epsilon snapshots token=%s", token)
+
+    try:
+        stack.pop(idx)
+        if stack:
+            DELETE_UNDO_STACKS[scope_key] = stack[:DELETE_UNDO_MAX]
+        else:
+            DELETE_UNDO_STACKS.pop(scope_key, None)
+    except Exception:
+        pass
+
+    msg = f"Έγινε αναίρεση διαγραφής. Επαναφέρθηκαν από Excel: {restored_excel}, από Epsilon cache: {restored_epsilon}."
+    if is_ajax_request:
+        return jsonify({"ok": True, "message": msg, "restored_excel": restored_excel, "restored_epsilon": restored_epsilon}), 200
+    flash(msg, "success")
+    return redirect(url_for("search"))
+
 # ---------------- Delete invoices ----------------
 @app.route("/delete", methods=["POST"])
 def delete_invoices():
@@ -14759,6 +14925,8 @@ def delete_invoices():
         excel_path = excel_path_for(cred_name=active.get("name"))
 
     deleted_from_excel = 0
+    deleted_excel_rows: List[Dict[str, Any]] = []
+    deleted_excel_columns: List[str] = []
     try:
         if os.path.exists(excel_path):
             import pandas as pd
@@ -14772,6 +14940,8 @@ def delete_invoices():
                 mask = marks_series.isin(marks_to_delete)
                 num_matches = int(mask.sum())
                 if num_matches > 0:
+                    deleted_excel_rows = df[mask].copy().to_dict(orient="records")
+                    deleted_excel_columns = list(df.columns)
                     df_remaining = df[~mask].copy()
                     try:
                         # If no rows remain, write an empty dataframe (preserving columns)
@@ -14795,6 +14965,7 @@ def delete_invoices():
 
     # delete matching entries from per-VAT epsilon cache ONLY
     deleted_from_epsilon = 0
+    deleted_epsilon_snapshots: List[Dict[str, Any]] = []
     try:
         vat = active.get("vat") if active else None
         if vat:
@@ -14816,15 +14987,12 @@ def delete_invoices():
 
                 before_len = len(eps_cache)
 
-                def item_mark_val(it):
-                    for k in ("mark", "MARK", "invoice_id", "Αριθμός Μητρώου", "id"):
-                        if isinstance(it, dict) and k in it and it.get(k) not in (None, ""):
-                            return str(it.get(k)).strip()
-                    return ""
-
-                new_cache = [e for e in eps_cache if item_mark_val(e) not in marks_to_delete]
+                removed_here = [e for e in eps_cache if _extract_mark_from_any(e) in marks_to_delete]
+                new_cache = [e for e in eps_cache if _extract_mark_from_any(e) not in marks_to_delete]
                 after_len = len(new_cache)
                 deleted_from_epsilon = before_len - after_len
+                if removed_here:
+                    deleted_epsilon_snapshots.append({"vat": str(vat).strip(), "rows": removed_here})
 
                 if deleted_from_epsilon > 0:
                     try:
@@ -14870,13 +15038,8 @@ def delete_invoices():
                             eps_cache = []
                     before_len = len(eps_cache)
 
-                    def _mark_from_item(it):
-                        for k in ("mark", "MARK", "invoice_id", "Αριθμός Μητρώου", "id"):
-                            if isinstance(it, dict) and k in it and it.get(k) not in (None, ""):
-                                return str(it.get(k)).strip()
-                        return ""
-
-                    new_cache = [e for e in eps_cache if _mark_from_item(e) not in marks_to_delete]
+                    removed_here = [e for e in eps_cache if _extract_mark_from_any(e) in marks_to_delete]
+                    new_cache = [e for e in eps_cache if _extract_mark_from_any(e) not in marks_to_delete]
                     if len(new_cache) != before_len:
                         # write back
                         try:
@@ -14895,12 +15058,33 @@ def delete_invoices():
                             log.exception("delete_invoices: fallback write failed for %s", eps_path)
                         # update counter
                         deleted_from_epsilon += (before_len - len(new_cache))
+                        if removed_here:
+                            vat_code = fname.split("_epsilon_invoices.json")[0]
+                            deleted_epsilon_snapshots.append({"vat": str(vat_code).strip(), "rows": removed_here})
     except Exception:
         log.exception("delete_invoices: fallback cross-VAT epsilon deletion failed")
 
     # Final summary
     total_requested = len(marks_to_delete)
     summary_msg = f"Διαγράφηκαν {total_requested} επιλεγμένα mark(s). Αφαιρέθηκαν από Excel: {deleted_from_excel}, από Epsilon cache: {deleted_from_epsilon}"
+
+    undo_token = ""
+    undo_entry = None
+    try:
+        if deleted_from_excel > 0 or deleted_from_epsilon > 0:
+            undo_token = secrets.token_urlsafe(10)
+            undo_entry = {
+                "token": undo_token,
+                "created_ts": int(time.time()),
+                "marks": list(marks_to_delete),
+                "excel_path": excel_path,
+                "excel_rows": deleted_excel_rows,
+                "excel_columns": deleted_excel_columns,
+                "epsilon_snapshots": deleted_epsilon_snapshots,
+            }
+            _push_delete_undo_entry(undo_entry)
+    except Exception:
+        log.exception("delete_invoices: failed to create undo entry")
     flash(summary_msg, "success")
     log.info("delete_invoices: finished request. requested=%d excel=%d epsilon=%d", total_requested, deleted_from_excel, deleted_from_epsilon)
 
@@ -14936,6 +15120,11 @@ def delete_invoices():
             "deleted_from_excel": deleted_from_excel,
             "deleted_from_epsilon": deleted_from_epsilon,
             "marks": marks_to_delete,
+            "undo": {
+                "token": undo_token,
+                "count": total_requested,
+                "created_ts": (undo_entry or {}).get("created_ts"),
+            } if undo_token else None,
         }), 200
 
     return redirect(url_for("search"))
@@ -15268,6 +15457,20 @@ def admin_settings_save():
     railway_proxy_url = form.get('railway_proxy_url', '').strip()
     if railway_proxy_url:
         settings['railway_proxy_url'] = railway_proxy_url
+
+    # Firebase backup sync policy
+    sync_mode = str(form.get('firebase_backup_sync_mode') or 'login_logout').strip().lower()
+    if sync_mode not in {'login_logout', 'scheduled'}:
+        sync_mode = 'login_logout'
+    settings['firebase_backup_sync_mode'] = sync_mode
+
+    try:
+        schedule_minutes = int(form.get('firebase_backup_schedule_minutes') or 30)
+    except Exception:
+        schedule_minutes = 30
+    if schedule_minutes < 5:
+        schedule_minutes = 5
+    settings['firebase_backup_schedule_minutes'] = schedule_minutes
     
     save_settings(settings)
     flash('Settings saved', 'success')
@@ -15386,6 +15589,7 @@ def api_admin_firebase_usage():
 
 
 @app.route('/api/admin/firebase-sync-settings', methods=['GET', 'POST'])
+@app.route('/admin/api/firebase-sync-settings', methods=['GET', 'POST'])
 @login_required
 def api_admin_firebase_sync_settings():
     """Get or update Firebase sync settings."""
@@ -15393,49 +15597,123 @@ def api_admin_firebase_sync_settings():
         return jsonify({'success': False, 'error': 'Admin access required'}), 403
 
     if request.method == 'GET':
-        # Return current settings
-        enabled = os.getenv('FIREBASE_SYNC_ENABLED', '0') == '1'
-        interval = int(os.getenv('FIREBASE_SYNC_INTERVAL', '60'))
-        smart_sync = os.getenv('FIREBASE_SMART_SYNC', '1') == '1'
-        return jsonify({
-            'success': True,
-            'data': {
-                'enabled': enabled,
-                'interval': interval,
-                'smart_sync': smart_sync
-            }
-        })
+        try:
+            settings = load_settings() or {}
+        except Exception:
+            settings = {}
+        try:
+            sync_cfg = utils.get_firebase_backup_sync_settings() or {}
+        except Exception:
+            logger.exception('Failed to read firebase sync settings; using defaults')
+            sync_cfg = {}
+        try:
+            mode = str(sync_cfg.get('mode') or 'login_logout')
+            if mode not in {'login_logout', 'scheduled'}:
+                mode = 'login_logout'
+            interval = int(sync_cfg.get('schedule_seconds') or 60)
+            interval = max(10, min(3600, interval))
+            smart_sync = bool(sync_cfg.get('smart_sync', True))
+            enabled = (mode == 'scheduled')
+            return jsonify({
+                'success': True,
+                'data': {
+                    'mode': mode,
+                    'enabled': enabled,
+                    'interval': interval,
+                    'schedule_unit': str(sync_cfg.get('schedule_unit') or 'seconds'),
+                    'schedule_value': int(sync_cfg.get('schedule_value') or interval),
+                    'smart_sync': smart_sync,
+                    'schedule_minutes': int(sync_cfg.get('schedule_minutes') or max(5, int((interval + 59) // 60))),
+                    'settings_source': str(sync_cfg.get('source') or '.env')
+                }
+            })
+        except Exception:
+            logger.exception('Failed to build firebase sync settings response; using hard defaults')
+            return jsonify({
+                'success': True,
+                'data': {
+                    'mode': 'login_logout',
+                    'enabled': False,
+                    'interval': 60,
+                    'schedule_unit': 'seconds',
+                    'schedule_value': 60,
+                    'smart_sync': True,
+                    'schedule_minutes': 5,
+                    'settings_source': 'default'
+                }
+            })
 
     # POST: update settings
     try:
-        payload = request.get_json()
-        enabled = bool(payload.get('enabled'))
-        interval = max(10, min(3600, int(payload.get('interval', 60))))
+        payload = request.get_json(silent=True) or {}
+        mode = str(payload.get('mode') or '').strip().lower()
+        if mode not in {'login_logout', 'scheduled'}:
+            mode = 'scheduled' if bool(payload.get('enabled')) else 'login_logout'
+        enabled = (mode == 'scheduled')
+        schedule_unit = str(payload.get('schedule_unit') or 'seconds').strip().lower()
+        if schedule_unit not in {'seconds', 'minutes', 'hours', 'days'}:
+            schedule_unit = 'seconds'
+        try:
+            schedule_value = int(payload.get('schedule_value', payload.get('interval', 60)))
+        except Exception:
+            schedule_value = 60
+        if schedule_value < 1:
+            schedule_value = 1
+        multiplier = {'seconds': 1, 'minutes': 60, 'hours': 3600, 'days': 86400}[schedule_unit]
+        interval = schedule_value * multiplier
+        interval = max(10, min(86400, interval))
+        if schedule_unit == 'days':
+            schedule_value = max(1, min(30, schedule_value))
+            interval = schedule_value * 86400
+        elif schedule_unit == 'hours':
+            schedule_value = max(1, min(24, schedule_value))
+            interval = schedule_value * 3600
+        elif schedule_unit == 'minutes':
+            schedule_value = max(1, min(1440, schedule_value))
+            interval = schedule_value * 60
+        else:
+            schedule_value = max(10, min(3600, schedule_value))
+            interval = schedule_value
         smart_sync = bool(payload.get('smart_sync', True))
+
+        settings = load_settings() or {}
+        settings['firebase_backup_sync_mode'] = mode
+        settings['firebase_backup_schedule_seconds'] = interval
+        settings['firebase_backup_schedule_minutes'] = max(5, int((interval + 59) // 60))
+        settings['firebase_backup_schedule_unit'] = schedule_unit
+        settings['firebase_backup_schedule_value'] = schedule_value
+        settings['firebase_smart_sync_enabled'] = smart_sync
+        save_settings(settings)
         
         # Update environment (in-memory and .env file)
+        os.environ['FIREBASE_SYNC_MODE'] = mode
         os.environ['FIREBASE_SYNC_ENABLED'] = '1' if enabled else '0'
         os.environ['FIREBASE_SYNC_INTERVAL'] = str(interval)
+        os.environ['FIREBASE_SYNC_UNIT'] = schedule_unit
+        os.environ['FIREBASE_SYNC_VALUE'] = str(schedule_value)
         os.environ['FIREBASE_SMART_SYNC'] = '1' if smart_sync else '0'
         
-        # Update .env file
-        env_file = os.path.join(os.getcwd(), '.env')
+        # Update .env file in the app root, not the current working directory.
+        env_file = os.path.join(BASE_DIR, '.env')
         env_content = []
         if os.path.exists(env_file):
-            with open(env_file, 'r') as f:
+            with open(env_file, 'r', encoding='utf-8') as f:
                 for line in f:
-                    if not any(line.startswith(k) for k in ['FIREBASE_SYNC_ENABLED=', 'FIREBASE_SYNC_INTERVAL=', 'FIREBASE_SMART_SYNC=']):
+                    if not any(line.startswith(k) for k in ['FIREBASE_SYNC_MODE=', 'FIREBASE_SYNC_ENABLED=', 'FIREBASE_SYNC_INTERVAL=', 'FIREBASE_SYNC_UNIT=', 'FIREBASE_SYNC_VALUE=', 'FIREBASE_SMART_SYNC=']):
                         env_content.append(line.rstrip('\n'))
-        
+
         # Add/update settings
+        env_content.append(f'FIREBASE_SYNC_MODE={mode}')
         env_content.append(f'FIREBASE_SYNC_ENABLED={"1" if enabled else "0"}')
         env_content.append(f'FIREBASE_SYNC_INTERVAL={interval}')
+        env_content.append(f'FIREBASE_SYNC_UNIT={schedule_unit}')
+        env_content.append(f'FIREBASE_SYNC_VALUE={schedule_value}')
         env_content.append(f'FIREBASE_SMART_SYNC={"1" if smart_sync else "0"}')
-        
-        with open(env_file, 'w') as f:
+
+        with open(env_file, 'w', encoding='utf-8') as f:
             f.write('\n'.join(env_content) + '\n')
         
-        logger.info(f'Firebase sync settings updated: enabled={enabled}, interval={interval}s, smart_sync={smart_sync}')
+        logger.info(f'Firebase sync settings updated: mode={mode}, interval={interval}s, unit={schedule_unit}, value={schedule_value}, smart_sync={smart_sync}')
         # record activity for admin panel
         try:
             from utils import log_user_activity
@@ -15443,14 +15721,22 @@ def api_admin_firebase_sync_settings():
                 user_id=current_user.id,
                 group_name='system',
                 action='firebase_sync_settings_updated',
-                details={'enabled': enabled, 'interval': interval, 'smart_sync': smart_sync},
+                details={'mode': mode, 'enabled': enabled, 'interval': interval, 'schedule_unit': schedule_unit, 'schedule_value': schedule_value, 'smart_sync': smart_sync},
                 user_email=getattr(current_user, 'email', None),
                 user_username=getattr(current_user, 'username', None)
             )
         except Exception:
             pass
         
-        return jsonify({'success': True, 'message': 'Settings saved'})
+        return jsonify({'success': True, 'message': 'Settings saved', 'data': {
+            'mode': mode,
+            'enabled': enabled,
+            'interval': interval,
+            'schedule_unit': schedule_unit,
+            'schedule_value': schedule_value,
+            'smart_sync': smart_sync,
+            'settings_source': 'process-env'
+        }})
     except Exception as e:
         logger.error(f'Error saving firebase sync settings: {e}')
         return jsonify({'success': False, 'error': str(e)}), 400
@@ -15634,6 +15920,82 @@ def admin_send_email():
         logger.exception('Failed to send bulk email')
         flash(f'Error sending emails: {str(e)}', 'danger')
         return redirect(url_for('admin_send_email'))
+
+
+_firebase_backup_scheduler_started = False
+_firebase_backup_scheduler_lock = threading.Lock()
+_firebase_backup_last_run: Dict[str, float] = {}
+
+
+def _read_group_sync_settings_by_folder(group_folder: str) -> Dict[str, Any]:
+    try:
+        p = os.path.join(BASE_DIR, 'data', group_folder, 'credentials_settings.json')
+        if os.path.exists(p):
+            with open(p, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except Exception:
+        log.exception('Failed reading group sync settings for folder=%s', group_folder)
+    return {}
+
+
+def _firebase_backup_scheduler_loop():
+    while True:
+        try:
+            with app.app_context():
+                sync_cfg = utils.get_firebase_backup_sync_settings() or {}
+                mode = str(sync_cfg.get('mode') or 'login_logout').strip().lower()
+                interval_secs = int(sync_cfg.get('schedule_seconds') or 60)
+                if interval_secs < 10:
+                    interval_secs = 10
+                if mode != 'scheduled':
+                    time.sleep(30)
+                    continue
+
+                groups = Group.query.all() or []
+                now_ts = time.time()
+                for grp in groups:
+                    try:
+                        group_name = str(getattr(grp, 'name', '') or '').strip()
+                        group_folder = str(getattr(grp, 'data_folder', '') or '').strip()
+                        if not group_name or not group_folder:
+                            continue
+
+                        prev = float(_firebase_backup_last_run.get(group_name) or 0)
+                        if prev and (now_ts - prev) < interval_secs:
+                            continue
+
+                        log.info('Scheduled Firebase backup sync start for group=%s (interval=%ss)', group_name, interval_secs)
+                        push_ok = bool(firebase_config.firebase_push_group_files(group_name, dry_run=False, verbose=False))
+                        pull_ok = bool(firebase_config.firebase_pull_group_to_local(group_name))
+                        _firebase_backup_last_run[group_name] = time.time()
+                        log.info('Scheduled Firebase backup sync done for group=%s push_ok=%s pull_ok=%s', group_name, push_ok, pull_ok)
+                    except Exception:
+                        log.exception('Scheduled Firebase backup sync failed for group=%s', getattr(grp, 'name', None))
+        except Exception:
+            log.exception('Firebase backup scheduler loop error')
+        time.sleep(30)
+
+
+def _start_firebase_backup_scheduler_once():
+    global _firebase_backup_scheduler_started
+    with _firebase_backup_scheduler_lock:
+        if _firebase_backup_scheduler_started:
+            return
+        t = threading.Thread(target=_firebase_backup_scheduler_loop, daemon=True, name='firebase-backup-scheduler')
+        t.start()
+        _firebase_backup_scheduler_started = True
+        log.info('Firebase backup scheduler thread started')
+
+
+try:
+    _is_reloader_main = (os.environ.get('WERKZEUG_RUN_MAIN') == 'true')
+    _debug_mode = bool(app.debug or os.getenv('FLASK_DEBUG', '0') == '1')
+    if (not _debug_mode) or _is_reloader_main:
+        _start_firebase_backup_scheduler_once()
+except Exception:
+    log.exception('Failed to start firebase backup scheduler thread')
 
 
 if __name__ == "__main__":

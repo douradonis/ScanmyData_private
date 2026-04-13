@@ -4,6 +4,7 @@ import logging
 import io
 import json
 import re
+from typing import Any, Dict
 from urllib.parse import urlparse, parse_qs
 import requests
 import xmltodict
@@ -98,6 +99,143 @@ INVOICE_TYPE_MAP = {
 
 # Classification pattern
 CLASSIFICATION_PATTERN = re.compile(r'\b(?:E3_[0-9]{3}(?:_[0-9]{3})*|VAT_[0-9]{3}|NOT_VAT_295)\b', flags=re.IGNORECASE)
+
+
+def _load_dotenv_values_best_effort() -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    try:
+        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+        if not os.path.exists(env_path):
+            env_path = os.path.join(os.getcwd(), '.env')
+        if not os.path.exists(env_path):
+            return out
+        with open(env_path, 'r', encoding='utf-8') as f:
+            for raw_line in f:
+                line = str(raw_line or '').strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, value = line.split('=', 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key:
+                    out[key] = value
+    except Exception:
+        pass
+    return out
+
+
+def _load_group_settings_best_effort() -> Dict[str, Any]:
+    """Best-effort loader for credentials_settings.json in the active group scope."""
+    try:
+        from flask import has_request_context, has_app_context, session, current_app
+    except Exception:
+        return {}
+
+    if not has_app_context():
+        return {}
+
+    base_dir = current_app.root_path or os.getcwd()
+    data_dir = os.path.join(base_dir, 'data')
+    settings_path = os.path.join(data_dir, 'credentials_settings.json')
+
+    try:
+        if has_request_context():
+            active_group = str(session.get('active_group') or '').strip()
+            if active_group:
+                try:
+                    from models import Group
+                    grp = Group.query.filter_by(name=active_group).first()
+                    folder = str(getattr(grp, 'data_folder', '') or active_group).strip()
+                    if folder:
+                        settings_path = os.path.join(data_dir, folder, 'credentials_settings.json')
+                except Exception:
+                    settings_path = os.path.join(data_dir, active_group, 'credentials_settings.json')
+    except Exception:
+        pass
+
+    try:
+        if os.path.exists(settings_path):
+            with open(settings_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def get_firebase_backup_sync_settings() -> Dict[str, Any]:
+    """Return Firebase backup sync policy from settings.
+
+    Keys:
+    - mode: 'login_logout' | 'scheduled'
+    - schedule_minutes: int (>=5)
+    """
+    settings = _load_group_settings_best_effort()
+    env_file = _load_dotenv_values_best_effort()
+    env_mode = str(os.getenv('FIREBASE_SYNC_MODE') or env_file.get('FIREBASE_SYNC_MODE') or '').strip().lower()
+    mode = env_mode or str(settings.get('firebase_backup_sync_mode') or '').strip().lower()
+    if not mode:
+        mode = 'scheduled' if os.getenv('FIREBASE_SYNC_ENABLED', '0') == '1' else 'login_logout'
+    if mode not in {'login_logout', 'scheduled'}:
+        mode = 'login_logout'
+
+    unit = str(os.getenv('FIREBASE_SYNC_UNIT') or env_file.get('FIREBASE_SYNC_UNIT') or settings.get('firebase_backup_schedule_unit') or '').strip().lower()
+    if unit not in {'seconds', 'minutes', 'hours', 'days'}:
+        unit = ''
+    try:
+        value = int(os.getenv('FIREBASE_SYNC_VALUE') or env_file.get('FIREBASE_SYNC_VALUE') or settings.get('firebase_backup_schedule_value') or 0)
+    except Exception:
+        value = 0
+
+    try:
+        secs = int(os.getenv('FIREBASE_SYNC_INTERVAL') or env_file.get('FIREBASE_SYNC_INTERVAL') or settings.get('firebase_backup_schedule_seconds') or 60)
+    except Exception:
+        secs = 60
+    if secs < 10:
+        secs = 10
+
+    if unit and value > 0:
+        mult = {'seconds': 1, 'minutes': 60, 'hours': 3600, 'days': 86400}.get(unit, 1)
+        secs = max(10, value * mult)
+    else:
+        if secs % 86400 == 0 and secs >= 86400:
+            unit, value = 'days', max(1, secs // 86400)
+        elif secs % 3600 == 0 and secs >= 3600:
+            unit, value = 'hours', max(1, secs // 3600)
+        elif secs % 60 == 0 and secs >= 60:
+            unit, value = 'minutes', max(1, secs // 60)
+        else:
+            unit, value = 'seconds', secs
+
+    try:
+        mins = int(settings.get('firebase_backup_schedule_minutes') or 30)
+    except Exception:
+        mins = max(1, int(round(secs / 60.0)))
+    if mins < 5:
+        mins = 5
+
+    raw_smart = settings.get('firebase_smart_sync_enabled') if 'firebase_smart_sync_enabled' in settings else (os.getenv('FIREBASE_SMART_SYNC') or env_file.get('FIREBASE_SMART_SYNC') or '1')
+    smart_sync = str(raw_smart).strip().lower() not in {'0', 'false', 'off', 'no'}
+
+    source = 'settings'
+    if env_file.get('FIREBASE_SYNC_MODE') or env_file.get('FIREBASE_SYNC_ENABLED'):
+        source = '.env'
+    if os.getenv('FIREBASE_SYNC_MODE') or os.getenv('FIREBASE_SYNC_ENABLED'):
+        source = 'process-env'
+
+    return {
+        'mode': mode,
+        'schedule_minutes': mins,
+        'schedule_seconds': secs,
+        'schedule_unit': unit,
+        'schedule_value': value,
+        'smart_sync': smart_sync,
+        'source': source,
+    }
+
+
+def firebase_sync_login_logout_enabled() -> bool:
+    return get_firebase_backup_sync_settings().get('mode') == 'login_logout'
 
 # ----------------------
 # Utilities for extracting MARK from URL pages (web scraping)

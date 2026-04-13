@@ -23,6 +23,15 @@
     <div class="flex items-center gap-3">
       <input id="globalSearch" type="search" placeholder="🔎 Αναζήτηση..." class="p-2 border border-gray-300 rounded-lg w-64 focus:outline-none focus:ring-2 focus:ring-blue-400">
       <button id="deleteBtn" type="button" class="px-4 py-2 bg-red-600 text-white rounded-lg shadow hover:bg-red-700 transition">🗑️ Διαγραφή Επιλεγμένων</button>
+      <div id="deleteUndoWrap" class="relative hidden">
+        <button id="deleteUndoBtn" type="button" class="px-4 py-2 bg-amber-500 text-white rounded-lg shadow hover:bg-amber-600 transition flex items-center gap-2" aria-haspopup="true" aria-expanded="false">
+          ↩️ Αναίρεση Διαγραφής
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+            <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 10.94l3.71-3.71a.75.75 0 111.06 1.06l-4.24 4.24a.75.75 0 01-1.06 0L5.21 8.29a.75.75 0 01.02-1.08z" clip-rule="evenodd" />
+          </svg>
+        </button>
+        <div id="deleteUndoMenu" class="hidden absolute left-0 mt-2 min-w-[280px] bg-white rounded-lg shadow-lg overflow-hidden z-50"></div>
+      </div>
       <div id="deleteSpinner" class="ml-2 hidden text-gray-700">Αποστολή…</div>
     </div>
     <div class="flex items-center gap-3">
@@ -221,6 +230,180 @@
       };
     })();
     </script>
+
+  <script>
+    (function(){
+      function syncDownloadControls(fileExists){
+        try{
+          const controls = document.getElementById('listDownloadControls');
+          const menu = document.getElementById('downloadMenu');
+          const toggle = document.getElementById('downloadToggle');
+          if(!controls) return;
+          if(fileExists){
+            controls.classList.remove('hidden');
+          } else {
+            controls.classList.add('hidden');
+            if(menu) menu.classList.add('hidden');
+            if(toggle) toggle.setAttribute('aria-expanded', 'false');
+          }
+        }catch(_){ }
+      }
+
+      async function refreshListFragment(){
+        try{
+          const frag = await fetch('/list/fragment', { method: 'GET', credentials: 'same-origin' });
+          if(!frag.ok) return false;
+          const j = await frag.json().catch(() => null);
+          if(!j || !j.ok) return false;
+          const container = document.getElementById('summary-container');
+          if(!container) return false;
+          let prevPageSize = null;
+          try {
+            if (window.FBP_TABULATOR && typeof window.FBP_TABULATOR.getPageSize === 'function') {
+              prevPageSize = Number(window.FBP_TABULATOR.getPageSize()) || null;
+            }
+          } catch(_) { prevPageSize = null; }
+          container.innerHTML = j.table_html || '';
+          syncDownloadControls(!!j.file_exists);
+          setTimeout(() => {
+            try {
+              if (typeof window.FBP_INIT_TABULATOR === 'function') window.FBP_INIT_TABULATOR({ pageSize: prevPageSize });
+              else if (typeof window.FBP_REINIT === 'function') window.FBP_REINIT();
+            } catch(_){ }
+          }, 40);
+          return true;
+        }catch(_){ return false; }
+      }
+
+      const undoState = {
+        stack: [],
+        max: 5,
+      };
+
+      function fmtUndoLabel(item){
+        try{
+          const when = item && item.created_ts ? new Date(Number(item.created_ts) * 1000) : new Date();
+          const hh = String(when.getHours()).padStart(2, '0');
+          const mm = String(when.getMinutes()).padStart(2, '0');
+          const count = Number(item && item.count) || 0;
+          return `Διαγραφή ${count} εγγραφών (${hh}:${mm})`;
+        }catch(_){
+          const count = Number(item && item.count) || 0;
+          return `Διαγραφή ${count} εγγραφών`;
+        }
+      }
+
+      function renderUndoMenu(){
+        const wrap = document.getElementById('deleteUndoWrap');
+        const btn = document.getElementById('deleteUndoBtn');
+        const menu = document.getElementById('deleteUndoMenu');
+        if(!wrap || !btn || !menu) return;
+
+        if(!undoState.stack.length){
+          wrap.classList.add('hidden');
+          menu.classList.add('hidden');
+          btn.setAttribute('aria-expanded', 'false');
+          menu.innerHTML = '';
+          return;
+        }
+
+        wrap.classList.remove('hidden');
+        menu.innerHTML = undoState.stack.map((item, idx)=>{
+          const token = String(item.token || '').replace(/"/g, '&quot;');
+          const text = fmtUndoLabel(item);
+          return `<button type="button" data-undo-token="${token}" class="w-full text-left px-4 py-2 hover:bg-gray-100 transition">${idx + 1}. ${text}</button>`;
+        }).join('');
+      }
+
+      async function runUndo(token){
+        if(!token) return;
+        const body = new URLSearchParams();
+        const csrf = document.querySelector('input[name="csrf_token"]');
+        if(csrf && csrf.value) body.append('csrf_token', csrf.value);
+        body.append('token', token);
+        body.append('ajax', '1');
+
+        const res = await fetch('/delete/undo', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'X-Requested-With': 'XMLHttpRequest'
+          },
+          body: body.toString()
+        });
+        const payload = await res.json().catch(()=>null);
+        if(!res.ok || !payload || payload.ok === false){
+          const msg = (payload && (payload.error || payload.message)) ? (payload.error || payload.message) : ('Αποτυχία αναίρεσης (HTTP ' + res.status + ')');
+          throw new Error(msg);
+        }
+        undoState.stack = undoState.stack.filter(x => String(x.token||'') !== String(token));
+        renderUndoMenu();
+        await refreshListFragment();
+        return payload;
+      }
+
+      function pushUndo(item){
+        if(!item || !item.token) return;
+        undoState.stack = undoState.stack.filter(x => String(x.token||'') !== String(item.token||''));
+        undoState.stack.unshift({
+          token: String(item.token || ''),
+          count: Number(item.count) || 0,
+          created_ts: Number(item.created_ts) || Math.floor(Date.now()/1000),
+        });
+        undoState.stack = undoState.stack.slice(0, undoState.max);
+        renderUndoMenu();
+      }
+
+      document.addEventListener('DOMContentLoaded', function(){
+        const btn = document.getElementById('deleteUndoBtn');
+        const menu = document.getElementById('deleteUndoMenu');
+        if(btn && !btn.dataset.boundUndo){
+          btn.dataset.boundUndo = '1';
+          btn.addEventListener('click', function(e){
+            e.stopPropagation();
+            if(!menu) return;
+            menu.classList.toggle('hidden');
+            btn.setAttribute('aria-expanded', menu.classList.contains('hidden') ? 'false' : 'true');
+          });
+        }
+        if(menu && !menu.dataset.boundUndo){
+          menu.dataset.boundUndo = '1';
+          menu.addEventListener('click', async function(e){
+            const t = e.target && e.target.closest ? e.target.closest('[data-undo-token]') : null;
+            if(!t) return;
+            const token = t.getAttribute('data-undo-token') || '';
+            try{
+              t.disabled = true;
+              const payload = await runUndo(token);
+              if (typeof showFlash === 'function') showFlash((payload && payload.message) || 'Η αναίρεση ολοκληρώθηκε.', 'success', 3500);
+            }catch(err){
+              if (typeof showFlash === 'function') showFlash(String((err && err.message) || 'Σφάλμα κατά την αναίρεση.'), 'error', 5000);
+            } finally {
+              if(menu){
+                menu.classList.add('hidden');
+                if(btn) btn.setAttribute('aria-expanded', 'false');
+              }
+            }
+          });
+        }
+        document.addEventListener('click', function(e){
+          if(!menu || !btn) return;
+          if(menu.classList.contains('hidden')) return;
+          if(menu.contains(e.target) || btn.contains(e.target)) return;
+          menu.classList.add('hidden');
+          btn.setAttribute('aria-expanded', 'false');
+        });
+      });
+
+      window.FBP_SYNC_LIST_DOWNLOAD_CONTROLS = syncDownloadControls;
+      window.FBP_REFRESH_LIST_FRAGMENT = refreshListFragment;
+      window.FBP_DELETE_UNDO = {
+        push: pushUndo,
+        render: renderUndoMenu,
+      };
+    })();
+  </script>
   </div>
 
 <script>
@@ -953,25 +1136,24 @@ document.addEventListener('click', function(e){
             return;
           }
 
-          const frag = await fetch('/list/fragment', { method: 'GET', credentials: 'same-origin' });
-          if (frag.ok) {
-            const j = await frag.json().catch(() => null);
-            if (j && j.ok && j.table_html) {
-              const container = document.getElementById('summary-container');
-              if (container) {
-                let prevPageSize = null;
-                try {
-                  if (window.FBP_TABULATOR && typeof window.FBP_TABULATOR.getPageSize === 'function') {
-                    prevPageSize = Number(window.FBP_TABULATOR.getPageSize()) || null;
-                  }
-                } catch(_) { prevPageSize = null; }
-                container.innerHTML = j.table_html;
-                setTimeout(() => {
-                  try {
-                    if (typeof window.FBP_INIT_TABULATOR === 'function') window.FBP_INIT_TABULATOR({ pageSize: prevPageSize });
-                    else if (typeof window.FBP_REINIT === 'function') window.FBP_REINIT();
-                  } catch(_){ }
-                }, 40);
+          if (window.FBP_DELETE_UNDO && payload && payload.undo) {
+            try { window.FBP_DELETE_UNDO.push(payload.undo); } catch(_){ }
+          }
+
+          if (typeof window.FBP_REFRESH_LIST_FRAGMENT === 'function') {
+            await window.FBP_REFRESH_LIST_FRAGMENT();
+          } else {
+            const frag = await fetch('/list/fragment', { method: 'GET', credentials: 'same-origin' });
+            if (frag.ok) {
+              const j = await frag.json().catch(() => null);
+              if (j && j.ok && j.table_html) {
+                const container = document.getElementById('summary-container');
+                if (container) {
+                  container.innerHTML = j.table_html;
+                }
+                if (typeof window.FBP_SYNC_LIST_DOWNLOAD_CONTROLS === 'function') {
+                  window.FBP_SYNC_LIST_DOWNLOAD_CONTROLS(!!j.file_exists);
+                }
               }
             }
           }
@@ -1116,6 +1298,7 @@ document.getElementById('epsilonExport')?.addEventListener('click', function(){
           const parser = new DOMParser();
           const doc = parser.parseFromString(text, 'text/html');
           const newContainer = doc.getElementById('summary-container');
+          const freshControls = doc.getElementById('listDownloadControls');
           const container = document.getElementById('summary-container');
           if(newContainer && container){
             const newHtml = newContainer.innerHTML;
@@ -1127,6 +1310,12 @@ document.getElementById('epsilonExport')?.addEventListener('click', function(){
             } catch(_) { prevPageSize = null; }
             try{ container.querySelectorAll('.dataTables_wrapper, .tabulator-wrapper').forEach(el=>el.remove()); }catch(_){ }
             container.innerHTML = newHtml;
+            try{
+              if(window.FBP_SYNC_LIST_DOWNLOAD_CONTROLS){
+                const shouldShow = !!(freshControls && !freshControls.classList.contains('hidden'));
+                window.FBP_SYNC_LIST_DOWNLOAD_CONTROLS(shouldShow);
+              }
+            }catch(_){ }
             try{ setTimeout(()=>{ if(window.FBP_INIT_TABULATOR) window.FBP_INIT_TABULATOR({ pageSize: prevPageSize }); }, 30); }catch(_){ }
             return;
           }
@@ -1149,6 +1338,7 @@ document.getElementById('epsilonExport')?.addEventListener('click', function(){
               } catch(_) { prevPageSize = null; }
               try{ container.querySelectorAll('.dataTables_wrapper, .tabulator-wrapper').forEach(el=>el.remove()); }catch(_){ }
               container.innerHTML = j.table_html;
+              try{ if(window.FBP_SYNC_LIST_DOWNLOAD_CONTROLS) window.FBP_SYNC_LIST_DOWNLOAD_CONTROLS(!!j.file_exists); }catch(_){ }
               try{ setTimeout(()=>{ if(window.FBP_INIT_TABULATOR) window.FBP_INIT_TABULATOR({ pageSize: prevPageSize }); }, 30); }catch(_){ }
             }
           }
