@@ -163,6 +163,27 @@ def _load_group_settings_best_effort() -> Dict[str, Any]:
     return {}
 
 
+def _load_admin_settings_best_effort() -> Dict[str, Any]:
+    """Load global admin settings from data/system/admin_settings.json (not group-scoped)."""
+    try:
+        from flask import has_app_context, current_app
+        if has_app_context():
+            base_dir = current_app.root_path or os.getcwd()
+        else:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+    except Exception:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    p = os.path.join(base_dir, 'data', 'system', 'admin_settings.json')
+    try:
+        if os.path.exists(p):
+            with open(p, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
 def get_firebase_backup_sync_settings() -> Dict[str, Any]:
     """Return Firebase backup sync policy from settings.
 
@@ -170,25 +191,31 @@ def get_firebase_backup_sync_settings() -> Dict[str, Any]:
     - mode: 'login_logout' | 'scheduled'
     - schedule_minutes: int (>=5)
     """
-    settings = _load_group_settings_best_effort()
+    # admin_settings.json has HIGHEST priority (explicitly saved by admin via the UI)
+    # .env / process env are fallbacks for deployments that haven't used the UI yet
+    settings = _load_admin_settings_best_effort()
     env_file = _load_dotenv_values_best_effort()
+
+    # mode: admin_settings.json wins; env is fallback
+    admin_mode = str(settings.get('firebase_backup_sync_mode') or '').strip().lower()
     env_mode = str(os.getenv('FIREBASE_SYNC_MODE') or env_file.get('FIREBASE_SYNC_MODE') or '').strip().lower()
-    mode = env_mode or str(settings.get('firebase_backup_sync_mode') or '').strip().lower()
+    mode = admin_mode or env_mode
     if not mode:
         mode = 'scheduled' if os.getenv('FIREBASE_SYNC_ENABLED', '0') == '1' else 'login_logout'
     if mode not in {'login_logout', 'scheduled'}:
         mode = 'login_logout'
 
-    unit = str(os.getenv('FIREBASE_SYNC_UNIT') or env_file.get('FIREBASE_SYNC_UNIT') or settings.get('firebase_backup_schedule_unit') or '').strip().lower()
+    # unit/value/secs: admin_settings.json wins; env is fallback
+    unit = str(settings.get('firebase_backup_schedule_unit') or os.getenv('FIREBASE_SYNC_UNIT') or env_file.get('FIREBASE_SYNC_UNIT') or '').strip().lower()
     if unit not in {'seconds', 'minutes', 'hours', 'days'}:
         unit = ''
     try:
-        value = int(os.getenv('FIREBASE_SYNC_VALUE') or env_file.get('FIREBASE_SYNC_VALUE') or settings.get('firebase_backup_schedule_value') or 0)
+        value = int(settings.get('firebase_backup_schedule_value') or os.getenv('FIREBASE_SYNC_VALUE') or env_file.get('FIREBASE_SYNC_VALUE') or 0)
     except Exception:
         value = 0
 
     try:
-        secs = int(os.getenv('FIREBASE_SYNC_INTERVAL') or env_file.get('FIREBASE_SYNC_INTERVAL') or settings.get('firebase_backup_schedule_seconds') or 60)
+        secs = int(settings.get('firebase_backup_schedule_seconds') or os.getenv('FIREBASE_SYNC_INTERVAL') or env_file.get('FIREBASE_SYNC_INTERVAL') or 60)
     except Exception:
         secs = 60
     if secs < 10:
@@ -214,14 +241,17 @@ def get_firebase_backup_sync_settings() -> Dict[str, Any]:
     if mins < 5:
         mins = 5
 
+    # smart_sync: admin_settings.json wins; env is fallback
     raw_smart = settings.get('firebase_smart_sync_enabled') if 'firebase_smart_sync_enabled' in settings else (os.getenv('FIREBASE_SMART_SYNC') or env_file.get('FIREBASE_SMART_SYNC') or '1')
     smart_sync = str(raw_smart).strip().lower() not in {'0', 'false', 'off', 'no'}
 
-    source = 'settings'
-    if env_file.get('FIREBASE_SYNC_MODE') or env_file.get('FIREBASE_SYNC_ENABLED'):
-        source = '.env'
-    if os.getenv('FIREBASE_SYNC_MODE') or os.getenv('FIREBASE_SYNC_ENABLED'):
-        source = 'process-env'
+    # source label reflects what was actually used
+    source = 'admin_settings'
+    if not admin_mode:
+        if env_file.get('FIREBASE_SYNC_MODE') or env_file.get('FIREBASE_SYNC_ENABLED'):
+            source = '.env'
+        if os.getenv('FIREBASE_SYNC_MODE') or os.getenv('FIREBASE_SYNC_ENABLED'):
+            source = 'process-env'
 
     return {
         'mode': mode,

@@ -24,12 +24,10 @@
       <input id="globalSearch" type="search" placeholder="🔎 Αναζήτηση..." class="p-2 border border-gray-300 rounded-lg w-64 focus:outline-none focus:ring-2 focus:ring-blue-400">
       <button id="deleteBtn" type="button" class="px-4 py-2 bg-red-600 text-white rounded-lg shadow hover:bg-red-700 transition">🗑️ Διαγραφή Επιλεγμένων</button>
       <div id="deleteUndoWrap" class="relative hidden">
-        <button id="deleteUndoBtn" type="button" class="px-4 py-2 bg-amber-500 text-white rounded-lg shadow hover:bg-amber-600 transition flex items-center gap-2" aria-haspopup="true" aria-expanded="false">
-          ↩️ Αναίρεση Διαγραφής
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-            <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 10.94l3.71-3.71a.75.75 0 111.06 1.06l-4.24 4.24a.75.75 0 01-1.06 0L5.21 8.29a.75.75 0 01.02-1.08z" clip-rule="evenodd" />
-          </svg>
+        <button id="deleteUndoBtn" type="button" class="w-10 h-10 bg-amber-500 text-white rounded-lg shadow hover:bg-amber-600 transition flex items-center justify-center text-lg" style="background-color:#d97706;color:#ffffff;" aria-haspopup="true" aria-expanded="false" aria-label="Αναίρεση διαγραφής" title="Αναίρεση διαγραφής">
+          ↩️
         </button>
+        <div class="undo-tooltip" role="tooltip">Αναίρεση διαγραφής</div>
         <div id="deleteUndoMenu" class="hidden absolute left-0 mt-2 min-w-[280px] bg-white rounded-lg shadow-lg overflow-hidden z-50"></div>
       </div>
       <div id="deleteSpinner" class="ml-2 hidden text-gray-700">Αποστολή…</div>
@@ -92,6 +90,11 @@
                 color: #ffffff !important;
               }
               #downloadToggle:hover { background-color: #0369a1 !important; }
+              #deleteUndoBtn {
+                background-color: #d97706 !important;
+                color: #ffffff !important;
+              }
+              #deleteUndoBtn:hover { background-color: #b45309 !important; }
 
               .summary-table thead th {
                 background-color: #0d6efd !important;
@@ -123,6 +126,8 @@
             /* Same rules when site theme is toggled via data-theme="dark" */
             [data-theme="dark"] #downloadToggle { background-color: #0d6efd !important; color: #ffffff !important; }
             [data-theme="dark"] #downloadToggle:hover { background-color: #0b5ed7 !important; }
+            [data-theme="dark"] #deleteUndoBtn { background-color: #d97706 !important; color: #ffffff !important; }
+            [data-theme="dark"] #deleteUndoBtn:hover { background-color: #b45309 !important; }
             [data-theme="dark"] .summary-table thead th { background-color: #0d6efd !important; color: #ffffff !important; }
             [data-theme="dark"] .summary-table,
             [data-theme="dark"] .dataTables_wrapper,
@@ -146,6 +151,29 @@
 
             /* Ensure delete button stays clickable but below modals */
             #deleteBtn{ position:relative; z-index:20; }
+            #deleteUndoBtn{ position:relative; z-index:20; }
+            #deleteUndoWrap .undo-tooltip{
+              position:absolute;
+              left:50%;
+              top:calc(100% + 8px);
+              transform:translateX(-50%) translateY(-2px);
+              background:#111827;
+              color:#ffffff;
+              font-size:12px;
+              line-height:1;
+              padding:6px 8px;
+              border-radius:6px;
+              white-space:nowrap;
+              opacity:0;
+              pointer-events:none;
+              transition:opacity .16s ease, transform .16s ease;
+              z-index:70;
+            }
+            #deleteUndoWrap:hover .undo-tooltip,
+            #deleteUndoWrap:focus-within .undo-tooltip{
+              opacity:1;
+              transform:translateX(-50%) translateY(0);
+            }
             /* Make delete modal always above other UI (higher than #deleteBtn) */
             #deleteModal{ z-index:99999 !important; }
             #deleteModal > div { position: relative; z-index:100000; }
@@ -279,6 +307,34 @@
         stack: [],
         max: 5,
       };
+      const undoStorageKey = 'fbp_delete_undo_stack_v1';
+
+      function saveUndoState(){
+        try{
+          if(!window.localStorage) return;
+          const serializable = (undoState.stack || []).slice(0, undoState.max).map(item => ({
+            token: String(item && item.token || ''),
+            count: Number(item && item.count) || 0,
+            created_ts: Number(item && item.created_ts) || Math.floor(Date.now()/1000),
+          })).filter(item => item.token);
+          window.localStorage.setItem(undoStorageKey, JSON.stringify(serializable));
+        }catch(_){ }
+      }
+
+      function loadUndoState(){
+        try{
+          if(!window.localStorage) return;
+          const raw = window.localStorage.getItem(undoStorageKey);
+          if(!raw) return;
+          const parsed = JSON.parse(raw);
+          if(!Array.isArray(parsed)) return;
+          undoState.stack = parsed.map(item => ({
+            token: String(item && item.token || ''),
+            count: Number(item && item.count) || 0,
+            created_ts: Number(item && item.created_ts) || Math.floor(Date.now()/1000),
+          })).filter(item => item.token).slice(0, undoState.max);
+        }catch(_){ }
+      }
 
       function fmtUndoLabel(item){
         try{
@@ -338,6 +394,7 @@
           throw new Error(msg);
         }
         undoState.stack = undoState.stack.filter(x => String(x.token||'') !== String(token));
+        saveUndoState();
         renderUndoMenu();
         await refreshListFragment();
         return payload;
@@ -352,10 +409,13 @@
           created_ts: Number(item.created_ts) || Math.floor(Date.now()/1000),
         });
         undoState.stack = undoState.stack.slice(0, undoState.max);
+        saveUndoState();
         renderUndoMenu();
       }
 
       document.addEventListener('DOMContentLoaded', function(){
+        loadUndoState();
+        renderUndoMenu();
         const btn = document.getElementById('deleteUndoBtn');
         const menu = document.getElementById('deleteUndoMenu');
         if(btn && !btn.dataset.boundUndo){

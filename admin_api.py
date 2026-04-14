@@ -1418,9 +1418,9 @@ def api_email_config():
     if request.method == 'GET':
         try:
             import email_utils
-            from app import load_settings
+            from app import load_admin_settings
             
-            settings = load_settings()
+            settings = load_admin_settings()
             current_provider = email_utils.get_email_provider()
             
             # Check configuration status for different providers

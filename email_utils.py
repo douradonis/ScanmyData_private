@@ -32,16 +32,16 @@ def get_email_provider() -> str:
         from pathlib import Path
         import json
         
-        # Try to import app's load_settings function
+        # Try to import app's load_admin_settings function (global admin settings)
         try:
-            from app import load_settings
-            settings = load_settings()
+            from app import load_admin_settings
+            settings = load_admin_settings()
             provider = settings.get('email_provider', '').strip()
-            logger.info(f"get_email_provider: loaded from settings: {provider}")
+            logger.info(f"get_email_provider: loaded from admin settings: {provider}")
             if provider in ['smtp', 'oauth2_outlook', 'resend', 'railway_proxy']:
                 return provider
         except (ImportError, Exception) as e:
-            logger.warning(f"get_email_provider: failed to load from settings: {e}")
+            logger.warning(f"get_email_provider: failed to load from admin settings: {e}")
             pass
     except Exception as e:
         logger.warning(f"get_email_provider: outer exception: {e}")

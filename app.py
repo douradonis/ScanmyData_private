@@ -129,6 +129,7 @@ except Exception:
 
 from flask import current_app
 from epsilon_bridge_multiclient_strict import build_preview_rows_for_ui
+import utils as utils
 from utils import decode_qr_from_file, decode_qr_payloads, extract_mark
 
 # Firebase & Admin imports
@@ -912,9 +913,11 @@ def _prime_remote_summary_state(
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 
 DATA_DIR = os.path.join(BASE_DIR, "data")
+ADMIN_SYSTEM_DIR = os.path.join(DATA_DIR, 'system')
 UPLOADS_DIR = os.path.join(BASE_DIR, "uploads")
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
 os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(ADMIN_SYSTEM_DIR, exist_ok=True)
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 
 CACHE_FILE = os.path.join(DATA_DIR, "invoices_cache.json")
@@ -4490,6 +4493,29 @@ def save_settings(settings):
             json.dump(settings, f, ensure_ascii=False, indent=2)
     except Exception:
         log.exception('save_settings failed')
+
+
+def load_admin_settings() -> dict:
+    """Load global admin settings from data/system/admin_settings.json (not group-scoped)."""
+    try:
+        p = os.path.join(ADMIN_SYSTEM_DIR, 'admin_settings.json')
+        if os.path.exists(p):
+            with open(p, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception:
+        log.exception('load_admin_settings failed')
+    return {}
+
+
+def save_admin_settings(settings: dict) -> None:
+    """Save global admin settings to data/system/admin_settings.json (not group-scoped)."""
+    try:
+        os.makedirs(ADMIN_SYSTEM_DIR, exist_ok=True)
+        p = os.path.join(ADMIN_SYSTEM_DIR, 'admin_settings.json')
+        with open(p, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
+    except Exception:
+        log.exception('save_admin_settings failed')
 
 def get_active_credential():
     creds = load_credentials()
@@ -8100,16 +8126,34 @@ def credentials_delete(name):
 # New route: set active credential
 @app.route("/set_active", methods=["POST"])
 def set_active_credential():
+    wants_json = (
+        request.headers.get("X-Requested-With") in {"XMLHttpRequest", "partial-nav"}
+        or "application/json" in (request.headers.get("Accept") or "")
+    )
     name = request.form.get("active_name")
     if not name:
-        flash("Δεν έχει επιλεγεί credential", "error")
+        msg = "Δεν έχει επιλεγεί credential"
+        if wants_json:
+            return jsonify({"ok": False, "error": msg}), 400
+        flash(msg, "error")
     else:
         cred = get_cred_by_name(name)
         if not cred:
-            flash("Το credential δεν βρέθηκε", "error")
+            msg = "Το credential δεν βρέθηκε"
+            if wants_json:
+                return jsonify({"ok": False, "error": msg}), 404
+            flash(msg, "error")
         else:
             session["active_credential"] = name
-            flash(f"Το ενεργό credential ορίστηκε σε {name}", "success")
+            msg = f"Το ενεργό credential ορίστηκε σε {name}"
+            if wants_json:
+                return jsonify({
+                    "ok": True,
+                    "message": msg,
+                    "active_name": name,
+                    "vat": str(cred.get("vat") or "").strip(),
+                }), 200
+            flash(msg, "success")
     return redirect(url_for("credentials"))
 
 
@@ -8606,6 +8650,382 @@ def _get_fetch_progress_state(fetch_key: str) -> Dict[str, Any]:
         if not current:
             return {"status": "not_started", "percent": 0, "message": ""}
         return dict(current)
+
+
+bulk_fetch_progress_lock = threading.Lock()
+bulk_fetch_progress_state: Dict[str, Dict[str, Any]] = {}
+
+
+def _set_bulk_fetch_progress(job_id: str, status: str, percent: int, message: str, **extra) -> None:
+    key = str(job_id or "").strip()
+    if not key:
+        return
+    pct = max(0, min(100, int(percent or 0)))
+    payload: Dict[str, Any] = {
+        "job_id": key,
+        "status": str(status or "not_started"),
+        "percent": pct,
+        "message": str(message or ""),
+        "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    payload.update(extra or {})
+    with bulk_fetch_progress_lock:
+        prev = bulk_fetch_progress_state.get(key, {})
+        if "started_at" in prev and "started_at" not in payload:
+            payload["started_at"] = prev.get("started_at")
+        bulk_fetch_progress_state[key] = payload
+
+
+def _get_bulk_fetch_progress(job_id: str) -> Dict[str, Any]:
+    key = str(job_id or "").strip()
+    if not key:
+        return {"status": "not_started", "percent": 0, "message": ""}
+    with bulk_fetch_progress_lock:
+        cur = bulk_fetch_progress_state.get(key)
+        if not cur:
+            return {"status": "not_started", "percent": 0, "message": ""}
+        return dict(cur)
+
+
+def _is_bulk_fetch_stop_requested(job_id: str) -> bool:
+    key = str(job_id or "").strip()
+    if not key:
+        return False
+    with bulk_fetch_progress_lock:
+        cur = bulk_fetch_progress_state.get(key) or {}
+        return bool(cur.get('stop_requested', False))
+
+
+def _request_bulk_fetch_stop(job_id: str) -> bool:
+    key = str(job_id or "").strip()
+    if not key:
+        return False
+    with bulk_fetch_progress_lock:
+        cur = dict(bulk_fetch_progress_state.get(key) or {})
+        if not cur:
+            return False
+        cur['stop_requested'] = True
+        if str(cur.get('status') or '') == 'running':
+            cur['status'] = 'stopping'
+            cur['message'] = 'Ζητήθηκε διακοπή. Θα ολοκληρωθεί ο τρέχων πελάτης και δεν θα ξεκινήσει επόμενος.'
+        cur['updated_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        bulk_fetch_progress_state[key] = cur
+        return True
+
+
+def _is_active_group_admin_user() -> bool:
+    try:
+        from flask_login import current_user
+        from auth import get_active_group
+        grp = get_active_group()
+        if not grp:
+            return False
+        if not getattr(current_user, 'is_authenticated', False):
+            return False
+        return current_user.role_for_group(grp) == 'admin'
+    except Exception:
+        return False
+
+
+@app.route('/api/fetch_bulk/start', methods=['POST'])
+@login_required
+def api_fetch_bulk_start():
+    if not _is_active_group_admin_user():
+        return jsonify({'ok': False, 'error': 'Απαιτούνται δικαιώματα admin της ενεργής ομάδας.'}), 403
+
+    payload = request.get_json(silent=True) or {}
+    date_from_raw = str(payload.get('date_from') or '').strip()
+    date_to_raw = str(payload.get('date_to') or '').strip()
+    date_from_iso = normalize_input_date_to_iso(date_from_raw)
+    date_to_iso = normalize_input_date_to_iso(date_to_raw)
+    if not date_from_iso or not date_to_iso:
+        return jsonify({'ok': False, 'error': 'Παρακαλώ συμπλήρωσε έγκυρες ημερομηνίες (dd/mm/YYYY).'}), 400
+
+    selected_names = payload.get('credential_names') or []
+    if not isinstance(selected_names, list):
+        selected_names = []
+    selected_names = [str(x or '').strip() for x in selected_names if str(x or '').strip()]
+    fetch_all = bool(payload.get('all_customers', False))
+
+    creds = load_credentials() or []
+    if fetch_all:
+        targets = [c for c in creds if isinstance(c, dict) and str(c.get('name') or '').strip()]
+    else:
+        wanted = set(selected_names)
+        targets = [c for c in creds if str(c.get('name') or '').strip() in wanted]
+
+    if not targets:
+        return jsonify({'ok': False, 'error': 'Δεν βρέθηκαν πελάτες για μαζική λήψη.'}), 400
+
+    d1 = datetime.datetime.fromisoformat(date_from_iso).strftime('%d/%m/%Y')
+    d2 = datetime.datetime.fromisoformat(date_to_iso).strftime('%d/%m/%Y')
+
+    user_part = 'anon'
+    group_part = 'nogroup'
+    try:
+        from flask_login import current_user
+        from auth import get_active_group
+        user_part = str(getattr(current_user, 'id', 'anon'))
+        grp = get_active_group()
+        group_part = str(getattr(grp, 'id', 'nogroup'))
+    except Exception:
+        pass
+    job_id = f"bulk:{group_part}:{user_part}:{int(time.time())}:{secrets.token_hex(4)}"
+
+    _set_bulk_fetch_progress(
+        job_id,
+        'running',
+        1,
+        f"Εκκίνηση μαζικής λήψης για {len(targets)} πελάτες.",
+        started_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        total_customers=len(targets),
+        current_index=0,
+        current_customer='',
+        current_customer_progress=0,
+        completed_customers=0,
+        failed_customers=0,
+        results=[],
+        stop_requested=False,
+    )
+
+    group_dir = get_group_base_dir()
+    aade_user_default = os.getenv("AADE_USER_ID", AADE_USER_ENV)
+    aade_key_default = os.getenv("AADE_SUBSCRIPTION_KEY", AADE_KEY_ENV)
+
+    def _bulk_worker(_job_id: str, _targets: List[Dict[str, Any]], _d1: str, _d2: str, _group_dir: str):
+        results: List[Dict[str, Any]] = []
+        failed = 0
+        done = 0
+        total = max(1, len(_targets))
+
+        try:
+            _set_thread_group_base_dir(_group_dir)
+        except Exception:
+            pass
+
+        stopped = False
+        for idx, cred in enumerate(_targets, start=1):
+            if _is_bulk_fetch_stop_requested(_job_id):
+                stopped = True
+                break
+            name = str(cred.get('name') or '').strip()
+            vat = str(cred.get('vat') or '').strip()
+            user = str(cred.get('user') or aade_user_default or '').strip()
+            key = str(cred.get('key') or aade_key_default or '').strip()
+
+            base_pct = int(((idx - 1) / total) * 100)
+            _set_bulk_fetch_progress(
+                _job_id,
+                'running',
+                max(1, base_pct),
+                f"Εκτελείται λήψη για τον πελάτη {name} ({idx}/{total}).",
+                total_customers=total,
+                current_index=idx,
+                current_customer=name,
+                current_customer_progress=1,
+                completed_customers=done,
+                failed_customers=failed,
+                results=results,
+                stop_requested=_is_bulk_fetch_stop_requested(_job_id),
+            )
+
+            try:
+                if not user or not key:
+                    raise RuntimeError('Λείπουν credentials AADE για τον πελάτη.')
+
+                all_rows, summary_list = request_docs(
+                    date_from=_d1,
+                    date_to=_d2,
+                    mark="000000000000000",
+                    aade_user=user,
+                    aade_key=key,
+                    debug=True,
+                    save_excel=False,
+                )
+
+                added_docs = 0
+                added_summaries = 0
+                seen_marks = set()
+                total_rows = len(all_rows)
+                total_summaries = len(summary_list)
+
+                for r_idx, d in enumerate(all_rows, start=1):
+                    if vat:
+                        d['AFM_counterpart'] = vat
+                    mk = str(d.get('mark') or '').strip()
+                    if mk:
+                        seen_marks.add(mk)
+                    if append_doc_to_customer_file(d, vat):
+                        added_docs += 1
+
+                    if r_idx == 1 or r_idx == total_rows or r_idx % max(1, total_rows // 10) == 0:
+                        customer_pct = min(70, int((r_idx / max(1, total_rows)) * 70))
+                        overall_pct = int((((idx - 1) + (customer_pct / 100.0)) / total) * 100)
+                        _set_bulk_fetch_progress(
+                            _job_id,
+                            'running',
+                            max(1, overall_pct),
+                            f"Πρόοδος πελάτη {name}: {customer_pct}% | Συνολική πρόοδος: {max(1, overall_pct)}%",
+                            total_customers=total,
+                            current_index=idx,
+                            current_customer=name,
+                            current_customer_progress=customer_pct,
+                            completed_customers=done,
+                            failed_customers=failed,
+                            results=results,
+                            stop_requested=_is_bulk_fetch_stop_requested(_job_id),
+                        )
+
+                for s_idx, s in enumerate(summary_list, start=1):
+                    if append_summary_to_customer_file(s, vat):
+                        added_summaries += 1
+                    if s_idx == 1 or s_idx == total_summaries or s_idx % max(1, total_summaries // 10) == 0:
+                        customer_pct = 70 + min(25, int((s_idx / max(1, total_summaries)) * 25))
+                        overall_pct = int((((idx - 1) + (customer_pct / 100.0)) / total) * 100)
+                        _set_bulk_fetch_progress(
+                            _job_id,
+                            'running',
+                            max(1, overall_pct),
+                            f"Πρόοδος πελάτη {name}: {customer_pct}% | Συνολική πρόοδος: {max(1, overall_pct)}%",
+                            total_customers=total,
+                            current_index=idx,
+                            current_customer=name,
+                            current_customer_progress=customer_pct,
+                            completed_customers=done,
+                            failed_customers=failed,
+                            results=results,
+                            stop_requested=_is_bulk_fetch_stop_requested(_job_id),
+                        )
+
+                if vat and seen_marks:
+                    try:
+                        legacy = _is_legacy_fetch_mode_enabled()
+                        if not legacy:
+                            prune_customer_invoices(vat, seen_marks, date_from=_d1, date_to=_d2)
+                            prune_customer_summaries(vat, seen_marks, date_from=_d1, date_to=_d2)
+                    except Exception:
+                        pass
+
+                set_last_fetch_date(_get_fetch_tracking_key(name, vat))
+
+                done += 1
+                results.append({
+                    'credential': name,
+                    'vat': vat,
+                    'ok': True,
+                    'added_docs': added_docs,
+                    'added_summaries': added_summaries,
+                    'fetched_count': total_rows,
+                })
+            except Exception as ex:
+                failed += 1
+                log.exception('Bulk fetch failed for credential=%s', name)
+                results.append({
+                    'credential': name,
+                    'vat': vat,
+                    'ok': False,
+                    'error': str(ex),
+                })
+
+            end_pct = int((idx / total) * 100)
+            _set_bulk_fetch_progress(
+                _job_id,
+                'running',
+                max(1, min(99, end_pct)),
+                f"Ολοκληρώθηκε ο πελάτης {name}. Συνολική πρόοδος: {max(1, min(99, end_pct))}%",
+                total_customers=total,
+                current_index=idx,
+                current_customer=name,
+                current_customer_progress=100,
+                completed_customers=done,
+                failed_customers=failed,
+                results=results,
+                stop_requested=_is_bulk_fetch_stop_requested(_job_id),
+            )
+
+            if _is_bulk_fetch_stop_requested(_job_id):
+                stopped = True
+                break
+        if stopped:
+            final_msg = f"Η μαζική λήψη σταμάτησε μετά τον τρέχοντα πελάτη. Επιτυχίες: {done}, Αποτυχίες: {failed}."
+            _set_bulk_fetch_progress(
+                _job_id,
+                'stopped',
+                100,
+                final_msg,
+                total_customers=total,
+                current_index=done + failed,
+                current_customer='',
+                current_customer_progress=100,
+                completed_customers=done,
+                failed_customers=failed,
+                results=results,
+                stop_requested=True,
+                finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            )
+        else:
+            final_msg = f"Η μαζική λήψη ολοκληρώθηκε. Επιτυχίες: {done}, Αποτυχίες: {failed}."
+            _set_bulk_fetch_progress(
+                _job_id,
+                'completed',
+                100,
+                final_msg,
+                total_customers=total,
+                current_index=total,
+                current_customer='',
+                current_customer_progress=100,
+                completed_customers=done,
+                failed_customers=failed,
+                results=results,
+                stop_requested=False,
+                finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            )
+
+    try:
+        t = threading.Thread(target=_bulk_worker, args=(job_id, targets, d1, d2, group_dir), daemon=True)
+        t.start()
+    except Exception:
+        log.exception('Failed to start bulk fetch worker')
+        _set_bulk_fetch_progress(job_id, 'error', 100, 'Αποτυχία εκκίνησης worker μαζικής λήψης.')
+        return jsonify({'ok': False, 'error': 'Αποτυχία εκκίνησης worker μαζικής λήψης.'}), 500
+
+    return jsonify({
+        'ok': True,
+        'message': f'Ξεκίνησε μαζική λήψη για {len(targets)} πελάτες.',
+        'job_id': job_id,
+        'total_customers': len(targets),
+    }), 200
+
+
+@app.route('/api/fetch_bulk/progress', methods=['GET'])
+@login_required
+def api_fetch_bulk_progress():
+    if not _is_active_group_admin_user():
+        return jsonify({'ok': False, 'error': 'Απαιτούνται δικαιώματα admin της ενεργής ομάδας.'}), 403
+    job_id = str(request.args.get('job_id') or '').strip()
+    if not job_id:
+        return jsonify({'ok': False, 'error': 'Missing job_id'}), 400
+    state = _get_bulk_fetch_progress(job_id)
+    state['ok'] = True
+    return jsonify(state), 200
+
+
+@app.route('/api/fetch_bulk/stop', methods=['POST'])
+@login_required
+def api_fetch_bulk_stop():
+    if not _is_active_group_admin_user():
+        return jsonify({'ok': False, 'error': 'Απαιτούνται δικαιώματα admin της ενεργής ομάδας.'}), 403
+    payload = request.get_json(silent=True) or {}
+    job_id = str(payload.get('job_id') or '').strip()
+    if not job_id:
+        return jsonify({'ok': False, 'error': 'Missing job_id'}), 400
+    if not _request_bulk_fetch_stop(job_id):
+        return jsonify({'ok': False, 'error': 'Η εργασία δεν βρέθηκε ή δεν είναι ενεργή.'}), 404
+    return jsonify({
+        'ok': True,
+        'message': 'Η διακοπή ζητήθηκε. Θα ολοκληρωθεί ο τρέχων πελάτης και δεν θα ξεκινήσει επόμενος.',
+        'job_id': job_id,
+    }), 200
 
 @app.route('/api/global_notifications', methods=['GET'])
 def api_global_notifications():
@@ -15445,7 +15865,8 @@ def admin_settings():
 @_require_admin
 def admin_settings_save():
     form = request.form or {}
-    settings = load_settings()
+    # Global admin settings — stored in data/system/admin_settings.json
+    settings = load_admin_settings()
     settings['site_title'] = form.get('site_title')
     
     # Save email provider setting
@@ -15472,7 +15893,7 @@ def admin_settings_save():
         schedule_minutes = 5
     settings['firebase_backup_schedule_minutes'] = schedule_minutes
     
-    save_settings(settings)
+    save_admin_settings(settings)
     flash('Settings saved', 'success')
     return redirect(url_for('admin_settings'))
 
@@ -15598,10 +16019,6 @@ def api_admin_firebase_sync_settings():
 
     if request.method == 'GET':
         try:
-            settings = load_settings() or {}
-        except Exception:
-            settings = {}
-        try:
             sync_cfg = utils.get_firebase_backup_sync_settings() or {}
         except Exception:
             logger.exception('Failed to read firebase sync settings; using defaults')
@@ -15676,14 +16093,14 @@ def api_admin_firebase_sync_settings():
             interval = schedule_value
         smart_sync = bool(payload.get('smart_sync', True))
 
-        settings = load_settings() or {}
+        settings = load_admin_settings() or {}
         settings['firebase_backup_sync_mode'] = mode
         settings['firebase_backup_schedule_seconds'] = interval
         settings['firebase_backup_schedule_minutes'] = max(5, int((interval + 59) // 60))
         settings['firebase_backup_schedule_unit'] = schedule_unit
         settings['firebase_backup_schedule_value'] = schedule_value
         settings['firebase_smart_sync_enabled'] = smart_sync
-        save_settings(settings)
+        save_admin_settings(settings)
         
         # Update environment (in-memory and .env file)
         os.environ['FIREBASE_SYNC_MODE'] = mode
@@ -15967,6 +16384,14 @@ def _firebase_backup_scheduler_loop():
                             continue
 
                         log.info('Scheduled Firebase backup sync start for group=%s (interval=%ss)', group_name, interval_secs)
+                        group_data_path = os.path.join(BASE_DIR, 'data', group_folder)
+                        # If the group data folder is missing or empty, pull from Firebase first
+                        if not os.path.exists(group_data_path) or not os.listdir(group_data_path):
+                            log.info('Group data folder missing/empty for group=%s — pulling from Firebase first', group_name)
+                            try:
+                                firebase_config.firebase_pull_group_to_local(group_name)
+                            except Exception:
+                                log.exception('Initial Firebase pull failed for group=%s', group_name)
                         push_ok = bool(firebase_config.firebase_push_group_files(group_name, dry_run=False, verbose=False))
                         pull_ok = bool(firebase_config.firebase_pull_group_to_local(group_name))
                         _firebase_backup_last_run[group_name] = time.time()

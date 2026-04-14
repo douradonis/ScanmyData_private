@@ -7,7 +7,7 @@ curl -v \
 
   
 page tour
-
-☁️ Firebase Sync Settings
- δεν φερνει τις αποθηκευμενες σωστα προσυμπληρωμενες (ενω το 📧 Email Provider Configuration
-τα φερνει σωστα, καντο να κανει fetch τις ρυθμισεις του sync οπως εδω)
+flash messages modernization, 
+πιστοποιηση λειτουργιας αυτοματου logout
+διαρκεια flash message ορισμου ενεργου πελατη
+σωστα prompt για επιλογη ομαδας και ενεργου πελατη
