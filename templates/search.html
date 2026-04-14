@@ -2189,6 +2189,7 @@ function rcReloadAfterWarning(){
 function rcHandleWarningAcknowledge(){
   rcRememberSearchClear();
   rcClearWarningSearchFields();
+  try { if (typeof clearReceiptSearchCacheOnClose === 'function') clearReceiptSearchCacheOnClose(); } catch(_) {}
   setTimeout(rcReloadAfterWarning, 80);
 }
 
@@ -11653,6 +11654,7 @@ document.addEventListener('click', function(e){
     if (hUrl) hUrl.value = '';
     if (hCat) hCat.value = '';
     if (sumJs) sumJs.value = '{}';
+    try { if (typeof clearReceiptSearchCacheOnClose === 'function') clearReceiptSearchCacheOnClose(); } catch(_) {}
   }
 
   function clearUrlFlags() {

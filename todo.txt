@@ -7,7 +7,3 @@ curl -v \
 
   
 page tour
-flash messages modernization, 
-πιστοποιηση λειτουργιας αυτοματου logout
-διαρκεια flash message ορισμου ενεργου πελατη
-σωστα prompt για επιλογη ομαδας και ενεργου πελατη

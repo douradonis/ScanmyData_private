@@ -1071,8 +1071,10 @@ def select_group():
         flash('Δεν έχετε πρόσβαση στην ομάδα.', 'error')
         return redirect(url_for('auth.list_groups')), 403
 
-    # Set active group
+    # Set active group and force explicit customer selection for this group.
     session['active_group'] = grp.name
+    session.pop('active_credential', None)
+    session.pop('_remote_qr_owner', None)
     current_app.logger.info(f'Ο χρήστης {current_user.username} επέλεξε την ομάδα {group_name}')
     
     # Automatically download group data from Firebase (lazy-pull)
@@ -1092,10 +1094,15 @@ def select_group():
     
     # Return JSON for AJAX requests, redirect for form submissions
     if request.is_json:
-        return jsonify({'ok': True, 'message': f'Επιλέχθηκε η ομάδα: {grp.name}', 'data_folder': getattr(grp, 'data_folder', None)}), 200
+        return jsonify({
+            'ok': True,
+            'message': f'Επιλέχθηκε η ομάδα: {grp.name}. Επίλεξε πελάτη για να συνεχίσεις.',
+            'data_folder': getattr(grp, 'data_folder', None),
+            'redirect_url': url_for('credentials')
+        }), 200
     else:
-        flash(f'Επιλέχθηκε η ομάδα: {grp.name}', 'info')
-        return redirect(url_for('auth.list_groups'))
+        flash(f'Επιλέχθηκε η ομάδα: {grp.name}. Επίλεξε πελάτη για να συνεχίσεις.', 'info')
+        return redirect(url_for('credentials'))
 
 
 # --- JSON API endpoints for frontend-driven login/logout/status ---

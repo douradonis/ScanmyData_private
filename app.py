@@ -940,6 +940,8 @@ ALLOWED_CLIENT_EXT = {'.xlsx', '.xls', '.csv'}
 app = Flask(__name__, template_folder=TEMPLATES_DIR)
 app.secret_key = os.getenv("FLASK_SECRET", "douradonis1997")
 app.config["UPLOAD_FOLDER"] = UPLOADS_DIR
+# Keep backend inactivity timeout aligned with frontend timeout.
+app.config.setdefault('SESSION_TIMEOUT_SECONDS', int(os.getenv('SESSION_TIMEOUT_SECONDS', '900')))
 
 # --- Initialize Logger ---
 logger = logging.getLogger(__name__)
@@ -1399,6 +1401,10 @@ def session_heartbeat():
         from flask_login import current_user
         from flask import session as _session
         from models import db as _db
+        # Ignore automatic background polling endpoints; they should not count as user activity.
+        path = (request.path or '')
+        if path in ('/api/global_notifications', '/api/fetch_progress', '/api/last_fetch_date'):
+            return None
         if not getattr(current_user, 'is_authenticated', False):
             return None
         sid = _session.get('session_id')
@@ -11416,7 +11422,10 @@ def save_epsilon():
     """
     active_cred = get_active_credential_from_session()
     if not active_cred:
-        flash("Δεν υπάρχει ενεργός πελάτης για αποθήκευση.", "error")
+        if not session.get('active_group'):
+            flash("Δεν έχει επιλεγεί ενεργή ομάδα. Επίλεξε πρώτα ομάδα.", "error")
+        else:
+            flash("Δεν υπάρχει ενεργός πελάτης για αποθήκευση.", "error")
         return redirect(url_for("search"))
 
     vat = active_cred.get("vat")
@@ -11955,7 +11964,12 @@ def save_summary():
     if not vat:
         log.error("save_summary: missing vat - active=%s summary_afm=%s", bool(active), summary.get("AFM"))
         if not is_ajax_save:
-            flash("Δεν έχει επιλεγεί ενεργός πελάτης (ΑΦΜ)", "error")
+            if not session.get('active_group'):
+                flash("Δεν έχει επιλεγεί ενεργή ομάδα. Επίλεξε πρώτα ομάδα.", "error")
+            else:
+                flash("Δεν έχει επιλεγεί ενεργός πελάτης (ΑΦΜ)", "error")
+        if not session.get('active_group'):
+            return _save_summary_response(ok=False, error="Δεν έχει επιλεγεί ενεργή ομάδα. Επίλεξε πρώτα ομάδα.", status=400)
         return _save_summary_response(ok=False, error="Δεν έχει επιλεγεί ενεργός πελάτης (ΑΦΜ)", status=400)
     
     # If active credential is not set (or missing book_category), try to load from vat
