@@ -215,7 +215,7 @@
     
     #flashContainer {
       position: fixed;
-      top: 1rem;
+      top: calc(env(safe-area-inset-top, 0px) + 8.75rem);
       right: 1rem;
       z-index: 100120;
       width: min(92vw, 380px);
@@ -224,6 +224,14 @@
       flex-direction: column;
       gap: 0.5rem;
       pointer-events: none;
+    }
+    @media (max-width: 768px) {
+      #flashContainer {
+        top: calc(env(safe-area-inset-top, 0px) + 7.75rem);
+        right: 0.75rem;
+        left: 0.75rem;
+        width: auto;
+      }
     }
     #flashContainer .flash-banner {
       pointer-events: auto;
@@ -2050,7 +2058,7 @@
     </header>
 
     <!-- Side Menu (toggleable) -->
-    <div id="sideMenu" class="fixed inset-y-0 right-0 w-72 bg-white shadow-lg z-50 overflow-y-auto transform translate-x-full transition-transform duration-300 ease-in-out">
+    <div id="sideMenu" class="hidden fixed inset-y-0 right-0 w-72 bg-white shadow-lg z-50 overflow-y-auto transform translate-x-full transition-transform duration-300 ease-in-out">
       <div class="p-6 space-y-6">
         <!-- Header -->
         <div class="flex justify-between items-center">
@@ -2103,7 +2111,7 @@
     </div>
 
     <!-- Side Menu Overlay (uses backdrop blur) -->
-    <div id="sideMenuOverlay" class="fixed inset-0 bg-black/10 backdrop-blur-sm opacity-0 invisible z-40 transition-all duration-300"></div>
+    <div id="sideMenuOverlay" class="hidden fixed inset-0 bg-black/10 backdrop-blur-sm opacity-0 invisible z-40 transition-all duration-300"></div>
 
     <!-- Flash Messages Container (always present for JavaScript to use) -->
     <div class="space-y-2 mb-4" id="flashContainer">
@@ -2256,8 +2264,13 @@
 
         const pct = Math.max(0, Math.min(100, Number(state.percent || 0)));
         const msg = String(state.message || '').trim();
+        const credential = String(state.credential || '').trim();
+        const vat = String(state.vat || '').trim();
+        const who = (credential || vat)
+          ? (' [' + [credential, vat].filter(Boolean).join(' - ') + ']')
+          : '';
         const baseText = 'Πρόοδος λήψης: ' + pct + '%';
-        const fullText = msg ? (baseText + ' — ' + msg) : baseText;
+        const fullText = msg ? (baseText + who + ' — ' + msg) : (baseText + who);
 
         if (status === 'running') {
           el.className = 'flash-banner flash-info';
@@ -3234,11 +3247,37 @@
 
       if (!sideMenu || !sideMenuToggle) return;
 
+      function openMenu() {
+        sideMenu.classList.remove('hidden');
+        sideMenuOverlay && sideMenuOverlay.classList.remove('hidden');
+        requestAnimationFrame(function() {
+          sideMenu.classList.remove('translate-x-full');
+          sideMenuOverlay && sideMenuOverlay.classList.remove('opacity-0', 'invisible');
+        });
+      }
+
+      function closeMenu() {
+        sideMenu.classList.add('translate-x-full');
+        if (sideMenuOverlay) {
+          sideMenuOverlay.classList.add('opacity-0', 'invisible');
+        }
+        setTimeout(function() {
+          if (sideMenu.classList.contains('translate-x-full')) {
+            sideMenu.classList.add('hidden');
+          }
+          if (sideMenuOverlay && sideMenuOverlay.classList.contains('opacity-0') && sideMenuOverlay.classList.contains('invisible')) {
+            sideMenuOverlay.classList.add('hidden');
+          }
+        }, 320);
+      }
+
       // Toggle side menu open/close (right-side menu)
       function toggleMenu() {
-        sideMenu.classList.toggle('translate-x-full');
-        sideMenuOverlay.classList.toggle('opacity-0');
-        sideMenuOverlay.classList.toggle('invisible');
+        if (sideMenu.classList.contains('translate-x-full') || sideMenu.classList.contains('hidden')) {
+          openMenu();
+        } else {
+          closeMenu();
+        }
       }
 
       if (sideMenuToggle && sideMenuToggle.dataset.menuBound !== '1') {

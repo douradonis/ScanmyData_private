@@ -54,19 +54,7 @@
     </div>
   </div>
 
-  <!-- Flash area for fetch messages -->
-  {% if error %}
-    <div class="flash-banner flash-error mb-4 relative px-4 py-2 rounded-lg bg-red-100 text-red-800">
-      {{ error }}
-      <button type="button" class="absolute top-1 right-2 text-red-800 hover:text-red-900 font-bold" onclick="this.parentElement.remove()">×</button>
-    </div>
-  {% endif %}
-  {% if message %}
-    <div class="flash-banner flash-success mb-4 relative px-4 py-2 rounded-lg bg-green-100 text-green-800">
-      {{ message }}
-      <button type="button" class="absolute top-1 right-2 text-green-800 hover:text-green-900 font-bold" onclick="this.parentElement.remove()">×</button>
-    </div>
-  {% endif %}
+  <!-- Fetch page uses only global top-right flash toasts (see base #flashContainer). -->
 
   <div class="bg-white rounded-2xl shadow p-6 mb-6" style="position:relative;">
         {% if not active_credential and user_role != 'admin' %}
@@ -78,7 +66,7 @@
       <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div class="flex flex-col">
           <label for="use_credential" class="text-sm font-medium text-gray-700 mb-2">Χρήση Credential</label>
-          <select id="use_credential" name="use_credential" class="border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-sky-300">
+          <select id="use_credential" name="use_credential" class="border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-sky-300" {% if not active_credential %}disabled title="Δεν υπάρχει ενεργός πελάτης"{% endif %}>
             <option value="">-- Επιλογή --</option>
             {% for c in credentials %}
               {%- set selected_val = (request.form.get('use_credential') == c.name) or (not request.form.get('use_credential') and active_credential == c.name) -%}
@@ -121,6 +109,16 @@
           <h3 class="text-base font-semibold text-sky-900">Μαζική Λήψη Παραστατικών (Admin)</h3>
           
         </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-3">
+          <div class="flex flex-col">
+            <label for="bulk_date_from" class="text-sm font-medium text-gray-700 mb-2">Από (dd/mm/yyyy)</label>
+            <input id="bulk_date_from" name="bulk_date_from" type="text" value="{{ default_from or '' }}" placeholder="dd/mm/yyyy" class="border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-sky-300" required>
+          </div>
+          <div class="flex flex-col">
+            <label for="bulk_date_to" class="text-sm font-medium text-gray-700 mb-2">Έως (dd/mm/yyyy)</label>
+            <input id="bulk_date_to" name="bulk_date_to" type="text" value="{{ default_to or '' }}" placeholder="dd/mm/yyyy" class="border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-sky-300" required>
+          </div>
+        </div>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div class="flex flex-col">
             <label for="bulkFetchCustomerList" class="text-sm font-medium text-gray-700 mb-2">Επιλεγμένοι πελάτες (όταν δεν είναι όλοι)</label>
@@ -142,7 +140,7 @@
             <button id="bulkFetchStartBtn" type="button" class="bg-sky-600 hover:bg-sky-700 text-white font-semibold py-2 px-4 rounded-lg shadow">Εκκίνηση Μαζικής Λήψης</button>
             <button id="bulkFetchStopBtn" type="button" class="bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-lg shadow" disabled>Διακοπή Μαζικής Λήψης</button>
             <div id="bulkFetchStatus" class="text-sm text-indigo-800"></div>
-            <div class="text-xs text-gray-600">Θα χρησιμοποιηθεί το ίδιο ημερομηνιακό διάστημα από τα πεδία «Από / Έως».</div>
+            <div class="text-xs text-gray-600">Η μαζική λήψη χρησιμοποιεί το παραπάνω δικό της διάστημα «Από / Έως».</div>
           </div>
         </div>
       </div>
@@ -288,13 +286,19 @@
   function initDateInputs() {
     const fromInput = document.getElementById('date_from');
     const toInput = document.getElementById('date_to');
+    const bulkFromInput = document.getElementById('bulk_date_from');
+    const bulkToInput = document.getElementById('bulk_date_to');
     bindManualDateMask(fromInput);
     bindManualDateMask(toInput);
+    bindManualDateMask(bulkFromInput);
+    bindManualDateMask(bulkToInput);
   }
 
   function initFlatpickrIfAvailable() {
     const fromInput = document.getElementById('date_from');
     const toInput = document.getElementById('date_to');
+    const bulkFromInput = document.getElementById('bulk_date_from');
+    const bulkToInput = document.getElementById('bulk_date_to');
     if (!fromInput || !toInput || typeof window.flatpickr !== 'function') return false;
 
     try {
@@ -304,12 +308,16 @@
       fetchFlatpickrInstances = [];
       if (fromInput._flatpickr) fromInput._flatpickr.destroy();
       if (toInput._flatpickr) toInput._flatpickr.destroy();
+      if (bulkFromInput && bulkFromInput._flatpickr) bulkFromInput._flatpickr.destroy();
+      if (bulkToInput && bulkToInput._flatpickr) bulkToInput._flatpickr.destroy();
     } catch (_) {}
 
     try {
       const fromPicker = window.flatpickr(fromInput, { locale: 'el', dateFormat: 'd/m/Y', allowInput: true });
       const toPicker = window.flatpickr(toInput, { locale: 'el', dateFormat: 'd/m/Y', allowInput: true });
-      fetchFlatpickrInstances = [fromPicker, toPicker].filter(Boolean);
+      const bulkFromPicker = bulkFromInput ? window.flatpickr(bulkFromInput, { locale: 'el', dateFormat: 'd/m/Y', allowInput: true }) : null;
+      const bulkToPicker = bulkToInput ? window.flatpickr(bulkToInput, { locale: 'el', dateFormat: 'd/m/Y', allowInput: true }) : null;
+      fetchFlatpickrInstances = [fromPicker, toPicker, bulkFromPicker, bulkToPicker].filter(Boolean);
       fetchFlatpickrInstances.forEach(function(instance) {
         if (instance && instance.calendarContainer) {
           instance.calendarContainer.dataset.fetchFlatpickrOwned = '1';
@@ -428,29 +436,37 @@
   }
 
   function upsertFetchProgressFlash(message, percent, type) {
-    const host = document.querySelector('.max-w-14xl');
-    if (!host) return;
-
-    let flash = document.getElementById('fetchProgressFlash');
-    if (!flash) {
-      flash = document.createElement('div');
-      flash.id = 'fetchProgressFlash';
-      flash.className = 'flash-banner mb-4 relative px-4 py-2 rounded-lg';
-      host.insertBefore(flash, host.firstChild);
-    }
-
-    const tone = type === 'error'
-      ? 'flash-error bg-red-100 text-red-800'
-      : (type === 'success' ? 'flash-success bg-green-100 text-green-800' : 'bg-sky-100 text-sky-800');
-    flash.className = 'flash-banner mb-4 relative px-4 py-2 rounded-lg ' + tone;
-
     const pct = Math.max(0, Math.min(100, Number(percent || 0)));
-    flash.textContent = 'Πρόοδος λήψης: ' + pct + '% — ' + (message || 'Σε εξέλιξη...');
+    const credential = String(credentialSelect?.value || '').trim();
+    const vat = String((document.getElementById('vat_input')?.value || '')).trim();
+    const who = (credential || vat)
+      ? (' [' + [credential, vat].filter(Boolean).join(' - ') + ']')
+      : '';
+    const fullMessage = 'Πρόοδος λήψης: ' + pct + '%' + who + ' — ' + (message || 'Σε εξέλιξη...');
+
+    try {
+      const globalProgress = document.getElementById('globalFetchProgressFlash');
+      if (globalProgress) {
+        const t = (type === 'error') ? 'flash-error' : ((type === 'success') ? 'flash-success' : 'flash-info');
+        globalProgress.className = 'flash-banner ' + t;
+        globalProgress.setAttribute('data-ttl', type === 'info' ? '0' : '9000');
+        globalProgress.textContent = fullMessage;
+        return;
+      }
+      if (typeof window.showFlash === 'function') {
+        // TTL=0 for running progress: stays visible and gets replaced by next update.
+        window.showFlash(fullMessage, type || 'info', 0);
+      }
+    } catch(_) {}
   }
 
   function clearFetchProgressFlash() {
-    const flash = document.getElementById('fetchProgressFlash');
-    if (flash) flash.remove();
+    try {
+      const flash = document.getElementById('fetchProgressFlash');
+      if (flash) flash.remove();
+      const global = document.getElementById('globalFetchProgressFlash');
+      if (global) global.remove();
+    } catch(_) {}
   }
 
   function getFetchProgressQuery() {
@@ -655,25 +671,18 @@
   }
 
   function showFetchFlash(message, type) {
-    const host = document.querySelector('.max-w-14xl');
-    if (!host) return;
-
-    const existing = document.getElementById('fetchAjaxFlash');
-    if (existing) existing.remove();
-
-    const flash = document.createElement('div');
-    flash.id = 'fetchAjaxFlash';
-    flash.className = 'flash-banner mb-4 relative px-4 py-2 rounded-lg ' + (type === 'error' ? 'flash-error' : 'flash-success');
-    flash.textContent = message;
-
-    const closeBtn = document.createElement('button');
-    closeBtn.type = 'button';
-    closeBtn.className = 'absolute top-1 right-2 font-bold';
-    closeBtn.textContent = '×';
-    closeBtn.addEventListener('click', () => flash.remove());
-    flash.appendChild(closeBtn);
-
-    host.insertBefore(flash, host.firstChild);
+    if (!message) return;
+    const credential = String(credentialSelect?.value || '').trim();
+    const vat = String((document.getElementById('vat_input')?.value || '')).trim();
+    const who = (credential || vat)
+      ? (' [' + [credential, vat].filter(Boolean).join(' - ') + ']')
+      : '';
+    const fullMessage = String(message) + who;
+    try {
+      if (typeof window.showFlash === 'function') {
+        window.showFlash(fullMessage, type === 'error' ? 'error' : 'success', 7000);
+      }
+    } catch(_) {}
   }
   
   async function lockCredentialToActive() {
@@ -847,15 +856,15 @@
 
   if (bulkFetchStartBtn) {
     bulkFetchStartBtn.addEventListener('click', async function(){
-      const fromInput = document.getElementById('date_from');
-      const toInput = document.getElementById('date_to');
-      const dateFrom = String((fromInput && fromInput.value) || '').trim();
-      const dateTo = String((toInput && toInput.value) || '').trim();
+      const bulkFromInput = document.getElementById('bulk_date_from');
+      const bulkToInput = document.getElementById('bulk_date_to');
+      const dateFrom = String((bulkFromInput && bulkFromInput.value) || '').trim();
+      const dateTo = String((bulkToInput && bulkToInput.value) || '').trim();
       const selectedNames = getSelectedBulkCustomers();
 
       if (!dateFrom || !dateTo) {
-        setBulkStatusText('Συμπλήρωσε ημερομηνίες Από/Έως πριν τη μαζική λήψη.');
-        upsertFetchProgressFlash('Συμπλήρωσε ημερομηνίες Από/Έως πριν τη μαζική λήψη.', 1, 'error');
+        setBulkStatusText('Συμπλήρωσε τις ημερομηνίες της μαζικής λήψης (Από/Έως) πριν την εκκίνηση.');
+        upsertFetchProgressFlash('Συμπλήρωσε τις ημερομηνίες της μαζικής λήψης (Από/Έως) πριν την εκκίνηση.', 1, 'error');
         return;
       }
       if (!selectedNames.length) {
@@ -963,15 +972,7 @@
 
   render();
 
-  // Auto fade-out flash banners after 5 seconds
-  const flashBanners = document.querySelectorAll('.flash-banner');
-  flashBanners.forEach(b => {
-    setTimeout(() => {
-      b.style.transition = "opacity 0.8s ease";
-      b.style.opacity = "0";
-      setTimeout(()=>b.remove(), 800);
-    }, 5000);
-  });
+  // No local fade-out needed: global flash lifecycle is handled centrally in base.html.
 
   // Show wait overlay when the fetch form is submitted
   if (fetchForm && waitOverlay) {

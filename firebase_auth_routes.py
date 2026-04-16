@@ -772,7 +772,7 @@ def api_sync_pull():
     if not group:
         return jsonify({'success': False, 'error': 'no_group_provided'}), 400
     try:
-        ok = firebase_config.firebase_pull_group_to_local(group)
+        ok = firebase_config.firebase_pull_group_to_local(group, force=True)
         return jsonify({'success': bool(ok)})
     except Exception as e:
         logger.exception('api_sync_pull failed')

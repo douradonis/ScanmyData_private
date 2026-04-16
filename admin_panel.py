@@ -1318,6 +1318,81 @@ def admin_get_activity_logs(group_name: Optional[str] = None, limit: int = 100) 
         else:
             # Get all activity logs from all groups
             all_logs = []
+            scanned_local_folders = set()
+
+            def _append_local_folder_logs(folder_name: str):
+                try:
+                    import os, json
+                    if not folder_name:
+                        return
+                    folder_name = str(folder_name).strip()
+                    if not folder_name or folder_name in scanned_local_folders:
+                        return
+                    scanned_local_folders.add(folder_name)
+
+                    group_dir = os.path.join(os.getcwd(), 'data', folder_name)
+                    activity_jsonl = os.path.join(group_dir, 'activity.log.jsonl')
+                    activity_path = os.path.join(group_dir, 'activity.log')
+                    if os.path.exists(activity_jsonl):
+                        with open(activity_jsonl, 'r', encoding='utf-8') as fh:
+                            for line in fh:
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                try:
+                                    parsed = json.loads(line)
+                                except Exception:
+                                    parsed = None
+                                if parsed and isinstance(parsed, dict):
+                                    if not parsed.get('group'):
+                                        parsed['group'] = folder_name
+                                    all_logs.append(parsed)
+                                    continue
+                    elif os.path.exists(activity_path):
+                        with open(activity_path, 'r', encoding='utf-8') as fh:
+                            for line in fh:
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                parsed = None
+                                try:
+                                    parsed = json.loads(line)
+                                except Exception:
+                                    parsed = None
+
+                                if parsed and isinstance(parsed, dict):
+                                    if not parsed.get('group'):
+                                        parsed['group'] = folder_name
+                                    all_logs.append(parsed)
+                                    continue
+
+                                try:
+                                    if ' - ' in line:
+                                        ts_part, msg_part = line.split(' - ', 1)
+                                        entry = {
+                                            'timestamp': ts_part.strip(),
+                                            'group': folder_name,
+                                            'action': 'log_message',
+                                            'details': {'message': msg_part.strip()}
+                                        }
+                                        all_logs.append(entry)
+                                        continue
+                                except Exception:
+                                    pass
+
+                                try:
+                                    entry = {
+                                        'timestamp': '',
+                                        'group': folder_name,
+                                        'action': 'log_message',
+                                        'details': {'message': line}
+                                    }
+                                    all_logs.append(entry)
+                                except Exception:
+                                    continue
+                except Exception:
+                    pass
+
             try:
                 # First try to get the old format (flat structure)
                 old_logs = firebase_config.firebase_read_data('/activity_logs') or {}
@@ -1347,73 +1422,26 @@ def admin_get_activity_logs(group_name: Optional[str] = None, limit: int = 100) 
 
                         # Also include local `data/<folder>/activity.log.jsonl` (preferred) or legacy `activity.log` as a fallback
                         try:
-                            import os, json
-                            group_dir = os.path.join(os.getcwd(), 'data', folder_name)
-                            activity_jsonl = os.path.join(group_dir, 'activity.log.jsonl')
-                            activity_path = os.path.join(group_dir, 'activity.log')
-                            if os.path.exists(activity_jsonl):
-                                with open(activity_jsonl, 'r', encoding='utf-8') as fh:
-                                    for line in fh:
-                                        line = line.strip()
-                                        if not line:
-                                            continue
-                                        try:
-                                            parsed = json.loads(line)
-                                        except Exception:
-                                            parsed = None
-                                        if parsed and isinstance(parsed, dict):
-                                            if not parsed.get('group'):
-                                                parsed['group'] = folder_name
-                                            all_logs.append(parsed)
-                                            continue
-                            elif os.path.exists(activity_path):
-                                with open(activity_path, 'r', encoding='utf-8') as fh:
-                                    for line in fh:
-                                        line = line.strip()
-                                        if not line:
-                                            continue
-                                        parsed = None
-                                        try:
-                                            parsed = json.loads(line)
-                                        except Exception:
-                                            parsed = None
-
-                                        if parsed and isinstance(parsed, dict):
-                                            # Ensure group key is present
-                                            if not parsed.get('group'):
-                                                parsed['group'] = folder_name
-                                            all_logs.append(parsed)
-                                            continue
-
-                                        # Fallback: parse 'TIMESTAMP - message' pattern
-                                        try:
-                                            if ' - ' in line:
-                                                ts_part, msg_part = line.split(' - ', 1)
-                                                entry = {
-                                                    'timestamp': ts_part.strip(),
-                                                    'group': folder_name,
-                                                    'action': 'log_message',
-                                                    'details': {'message': msg_part.strip()}
-                                                }
-                                                all_logs.append(entry)
-                                                continue
-                                        except Exception:
-                                            pass
-
-                                        # Last resort: raw line as message
-                                        try:
-                                            entry = {
-                                                'timestamp': '',
-                                                'group': folder_name,
-                                                'action': 'log_message',
-                                                'details': {'message': line}
-                                            }
-                                            all_logs.append(entry)
-                                        except Exception:
-                                            continue
+                            _append_local_folder_logs(folder_name)
                         except Exception:
                             # non-fatal: continue
                             pass
+
+                # Also include local folders that are not registered in Group DB
+                # (e.g. __admin__, system, legacy/adhoc group folders).
+                try:
+                    import os
+                    data_root = os.path.join(os.getcwd(), 'data')
+                    if os.path.isdir(data_root):
+                        for entry_name in os.listdir(data_root):
+                            folder_path = os.path.join(data_root, entry_name)
+                            if not os.path.isdir(folder_path):
+                                continue
+                            if entry_name.startswith('.'):
+                                continue
+                            _append_local_folder_logs(entry_name)
+                except Exception:
+                    pass
             except Exception as e:
                 logger.debug(f"Could not read new format logs: {e}")
 

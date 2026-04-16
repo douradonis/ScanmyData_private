@@ -7,3 +7,4 @@ curl -v \
 
   
 page tour
+enforce firebase_sync_settings_updated γιατι δεν λειτουργει σωστα

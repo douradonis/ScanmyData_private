@@ -535,7 +535,15 @@ async function loadStats() {
 
 async function loadRecentActivity() {
   try {
-    const response = await fetch('/api/admin/activity-logs?limit=5');
+    const bust = Date.now();
+    const response = await fetch('/api/admin/activity-logs?limit=5&_ts=' + encodeURIComponent(String(bust)), {
+      cache: 'no-store',
+      credentials: 'same-origin',
+      headers: {
+        'Accept': 'application/json',
+        'Cache-Control': 'no-cache'
+      }
+    });
     const data = await response.json();
     const container = document.getElementById('recent-activity');
     
@@ -560,8 +568,10 @@ async function loadRecentActivity() {
     };
 
     container.innerHTML = data.logs.map(log => {
-      const userLabel = log.user ? (actionTranslations[log.user] || log.user) : 'Σύστημα';
-      const actionLabel = actionTranslations[log.action] || log.action;
+      const rawUser = log.user_email || log.user_username || log.user_id || log.user || 'system';
+      const userLabel = actionTranslations[rawUser] || rawUser;
+      const rawAction = log.summary || log.action || '-';
+      const actionLabel = actionTranslations[rawAction] || rawAction;
       return `
       <div class="p-3 border rounded bg-gray-50">
         <div class="text-xs text-gray-500">${log.timestamp || '-'}</div>
@@ -584,7 +594,14 @@ let versionPollTimer = null;
 
 async function pollActivityVersion() {
   try {
-    const res = await fetch('/admin/api/activity/version');
+    const res = await fetch('/admin/api/activity/version?_ts=' + encodeURIComponent(String(Date.now())), {
+      cache: 'no-store',
+      credentials: 'same-origin',
+      headers: {
+        'Accept': 'application/json',
+        'Cache-Control': 'no-cache'
+      }
+    });
     const data = await res.json();
     if (!data || !data.success) return;
     const ver = parseInt(data.version || 0, 10);
@@ -992,7 +1009,14 @@ async function loadActivity() {
       }
     }
     
-    const response = await fetch('/api/admin/activity-logs?limit=500');
+    const response = await fetch('/api/admin/activity-logs?limit=500&_ts=' + encodeURIComponent(String(Date.now())), {
+      cache: 'no-store',
+      credentials: 'same-origin',
+      headers: {
+        'Accept': 'application/json',
+        'Cache-Control': 'no-cache'
+      }
+    });
     const data = await response.json();
     
     if (!data.logs) {

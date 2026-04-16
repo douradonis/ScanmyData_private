@@ -2,6 +2,7 @@
 Firebase configuration and initialization module
 """
 import os
+import re
 import json
 import logging
 from typing import Optional, Dict, Any
@@ -30,6 +31,576 @@ import threading
 from typing import List, Dict
 import encryption
 import math
+
+
+_firebase_pull_activity_lock = threading.Lock()
+_firebase_bootstrap_pull_lock = threading.Lock()
+_LOCAL_PAYLOAD_STATE_FILENAME = '.payload_state.json'
+
+
+def _firebase_pull_activity_state_path() -> str:
+    return os.path.join(os.getcwd(), 'data', '.firebase_pull_activity_state.json')
+
+
+def _should_log_firebase_pull_activity(group_name: str, bytes_downloaded: int, files_created: int, files_failed: int) -> bool:
+    """Decide whether a firebase_pull activity entry should be recorded.
+
+    Reduces activity-log flood by deduplicating frequent pull entries per group,
+    persisted on disk so it works across multiple processes/workers.
+    """
+    try:
+        group_key = str(group_name or '').strip() or '__unknown__'
+        bytes_downloaded = int(bytes_downloaded or 0)
+        files_created = int(files_created or 0)
+        files_failed = int(files_failed or 0)
+
+        # Skip completely empty successful pulls.
+        if bytes_downloaded <= 0 and files_created <= 0 and files_failed <= 0:
+            return False
+
+        try:
+            env_interval = int(os.getenv('FIREBASE_SYNC_INTERVAL') or '3600')
+        except Exception:
+            env_interval = 3600
+
+        # Keep at least 1 hour between identical group pull activity entries.
+        min_interval = max(3600, env_interval)
+        if files_failed > 0:
+            # Allow faster visibility for failing pulls.
+            min_interval = min(min_interval, 900)
+
+        now_ts = int(time.time())
+        state_path = _firebase_pull_activity_state_path()
+
+        with _firebase_pull_activity_lock:
+            state = {}
+            try:
+                if os.path.exists(state_path):
+                    with open(state_path, 'r', encoding='utf-8') as fh:
+                        loaded = json.load(fh)
+                        if isinstance(loaded, dict):
+                            state = loaded
+            except Exception:
+                state = {}
+
+            entry = state.get(group_key) if isinstance(state.get(group_key), dict) else {}
+            last_ts = int(entry.get('ts') or 0)
+
+            if last_ts and (now_ts - last_ts) < min_interval:
+                return False
+
+            state[group_key] = {
+                'ts': now_ts,
+                'bytes_downloaded': bytes_downloaded,
+                'files_created': files_created,
+                'files_failed': files_failed,
+            }
+
+            try:
+                os.makedirs(os.path.dirname(state_path), exist_ok=True)
+                tmp_path = state_path + '.tmp'
+                with open(tmp_path, 'w', encoding='utf-8') as fh:
+                    json.dump(state, fh, ensure_ascii=False)
+                os.replace(tmp_path, state_path)
+            except Exception:
+                logger.debug('Could not persist firebase pull activity throttle state')
+
+        return True
+    except Exception:
+        return True
+
+
+def _firebase_bootstrap_pull_state_path() -> str:
+    return os.path.join(os.getcwd(), 'data', '.firebase_bootstrap_pull_state.json')
+
+
+def _load_bootstrap_pull_state() -> Dict[str, Any]:
+    try:
+        p = _firebase_bootstrap_pull_state_path()
+        if os.path.exists(p):
+            with open(p, 'r', encoding='utf-8') as fh:
+                data = json.load(fh)
+                if isinstance(data, dict):
+                    return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_bootstrap_pull_state(state: Dict[str, Any]) -> None:
+    try:
+        p = _firebase_bootstrap_pull_state_path()
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        tmp = p + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            json.dump(state, fh, ensure_ascii=False)
+        os.replace(tmp, p)
+    except Exception:
+        logger.debug('Could not persist bootstrap pull state')
+
+
+def _local_group_has_payload(group_dir: str) -> bool:
+    """Return True when group folder contains non-placeholder business files."""
+    try:
+        if not os.path.isdir(group_dir):
+            return False
+        for root, _dirs, files in os.walk(group_dir):
+            for name in files:
+                if name.startswith('.'):
+                    continue
+                if name in {'activity.log', 'error.log'}:
+                    continue
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _iter_local_payload_files(group_dir: str):
+    try:
+        if not os.path.isdir(group_dir):
+            return
+        for root, _dirs, files in os.walk(group_dir):
+            for name in files:
+                if name.startswith('.'):
+                    continue
+                if name in {'activity.log', 'error.log', 'files_json', 'fiscal_meta_json'}:
+                    continue
+                yield os.path.join(root, name)
+    except Exception:
+        return
+
+
+def _local_payload_state_path(group_dir: str) -> str:
+    return os.path.join(group_dir, _LOCAL_PAYLOAD_STATE_FILENAME)
+
+
+def _normalize_payload_meta(meta: Dict[str, Any] = None) -> Dict[str, Any]:
+    meta = meta or {}
+    try:
+        latest_mtime = float(meta.get('latest_mtime') or 0.0)
+    except Exception:
+        latest_mtime = 0.0
+    try:
+        file_count = int(meta.get('file_count') or 0)
+    except Exception:
+        file_count = 0
+    return {
+        'exists': bool(meta.get('exists')) if ('exists' in meta) else (file_count > 0 or latest_mtime > 0),
+        'latest_mtime': latest_mtime,
+        'file_count': file_count,
+        'generated_at': int(meta.get('generated_at') or time.time()),
+        'source': str(meta.get('source') or 'unknown'),
+    }
+
+
+def _write_local_payload_state(group_dir: str, meta: Dict[str, Any]) -> None:
+    try:
+        os.makedirs(group_dir, exist_ok=True)
+        path = _local_payload_state_path(group_dir)
+        payload = _normalize_payload_meta(meta)
+        tmp = path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            json.dump(payload, fh, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception:
+        logger.debug('Could not write local payload state for %s', group_dir)
+
+
+def _read_local_payload_state(group_dir: str) -> Dict[str, Any]:
+    try:
+        path = _local_payload_state_path(group_dir)
+        if os.path.exists(path):
+            with open(path, 'r', encoding='utf-8') as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                return _normalize_payload_meta(data)
+    except Exception:
+        logger.debug('Could not read local payload state for %s', group_dir)
+    return {'exists': False, 'latest_mtime': 0.0, 'file_count': 0, 'generated_at': 0, 'source': 'missing'}
+
+
+def _remote_payload_state_path(group_name: str) -> str:
+    return f'/groups/{group_name}/sync_meta/payload_state'
+
+
+def _sanitize_firebase_path(path: str) -> str:
+    if not path:
+        return ''
+    path = path.lstrip('/').rstrip('/')
+    parts = [seg for seg in path.split('/') if seg != '']
+    safe_parts = []
+    for seg in parts:
+        for ch in ['.', '#', '$', '[', ']']:
+            seg = seg.replace(ch, '_')
+        safe_parts.append(seg)
+    return '/'.join(safe_parts)
+
+
+def _write_remote_payload_state(group_name: str, meta: Dict[str, Any]) -> bool:
+    try:
+        payload = _normalize_payload_meta(meta)
+        return bool(firebase_write_data(_remote_payload_state_path(group_name), payload))
+    except Exception:
+        logger.debug('Could not write remote payload state for %s', group_name)
+        return False
+
+
+def _read_remote_payload_state(group_name: str) -> Dict[str, Any]:
+    try:
+        data = firebase_read_data(_remote_payload_state_path(group_name))
+        if isinstance(data, dict):
+            return _normalize_payload_meta(data)
+    except Exception:
+        logger.debug('Could not read remote payload state for %s', group_name)
+    return {'exists': False, 'latest_mtime': 0.0, 'file_count': 0, 'generated_at': 0, 'source': 'missing'}
+
+
+def _read_latest_remote_activity_log(folder_name: str) -> Optional[Dict[str, Any]]:
+    try:
+        if not is_firebase_enabled():
+            return None
+        safe_path = _sanitize_firebase_path(f'/activity_logs/{folder_name}')
+        ref = db.reference(safe_path)
+        data = ref.order_by_key().limit_to_last(1).get()
+        if isinstance(data, dict) and data:
+            latest_key = sorted(data.keys())[-1]
+            value = data.get(latest_key)
+            if isinstance(value, dict):
+                return value
+    except Exception:
+        logger.debug('Could not read latest activity log for %s', folder_name)
+    return None
+
+
+def _get_remote_payload_meta_from_activity_log(folder_name: str) -> Dict[str, Any]:
+    try:
+        entry = _read_latest_remote_activity_log(folder_name)
+        if not isinstance(entry, dict):
+            return {'exists': False, 'latest_mtime': 0.0, 'file_count': 0, 'generated_at': 0, 'source': 'missing'}
+
+        action = str(entry.get('action') or '').strip().lower()
+        details = entry.get('details') if isinstance(entry.get('details'), dict) else {}
+        if action not in {'payload_state_updated', 'payload_state_pushed', 'payload_state_pulled'}:
+            return {'exists': False, 'latest_mtime': 0.0, 'file_count': 0, 'generated_at': 0, 'source': 'activity_log_non_payload'}
+
+        meta = {
+            'exists': True,
+            'latest_mtime': float(details.get('latest_mtime') or 0.0),
+            'file_count': int(details.get('file_count') or 0),
+            'generated_at': int(details.get('generated_at') or time.time()),
+            'source': 'activity_log_marker',
+        }
+        return _normalize_payload_meta(meta)
+    except Exception:
+        return {'exists': False, 'latest_mtime': 0.0, 'file_count': 0, 'generated_at': 0, 'source': 'activity_log_error'}
+
+
+def _persist_payload_state_markers(group_name: str, local_group_folder: str, local_data_root: str = None, source: str = 'sync') -> Dict[str, Any]:
+    try:
+        meta = get_local_group_payload_meta(local_group_folder, local_data_root)
+        payload = {
+            'exists': bool(meta.get('exists')),
+            'latest_mtime': float(meta.get('latest_mtime') or 0.0),
+            'file_count': int(meta.get('file_count') or 0),
+            'generated_at': int(time.time()),
+            'source': source,
+        }
+        target_dir = os.path.join(local_data_root or os.path.join(os.getcwd(), 'data'), str(local_group_folder or '').strip())
+        _write_local_payload_state(target_dir, payload)
+        _write_remote_payload_state(group_name, payload)
+        try:
+            firebase_log_activity('system', group_name, f'payload_state_{source}', {
+                'latest_mtime': payload['latest_mtime'],
+                'file_count': payload['file_count'],
+                'generated_at': payload['generated_at'],
+            })
+        except Exception:
+            pass
+        return payload
+    except Exception:
+        return {'exists': False, 'latest_mtime': 0.0, 'file_count': 0, 'generated_at': int(time.time()), 'source': 'error'}
+
+
+def _firebase_key_to_local_file_name(key_name: str) -> str:
+    key_str = str(key_name).lstrip('/')
+
+    special_suffixes = {
+        '_xlsx_meta_json': '.xlsx.meta.json',
+        '_xls_meta_json': '.xls.meta.json',
+        '_csv_meta_json': '.csv.meta.json',
+    }
+    for suffix, ext in special_suffixes.items():
+        if key_str.endswith(suffix):
+            return f"{key_str[:-len(suffix)]}{ext}"
+
+    unsanitized_suffixes = {
+        '.xlsx.meta_json': '.xlsx.meta.json',
+        '.xls.meta_json': '.xls.meta.json',
+        '.csv.meta_json': '.csv.meta.json',
+    }
+    for suffix, ext in unsanitized_suffixes.items():
+        if key_str.endswith(suffix):
+            return f"{key_str[:-len(suffix)]}{ext}"
+
+    extension_map = {
+        '_json': '.json',
+        '_xlsx': '.xlsx',
+        '_xls': '.xls',
+        '_pdf': '.pdf',
+        '_csv': '.csv',
+        '_txt': '.txt',
+        '_xml': '.xml',
+        '_log': '.log',
+    }
+
+    for suffix, ext in extension_map.items():
+        if key_str.endswith(suffix):
+            return f"{key_str[:-len(suffix)]}{ext}"
+
+    return key_str
+
+
+def _resolve_group_identity(group_name: str, local_group_folder: str = None) -> Dict[str, Any]:
+    """Resolve canonical DB group name and local folder.
+
+    Returns:
+      {
+        'resolved': bool,
+        'group_name': <canonical firebase group name>,
+        'local_folder': <canonical local data folder>
+      }
+    """
+    input_group = str(group_name or '').strip()
+    input_folder = str(local_group_folder or '').strip()
+
+    try:
+        from models import Group
+
+        candidates = [x for x in [input_group, input_folder] if x]
+        grp = None
+        for token in candidates:
+            grp = Group.query.filter_by(name=token).first()
+            if grp:
+                break
+            grp = Group.query.filter_by(data_folder=token).first()
+            if grp:
+                break
+
+        if grp:
+            canonical_name = str(getattr(grp, 'name', '') or '').strip()
+            canonical_folder = str(getattr(grp, 'data_folder', '') or '').strip() or canonical_name
+            if canonical_name:
+                return {
+                    'resolved': True,
+                    'group_name': canonical_name,
+                    'local_folder': canonical_folder,
+                }
+    except Exception:
+        pass
+
+    fallback_group = input_group
+    fallback_folder = input_folder or input_group
+    return {
+        'resolved': False,
+        'group_name': fallback_group,
+        'local_folder': fallback_folder,
+    }
+
+
+def get_local_group_payload_meta(group_folder: str, local_data_root: str = None) -> Dict[str, Any]:
+    try:
+        if local_data_root is None:
+            local_data_root = os.path.join(os.getcwd(), 'data')
+        target_dir = os.path.join(local_data_root, str(group_folder or '').strip())
+        latest_mtime = 0.0
+        file_count = 0
+        for full_path in _iter_local_payload_files(target_dir):
+            try:
+                latest_mtime = max(latest_mtime, float(os.path.getmtime(full_path) or 0))
+                file_count += 1
+            except Exception:
+                continue
+        meta = {
+            'exists': file_count > 0,
+            'latest_mtime': latest_mtime,
+            'file_count': file_count,
+            'path': target_dir,
+            'generated_at': int(time.time()),
+            'source': 'local_scan',
+        }
+        _write_local_payload_state(target_dir, meta)
+        return meta
+    except Exception:
+        return {'exists': False, 'latest_mtime': 0.0, 'file_count': 0}
+
+
+def get_remote_group_payload_meta(group_name: str, activity_folder: str = None) -> Dict[str, Any]:
+    try:
+        if not is_firebase_enabled():
+            return {'exists': False, 'latest_mtime': 0.0, 'file_count': 0}
+        remote_state = _read_remote_payload_state(group_name)
+        if remote_state.get('exists'):
+            return remote_state
+        activity_state = _get_remote_payload_meta_from_activity_log(str(activity_folder or group_name or '').strip())
+        if activity_state.get('exists'):
+            return activity_state
+        remote_tree = firebase_read_data_compressed(f'/groups/{group_name}/files') or {}
+        if not isinstance(remote_tree, dict):
+            return {'exists': False, 'latest_mtime': 0.0, 'file_count': 0}
+
+        latest_mtime = 0.0
+        file_count = 0
+
+        def _walk(obj):
+            nonlocal latest_mtime, file_count
+            if not isinstance(obj, dict):
+                return
+            for key, val in obj.items():
+                if isinstance(val, dict) and 'content' in val and '_meta' in val:
+                    file_name = _firebase_key_to_local_file_name(key)
+                    if file_name in {'activity.log', 'error.log'}:
+                        continue
+                    try:
+                        latest_mtime = max(latest_mtime, float(val.get('_meta', {}).get('mtime', 0) or 0))
+                    except Exception:
+                        pass
+                    file_count += 1
+                elif isinstance(val, dict):
+                    _walk(val)
+
+        _walk(remote_tree)
+        meta = {
+            'exists': file_count > 0,
+            'latest_mtime': latest_mtime,
+            'file_count': file_count,
+            'generated_at': int(time.time()),
+            'source': 'remote_scan_fallback',
+        }
+        if meta.get('exists'):
+            _write_remote_payload_state(group_name, meta)
+        return meta
+    except Exception as e:
+        logger.warning('[SYNC] Could not inspect remote payload metadata for group %s: %s', group_name, e)
+        return {'exists': False, 'latest_mtime': 0.0, 'file_count': 0}
+
+
+def compare_group_payload_freshness(group_name: str, local_group_folder: str = None, local_data_root: str = None) -> Dict[str, Any]:
+    try:
+        local_folder = str(local_group_folder or group_name or '').strip()
+        if local_data_root is None:
+            local_data_root = os.path.join(os.getcwd(), 'data')
+
+        local_state = _read_local_payload_state(os.path.join(local_data_root, local_folder))
+        local_meta = get_local_group_payload_meta(local_folder, local_data_root)
+        if local_meta.get('latest_mtime', 0) < local_state.get('latest_mtime', 0):
+            local_meta = local_state
+        remote_meta = get_remote_group_payload_meta(group_name, activity_folder=local_folder)
+
+        tolerance_seconds = 2.0
+        action = 'noop'
+        reason = 'both_missing'
+
+        if remote_meta.get('exists') and not local_meta.get('exists'):
+            action = 'pull'
+            reason = 'remote_only'
+        elif local_meta.get('exists') and not remote_meta.get('exists'):
+            action = 'push'
+            reason = 'local_only'
+        elif local_meta.get('exists') and remote_meta.get('exists'):
+            local_ts = float(local_meta.get('latest_mtime') or 0)
+            remote_ts = float(remote_meta.get('latest_mtime') or 0)
+            if remote_ts > (local_ts + tolerance_seconds):
+                action = 'pull'
+                reason = 'remote_newer'
+            elif local_ts > (remote_ts + tolerance_seconds):
+                action = 'push'
+                reason = 'local_newer'
+            else:
+                action = 'equal'
+                reason = 'timestamps_close'
+
+        return {
+            'group_name': group_name,
+            'local_group_folder': local_folder,
+            'action': action,
+            'reason': reason,
+            'local': local_meta,
+            'remote': remote_meta,
+        }
+    except Exception as e:
+        logger.warning('[SYNC] Payload freshness comparison failed for group %s: %s', group_name, e)
+        return {
+            'group_name': group_name,
+            'local_group_folder': str(local_group_folder or group_name or '').strip(),
+            'action': 'unknown',
+            'reason': 'comparison_error',
+            'local': {'exists': False, 'latest_mtime': 0.0, 'file_count': 0},
+            'remote': {'exists': False, 'latest_mtime': 0.0, 'file_count': 0},
+        }
+
+
+def _should_attempt_bootstrap_pull(group_folder: str) -> bool:
+    """Allow exactly one successful bootstrap pull per group.
+
+    If previous bootstrap attempts failed, retry with cooldown to avoid hot loops.
+    """
+    try:
+        group_key = str(group_folder or '').strip() or '__unknown__'
+        now_ts = int(time.time())
+        retry_cooldown = 600
+        with _firebase_bootstrap_pull_lock:
+            state = _load_bootstrap_pull_state()
+            entry = state.get(group_key) if isinstance(state.get(group_key), dict) else {}
+            if bool(entry.get('bootstrap_success')):
+                return False
+            last_attempt = int(entry.get('last_attempt') or 0)
+            if last_attempt and (now_ts - last_attempt) < retry_cooldown:
+                return False
+            entry['last_attempt'] = now_ts
+            state[group_key] = entry
+            _save_bootstrap_pull_state(state)
+        return True
+    except Exception:
+        return True
+
+
+def _mark_bootstrap_pull_result(group_folder: str, success: bool) -> None:
+    try:
+        group_key = str(group_folder or '').strip() or '__unknown__'
+        now_ts = int(time.time())
+        with _firebase_bootstrap_pull_lock:
+            state = _load_bootstrap_pull_state()
+            entry = state.get(group_key) if isinstance(state.get(group_key), dict) else {}
+            entry['last_attempt'] = now_ts
+            if success:
+                entry['bootstrap_success'] = True
+                entry['last_success'] = now_ts
+            state[group_key] = entry
+            _save_bootstrap_pull_state(state)
+    except Exception:
+        logger.debug('Could not update bootstrap pull state')
+
+
+def firebase_auto_pull_enabled() -> bool:
+    """Return True only when automatic Firebase->local pulls are explicitly enabled.
+
+    Default behavior is server-authoritative (Firebase as encrypted backup), so
+    automatic pulls are OFF unless FIREBASE_ALLOW_AUTO_PULL is truthy and
+    FIREBASE_SERVER_AUTHORITATIVE is not truthy.
+    """
+    try:
+        authoritative_raw = str(os.getenv('FIREBASE_SERVER_AUTHORITATIVE', '1')).strip().lower()
+        authoritative = authoritative_raw not in {'0', 'false', 'off', 'no'}
+
+        allow_pull_raw = str(os.getenv('FIREBASE_ALLOW_AUTO_PULL', '0')).strip().lower()
+        allow_pull = allow_pull_raw in {'1', 'true', 'on', 'yes'}
+
+        if authoritative:
+            return False
+        return allow_pull
+    except Exception:
+        return False
 
 # ============================================================================
 # Firebase Initialization
@@ -644,7 +1215,7 @@ def firebase_write_compressed(path: str, data: Dict[str, Any], compress_threshol
         return False
 
 
-def firebase_push_group_files(group_name: str, local_data_root: str = None, dry_run: bool = False, verbose: bool = False):
+def firebase_push_group_files(group_name: str, local_data_root: str = None, dry_run: bool = False, verbose: bool = False, force: bool = False, local_group_folder: str = None):
     """Upload group files from local data/ folder to Firebase /groups/{group_name}/files.
     
     Also detects and removes files from Firebase that have been deleted locally.
@@ -658,10 +1229,21 @@ def firebase_push_group_files(group_name: str, local_data_root: str = None, dry_
             logger.warning('[PUSH] Firebase not enabled; cannot push group files')
             return False
 
+        identity = _resolve_group_identity(group_name, local_group_folder)
+        resolved = bool(identity.get('resolved'))
+        allow_unknown_push = str(os.getenv('FIREBASE_ALLOW_UNKNOWN_GROUP_PUSH', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
+        if (not resolved) and (not allow_unknown_push):
+            logger.warning('[PUSH] Refusing push for unknown group identity group=%s local_folder=%s', group_name, local_group_folder)
+            return False
+
+        group_name = str(identity.get('group_name') or group_name or '').strip()
+        local_group_folder = str(identity.get('local_folder') or local_group_folder or group_name or '').strip()
+
         if local_data_root is None:
             local_data_root = os.path.join(os.getcwd(), 'data')
 
-        source_dir = os.path.join(local_data_root, group_name)
+        local_folder = str(local_group_folder or group_name or '').strip()
+        source_dir = os.path.join(local_data_root, local_folder)
         if not os.path.isdir(source_dir):
             logger.warning('[PUSH] Group directory not found: %s', source_dir)
             return True  # No error, just nothing to push
@@ -678,6 +1260,7 @@ def firebase_push_group_files(group_name: str, local_data_root: str = None, dry_
         files_uploaded = 0
         files_failed = 0
         files_deleted = 0
+        bytes_uploaded = 0
         # When dry_run is requested, collect candidate lists instead of performing writes
         upload_candidates = []
         delete_candidates = []
@@ -724,6 +1307,13 @@ def firebase_push_group_files(group_name: str, local_data_root: str = None, dry_
                     # the server copy can be the source of truth in Firebase.
                     # Keep skipping hidden files and internal state files.
                     if fname.startswith('.') or fname in ['files_json', 'fiscal_meta_json']:
+                        continue
+                    # Skip legacy epsilon files that don't have an AFM prefix.
+                    # Valid epsilon files are named like "{afm}_epsilon_invoices.json".
+                    # Files named exactly "epsilon_invoices.json" or "epsilon_invoices.xlsx"
+                    # are legacy/fallback copies and should NOT be pushed to Firebase.
+                    if re.match(r'^epsilon_invoices\.(json|xlsx|xls)$', fname, re.IGNORECASE):
+                        logger.debug('[PUSH] Skipping legacy epsilon file (no AFM prefix): %s', fname)
                         continue
                     
                     file_path = os.path.join(root, fname)
@@ -775,7 +1365,7 @@ def firebase_push_group_files(group_name: str, local_data_root: str = None, dry_
                     local_file_keys.add(safe_firebase_key)
                     
                     # smart sync: skip if unchanged and not in epsilon/excel
-                    if smart_sync:
+                    if smart_sync and (not force):
                         rel = os.path.relpath(file_path, source_dir).replace('\\', '/')
                         parts = rel.split('/')
                         if not any(p in ('epsilon', 'excel') for p in parts):
@@ -827,6 +1417,10 @@ def firebase_push_group_files(group_name: str, local_data_root: str = None, dry_
                         if firebase_write_data(firebase_path, file_payload):
                             logger.info('[PUSH] Uploaded file to Firebase: %s', firebase_key)
                             files_uploaded += 1
+                            try:
+                                bytes_uploaded += int(len(file_content) or 0)
+                            except Exception:
+                                pass
                         else:
                             files_failed += 1
                             logger.error('[PUSH] Failed to upload file to Firebase: %s', firebase_key)
@@ -878,8 +1472,25 @@ def firebase_push_group_files(group_name: str, local_data_root: str = None, dry_
             logger.warning('[PUSH] Could not detect deleted files: %s', e)
         
         # Log summary
-        logger.info('[PUSH] Pushed files for group %s: uploaded %d files, deleted %d files, %d failed', 
-                    group_name, files_uploaded, files_deleted, files_failed)
+        logger.info('[PUSH] Pushed files for group %s (local_folder=%s, force=%s): uploaded %d files, deleted %d files, %d failed', 
+                group_name, local_folder, bool(force), files_uploaded, files_deleted, files_failed)
+
+        # Record push activity for unified admin visibility.
+        if not dry_run:
+            try:
+                firebase_log_activity('system', group_name, 'firebase_push', {
+                    'local_folder': local_folder,
+                    'force': bool(force),
+                    'files_uploaded': int(files_uploaded),
+                    'files_deleted': int(files_deleted),
+                    'files_failed': int(files_failed),
+                    'bytes_uploaded': int(bytes_uploaded),
+                })
+            except Exception:
+                logger.debug('Could not write firebase_push activity entry')
+
+        if (not dry_run) and files_failed == 0:
+            _persist_payload_state_markers(group_name, local_folder, local_data_root=local_data_root, source='pushed')
 
         if dry_run:
             return {
@@ -895,10 +1506,19 @@ def firebase_push_group_files(group_name: str, local_data_root: str = None, dry_
     
     except Exception as e:
         logger.error('[PUSH] Failed to push files for group %s: %s', group_name, e)
+        try:
+            if not dry_run:
+                firebase_log_activity('system', group_name, 'firebase_push_error', {
+                    'error': str(e),
+                    'local_group_folder': str(local_group_folder or group_name or '').strip(),
+                    'force': bool(force),
+                })
+        except Exception:
+            logger.debug('Could not write firebase_push_error activity entry')
         return False
 
 
-def firebase_pull_group_to_local(group_name: str, local_data_root: str = None) -> bool:
+def firebase_pull_group_to_local(group_name: str, local_data_root: str = None, force: bool = False, local_group_folder: str = None) -> bool:
     """Download group data from Firebase and populate `data/<group_name>` locally.
 
     This is a best-effort lazy-sync used when server is missing a group's data.
@@ -914,6 +1534,10 @@ def firebase_pull_group_to_local(group_name: str, local_data_root: str = None) -
     Returns True if pull succeeded (or no data found to pull).
     """
     try:
+        if (not force) and (not firebase_auto_pull_enabled()):
+            logger.info('[PULL] Auto pull skipped for group %s (server-authoritative mode)', group_name)
+            return True
+
         if not is_firebase_enabled():
             logger.warning('Firebase not enabled; cannot pull group data')
             return False
@@ -928,7 +1552,8 @@ def firebase_pull_group_to_local(group_name: str, local_data_root: str = None) -
             logger.warning('No files found in Firebase for %s at path %s', group_name, path)
             return True
 
-        target_dir = os.path.join(local_data_root, group_name)
+        local_folder = str(local_group_folder or group_name or '').strip()
+        target_dir = os.path.join(local_data_root, local_folder)
         os.makedirs(target_dir, exist_ok=True)
 
         files_created = 0
@@ -937,10 +1562,12 @@ def firebase_pull_group_to_local(group_name: str, local_data_root: str = None) -
         def _progress_path():
             try:
                 grp_dir = os.path.join(os.getcwd(), 'data', group_name)
+                if local_folder:
+                    grp_dir = os.path.join(os.getcwd(), 'data', local_folder)
                 os.makedirs(grp_dir, exist_ok=True)
                 return os.path.join(grp_dir, '.sync_progress.json')
             except Exception:
-                return os.path.join(os.getcwd(), 'data', f'.sync_progress_{group_name}.json')
+                return os.path.join(os.getcwd(), 'data', f'.sync_progress_{local_folder or group_name}.json')
 
         def _set_progress(status: str, percent: int = 0, message: str = ''):
             try:
@@ -976,49 +1603,7 @@ def firebase_pull_group_to_local(group_name: str, local_data_root: str = None) -
             logger.debug('[PULL] Smart sync is disabled; all files will be pulled')
         
         def _get_file_name_with_extension(key_name):
-            """
-            Convert Firebase key names back to local file names.
-            Handles both unsanitized keys (foo.xlsx.meta_json) and sanitized ones
-            produced by RTDB key rules (foo_xlsx_meta_json).
-            """
-            key_str = str(key_name).lstrip('/')
-
-            # Handle sanitized metadata keys first (critical for CoA/client_db metadata).
-            special_suffixes = {
-                '_xlsx_meta_json': '.xlsx.meta.json',
-                '_xls_meta_json': '.xls.meta.json',
-                '_csv_meta_json': '.csv.meta.json',
-            }
-            for suffix, ext in special_suffixes.items():
-                if key_str.endswith(suffix):
-                    return f"{key_str[:-len(suffix)]}{ext}"
-
-            # Also handle unsanitized metadata keys.
-            unsanitized_suffixes = {
-                '.xlsx.meta_json': '.xlsx.meta.json',
-                '.xls.meta_json': '.xls.meta.json',
-                '.csv.meta_json': '.csv.meta.json',
-            }
-            for suffix, ext in unsanitized_suffixes.items():
-                if key_str.endswith(suffix):
-                    return f"{key_str[:-len(suffix)]}{ext}"
-
-            extension_map = {
-                '_json': '.json',
-                '_xlsx': '.xlsx',
-                '_xls': '.xls',
-                '_pdf': '.pdf',
-                '_csv': '.csv',
-                '_txt': '.txt',
-                '_xml': '.xml',
-                '_log': '.log',
-            }
-
-            for suffix, ext in extension_map.items():
-                if key_str.endswith(suffix):
-                    return f"{key_str[:-len(suffix)]}{ext}"
-
-            return key_str
+            return _firebase_key_to_local_file_name(key_name)
         
         # compute total files to process for progress estimation
         def _count_files(obj):
@@ -1112,7 +1697,7 @@ def firebase_pull_group_to_local(group_name: str, local_data_root: str = None) -
                             target_file_path = os.path.join(file_dir, file_name)
 
                             # smart sync: skip if file unchanged and not in epsilon/excel
-                            if smart_sync:
+                            if smart_sync and (not force):
                                 rel = os.path.relpath(target_file_path, target_dir)
                                 parts = rel.replace('\\', '/').split('/')
                                 if not any(p in ('epsilon', 'excel') for p in parts):
@@ -1225,11 +1810,16 @@ def firebase_pull_group_to_local(group_name: str, local_data_root: str = None) -
 
         # Log summary
         try:
-            logger.info('[PULL] Pulled files for group %s: created %d files, %d failed, bytes_downloaded=%d. Stored in: %s', 
-                        group_name, files_created, files_failed, bytes_downloaded, target_dir)
+            logger.info('[PULL] Pulled files for group %s (local_folder=%s, force=%s): created %d files, %d failed, bytes_downloaded=%d. Stored in: %s', 
+                        group_name, local_folder, bool(force), files_created, files_failed, bytes_downloaded, target_dir)
             # Record per-pull bytes in activity logs for auditing
             try:
-                firebase_log_activity('system', group_name, 'firebase_pull', {'bytes_downloaded': int(bytes_downloaded), 'files_created': int(files_created), 'files_failed': int(files_failed)})
+                if _should_log_firebase_pull_activity(group_name, bytes_downloaded, files_created, files_failed):
+                    firebase_log_activity('system', group_name, 'firebase_pull', {
+                        'bytes_downloaded': int(bytes_downloaded),
+                        'files_created': int(files_created),
+                        'files_failed': int(files_failed)
+                    })
             except Exception:
                 logger.debug('Could not write firebase_pull activity entry')
         except Exception:
@@ -1240,6 +1830,9 @@ def firebase_pull_group_to_local(group_name: str, local_data_root: str = None) -
             _set_progress('done', 100, f'Completed: {files_created} files (downloaded {round(bytes_downloaded/1024.0/1024.0,2)} MB)')
         except Exception:
             pass
+
+        if files_failed == 0:
+            _persist_payload_state_markers(group_name, local_folder, local_data_root=local_data_root, source='pulled')
         return True
     
     except Exception as e:
@@ -1252,9 +1845,9 @@ def ensure_group_data_local(group_folder: str, create_empty_dirs: bool = True) -
     Ensure a group's data folder exists locally.
     
     Strategy:
-    1. If folder already exists locally, return True immediately (fast path)
-    2. If missing, attempt lazy-pull from Firebase
-    3. If Firebase pull fails/empty, optionally create empty folder structure
+    1. If local group already has business payload, return True immediately.
+    2. If local payload is missing, perform one bootstrap pull from Firebase.
+    3. After bootstrap, remain server-authoritative (push-oriented).
     
     This is the primary entry point for lazy-loading group data.
     Used by routes to ensure data is available before processing.
@@ -1279,7 +1872,12 @@ def ensure_group_data_local(group_folder: str, create_empty_dirs: bool = True) -
             except Exception:
                 pass
             # run pull worker
-            firebase_pull_group_to_local(folder, os.path.join(os.getcwd(), 'data'))
+            ok = firebase_pull_group_to_local(folder, os.path.join(os.getcwd(), 'data'), force=True)
+            try:
+                grp_dir = os.path.join(os.getcwd(), 'data', folder)
+                _mark_bootstrap_pull_result(folder, bool(ok) and _local_group_has_payload(grp_dir))
+            except Exception:
+                pass
         except Exception as e:
             logger.error('Background pull failed for %s: %s', folder, e)
 
@@ -1291,34 +1889,61 @@ def ensure_group_data_local(group_folder: str, create_empty_dirs: bool = True) -
         data_root = os.path.join(os.getcwd(), 'data')
         target_dir = os.path.join(data_root, group_folder)
         
-        # Fast path: folder already exists
-        if os.path.isdir(target_dir):
-            logger.debug('Group data already exists locally: %s', group_folder)
+        # If local payload exists, compare freshness and pull only when Firebase is newer.
+        if _local_group_has_payload(target_dir):
+            freshness = compare_group_payload_freshness(group_folder, local_group_folder=group_folder, local_data_root=data_root)
+            if freshness.get('action') == 'pull':
+                logger.info('Remote Firebase payload is newer for group %s; overwriting local payload', group_folder)
+                pull_ok = bool(firebase_pull_group_to_local(group_folder, data_root, force=True, local_group_folder=group_folder))
+                return bool(pull_ok) and _local_group_has_payload(target_dir)
+            logger.debug('Group data already exists locally and remains authoritative for now: %s (%s)', group_folder, freshness.get('reason'))
             return True
-        
-        # Attempt to pull from Firebase (run in background to avoid blocking login)
-        logger.info('Group data missing locally, attempting lazy-pull: %s', group_folder)
-        # Start background pull to avoid blocking requests (non-blocking behaviour)
-        try:
-            t = threading.Thread(target=_start_background_pull, args=(group_folder,), daemon=True)
-            t.start()
-            return True
-        except Exception:
-            logger.debug('Background pull spawn failed, falling back to synchronous pull for %s', group_folder)
 
-        if firebase_pull_group_to_local(group_folder, data_root):
-            # Pull succeeded (either found data or returned without error)
-            # Ensure the folder exists (might be empty if Firebase had no data)
+        # One-time bootstrap pull (forced) when local payload is missing.
+        # This keeps Firebase as encrypted backup source for first hydration only.
+        if _should_attempt_bootstrap_pull(group_folder):
+            logger.info('Bootstrap pull attempt for group with missing local payload: %s', group_folder)
+            boot_ok = bool(firebase_pull_group_to_local(group_folder, data_root, force=True))
+            has_payload = _local_group_has_payload(target_dir)
+            _mark_bootstrap_pull_result(group_folder, bool(boot_ok) and has_payload)
+            if has_payload:
+                logger.info('Bootstrap pull completed for group: %s', group_folder)
+                return True
+        
+        if firebase_auto_pull_enabled():
+            # Attempt to pull from Firebase (run in background to avoid blocking login)
+            logger.info('Group data missing locally, attempting lazy-pull: %s', group_folder)
+            # Start background pull to avoid blocking requests (non-blocking behaviour)
+            try:
+                t = threading.Thread(target=_start_background_pull, args=(group_folder,), daemon=True)
+                t.start()
+                return True
+            except Exception:
+                logger.debug('Background pull spawn failed, falling back to synchronous pull for %s', group_folder)
+
+            if firebase_pull_group_to_local(group_folder, data_root):
+                # Pull succeeded (either found data or returned without error)
+                # Ensure the folder exists (might be empty if Firebase had no data)
+                if create_empty_dirs:
+                    os.makedirs(target_dir, exist_ok=True)
+                    # Also create common subdirectories proactively
+                    for subdir in ['epsilon', 'excel', '__pycache__']:
+                        try:
+                            os.makedirs(os.path.join(target_dir, subdir), exist_ok=True)
+                        except Exception:
+                            pass
+                logger.info('Successfully ensured group data local: %s', group_folder)
+                return True
+        else:
+            logger.info('Auto pull disabled; creating local folder skeleton for group: %s', group_folder)
             if create_empty_dirs:
                 os.makedirs(target_dir, exist_ok=True)
-                # Also create common subdirectories proactively
                 for subdir in ['epsilon', 'excel', '__pycache__']:
                     try:
                         os.makedirs(os.path.join(target_dir, subdir), exist_ok=True)
                     except Exception:
                         pass
-            logger.info('Successfully ensured group data local: %s', group_folder)
-            return True
+                return True
         
         # Pull failed, but if create_empty_dirs is True, create folder anyway
         if create_empty_dirs:

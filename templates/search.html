@@ -314,8 +314,8 @@
   </div>
 </div>
 
-{# Flash container (JS will inject messages here) #}
-<div id="clientFlashContainer" class="fixed top-4 right-4 z-60"></div>
+{# Flash container fallback (used only if global base container is absent) #}
+<div id="clientFlashContainer" class="fixed top-24 right-4 z-60"></div>
 
 {# Loading overlay used by various async operations (scrape / fetch) #}
 <div id="loadingOverlay" class="fixed inset-0 bg-black/60 z-[100] hidden items-center justify-center" style="display:none;">
@@ -2114,6 +2114,10 @@ const VAT = "{{ vat or '' }}"; // active vat from server
 const INITIAL_MARK = "{{ mark|e }}"; // αρχική τιμή mark (αν υπήρχε)
 const RC_CLEAR_FLAG_KEY = 'rc:clearSearchAfterReload';
   window.__RC_CLEAR_MARK_AFTER_SAVE = false;
+
+function rcRememberSearchClear(){
+  try { sessionStorage.setItem(RC_CLEAR_FLAG_KEY, '1'); } catch(_) {}
+}
 
 function rcConsumeSearchClear(){
   try {
@@ -5575,6 +5579,18 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
       if (typeof showFlash === 'function') showFlash('Συμπλήρωσε MARK ή URL.', 'error', 3500);
       return;
     }
+    try {
+      const prev = String(window.__RC_LAST_SEARCH_MARK_OR_URL || '').trim();
+      if (prev && prev !== typedMark) {
+        const hiddenUrl = document.getElementById('scrapeUrlField');
+        const hiddenCategory = document.getElementById('scrapeCategoryField');
+        const summaryInput = document.getElementById('summaryJsonInput');
+        if (hiddenUrl) hiddenUrl.value = '';
+        if (hiddenCategory) hiddenCategory.value = '';
+        if (summaryInput) summaryInput.value = '{}';
+        try { if (typeof clearReceiptSearchCacheOnClose === 'function') clearReceiptSearchCacheOnClose(); } catch(_) {}
+      }
+    } catch(_) {}
     try { window.__RC_LAST_SEARCH_MARK_OR_URL = typedMark; } catch(_){ }
 
     form.dataset.invoiceSubmitting = '1';
@@ -6158,23 +6174,41 @@ document.getElementById('markSearchForm')?.addEventListener('submit', async func
   if (form) form.dataset.receiptsSubmitting = '1';
 
 evt.preventDefault();
-    const url = (urlInput && urlInput.value) ? urlInput.value.trim() : '';
+    const urlFromInput = (urlInput && urlInput.value) ? urlInput.value.trim() : '';
+    const markCandidate = (document.getElementById('markInput')?.value || '').trim();
+    const urlLooksValid = (v) => /^https?:\/\//i.test(v) || /^www\./i.test(v);
+    let url = urlFromInput;
+    if (!url && markCandidate && urlLooksValid(markCandidate)) {
+      url = markCandidate;
+      try {
+        if (urlInput) urlInput.value = markCandidate;
+        const hiddenUrl = document.getElementById('scrapeUrlField');
+        if (hiddenUrl) hiddenUrl.value = markCandidate;
+      } catch(_) {}
+    }
     if (!url) {
       showFlash('Εισάγετε URL για αποδείξεις.', 'error');
       return;
     }
+    try {
+      const prev = String(window.__RC_LAST_SEARCH_MARK_OR_URL || '').trim();
+      if (prev && prev !== url) {
+        const summaryInput = document.getElementById('summaryJsonInput');
+        if (summaryInput) summaryInput.value = '{}';
+        try { if (typeof clearReceiptSearchCacheOnClose === 'function') clearReceiptSearchCacheOnClose(); } catch(_) {}
+      }
+      window.__RC_LAST_SEARCH_MARK_OR_URL = url;
+    } catch(_) {}
     
     // Έλεγχος: Αν είναι 15ψήφιο MARK αντί για URL, απόρριψη
     if (/^\d{15}$/.test(url)) {
       showFlash('Για αποδείξεις, εισάγετε μόνο URL (όχι 15ψήφιο MARK). Το MARK χρησιμοποιείται μόνο για τιμολόγια.', 'error', 7000);
-      if (form) form.dataset.receiptsSubmitting = ''; // reset flag
       return;
     }
     
     // Έλεγχος: Αν δεν μοιάζει με URL, απόρριψη
-    if (!/^https?:\/\//i.test(url) && !/^www\./i.test(url)) {
+    if (!urlLooksValid(url)) {
       showFlash('Παρακαλώ εισάγετε έγκυρο URL αποδείξεων (π.χ. https://...)','error', 6000);
-      if (form) form.dataset.receiptsSubmitting = ''; // reset flag
       return;
     }
 
@@ -6509,6 +6543,8 @@ try {
     } catch (err) {
       console.error('scrape_receipt error', err);
       showFlash('Σφάλμα scraper: ' + (err.message || err), 'error', 6000);
+    } finally {
+      if (form) form.dataset.receiptsSubmitting = '';
     }
   }
 });

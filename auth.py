@@ -1077,20 +1077,19 @@ def select_group():
     session.pop('_remote_qr_owner', None)
     current_app.logger.info(f'Ο χρήστης {current_user.username} επέλεξε την ομάδα {group_name}')
     
-    # Automatically download group data from Firebase (lazy-pull)
-    # This ensures files are available locally when user selects the group
+    # Ensure local group folder exists (server-authoritative mode; no automatic pull)
     try:
         import firebase_config
         if getattr(grp, 'data_folder', None):
-            current_app.logger.info(f'Κατέβασε αρχεία για την ομάδα {group_name} από το Firebase...')
+            current_app.logger.info(f'Έλεγχος τοπικού φακέλου για την ομάδα {group_name}...')
             success = firebase_config.ensure_group_data_local(grp.data_folder)
             if success:
-                current_app.logger.info(f'Τα αρχεία της ομάδας {group_name} κατεβάστηκαν επιτυχώς')
+                current_app.logger.info(f'Ο τοπικός φάκελος της ομάδας {group_name} είναι έτοιμος')
             else:
-                current_app.logger.warning(f'Αποτυχία κατέβασμα αρχείων για την ομάδα {group_name}')
+                current_app.logger.warning(f'Αποτυχία προετοιμασίας τοπικού φακέλου για την ομάδα {group_name}')
     except Exception as e:
-        # Log but don't fail - download is non-critical
-        current_app.logger.warning(f"Download failed when selecting group {group_name}: {e}")
+        # Log but don't fail - folder prep is non-critical
+        current_app.logger.warning(f"Local folder prep failed when selecting group {group_name}: {e}")
     
     # Return JSON for AJAX requests, redirect for form submissions
     if request.is_json:

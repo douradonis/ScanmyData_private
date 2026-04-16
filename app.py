@@ -1136,14 +1136,6 @@ def get_group_base_dir():
 
     if grp and getattr(grp, 'data_folder', None):
         base = os.path.join(BASE_DIR, 'data', grp.data_folder)
-
-        # If folder doesn't exist, attempt lazy-pull from Firebase before creating empty folder
-        if not os.path.exists(base):
-            try:
-                import firebase_config
-                firebase_config.ensure_group_data_local(grp.data_folder)
-            except Exception as e:
-                current_app.logger.debug(f"Lazy-pull failed for group {grp.data_folder}: {e}")
     else:
         base = DATA_DIR
 
@@ -9233,10 +9225,13 @@ def fetch():
                 _set_fetch_progress_state(fetch_key, "error", 100, "Σφάλμα κατά τη λήψη. Ελέγξτε τα logs.")
             # broadcast notification for any listening clients
             try:
+                selected_name = str(selected or '').strip()
+                vat_text = str(vat or '').strip()
+                target_text = selected_name and vat_text and f"{selected_name} (ΑΦΜ {vat_text})" or (selected_name or (vat_text and f"ΑΦΜ {vat_text}") or "άγνωστος πελάτης")
                 if completed_ok:
-                    global_notifications.append(f"Λήψη ολοκληρώθηκε για ΑΦΜ {vat}: {added_docs} έγγραφα, {added_summaries} συνοψίσεις.")
+                    global_notifications.append(f"Λήψη ολοκληρώθηκε για {target_text}: {added_docs} έγγραφα, {added_summaries} συνοψίσεις.")
                 else:
-                    global_notifications.append(f"Λήψη απέτυχε για ΑΦΜ {vat}. Δείτε τα logs.")
+                    global_notifications.append(f"Λήψη απέτυχε για {target_text}. Δείτε τα logs.")
             except Exception:
                 pass
 
@@ -16398,18 +16393,56 @@ def _firebase_backup_scheduler_loop():
                             continue
 
                         log.info('Scheduled Firebase backup sync start for group=%s (interval=%ss)', group_name, interval_secs)
-                        group_data_path = os.path.join(BASE_DIR, 'data', group_folder)
-                        # If the group data folder is missing or empty, pull from Firebase first
-                        if not os.path.exists(group_data_path) or not os.listdir(group_data_path):
-                            log.info('Group data folder missing/empty for group=%s — pulling from Firebase first', group_name)
-                            try:
-                                firebase_config.firebase_pull_group_to_local(group_name)
-                            except Exception:
-                                log.exception('Initial Firebase pull failed for group=%s', group_name)
-                        push_ok = bool(firebase_config.firebase_push_group_files(group_name, dry_run=False, verbose=False))
-                        pull_ok = bool(firebase_config.firebase_pull_group_to_local(group_name))
+                        # Keep local payload ready, then reconcile based on which side is newer.
+                        try:
+                            firebase_config.ensure_group_data_local(group_folder, create_empty_dirs=True)
+                        except Exception:
+                            log.exception('Scheduled bootstrap check failed for group=%s', group_name)
+
+                        sync_result = True
+                        try:
+                            freshness = firebase_config.compare_group_payload_freshness(
+                                group_name,
+                                local_group_folder=group_folder,
+                                local_data_root=os.path.join(os.getcwd(), 'data')
+                            )
+                            action = str(freshness.get('action') or 'unknown')
+                            reason = str(freshness.get('reason') or '')
+
+                            if action == 'pull':
+                                log.info('Scheduled Firebase reconcile chose PULL for group=%s reason=%s', group_name, reason)
+                                sync_result = bool(firebase_config.firebase_pull_group_to_local(
+                                    group_name,
+                                    local_data_root=os.path.join(os.getcwd(), 'data'),
+                                    force=True,
+                                    local_group_folder=group_folder
+                                ))
+                            elif action == 'push':
+                                log.info('Scheduled Firebase reconcile chose PUSH for group=%s reason=%s', group_name, reason)
+                                sync_result = bool(firebase_config.firebase_push_group_files(
+                                    group_name,
+                                    local_data_root=os.path.join(os.getcwd(), 'data'),
+                                    dry_run=False,
+                                    verbose=False,
+                                    force=True,
+                                    local_group_folder=group_folder
+                                ))
+                            else:
+                                log.info('Scheduled Firebase reconcile chose incremental PUSH for group=%s reason=%s', group_name, reason)
+                                sync_result = bool(firebase_config.firebase_push_group_files(
+                                    group_name,
+                                    local_data_root=os.path.join(os.getcwd(), 'data'),
+                                    dry_run=False,
+                                    verbose=False,
+                                    force=False,
+                                    local_group_folder=group_folder
+                                ))
+                        except Exception:
+                            log.exception('Scheduled freshness reconcile failed for group=%s', group_name)
+                            sync_result = False
+
                         _firebase_backup_last_run[group_name] = time.time()
-                        log.info('Scheduled Firebase backup sync done for group=%s push_ok=%s pull_ok=%s', group_name, push_ok, pull_ok)
+                        log.info('Scheduled Firebase backup sync done for group=%s sync_ok=%s', group_name, sync_result)
                     except Exception:
                         log.exception('Scheduled Firebase backup sync failed for group=%s', getattr(grp, 'name', None))
         except Exception:

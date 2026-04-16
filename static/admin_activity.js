@@ -6,93 +6,94 @@ document.addEventListener('DOMContentLoaded', function() {
     const filterGroup = document.getElementById('filterGroup');
     const filterAction = document.getElementById('filterAction');
     const filterLimit = document.getElementById('filterLimit');
-    
+
+    if (!filterForm || !logsTable || !filterGroup || !filterAction || !filterLimit) {
+        return;
+    }
+
     let debounceTimer;
-    
-    // Function to perform the search
+
+    function escapeHtml(value) {
+        return String(value == null ? '' : value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function formatDetails(log) {
+        const summary = log.summary || '';
+        const details = log.details || '';
+        if (summary && details && summary !== details) {
+            return `<div>${escapeHtml(summary)}</div><div class="text-muted">${escapeHtml(details)}</div>`;
+        }
+        return escapeHtml(details || summary || '-');
+    }
+
+    function renderLogs(logs) {
+        const tbody = logsTable.querySelector('tbody');
+        if (!tbody) {
+            return;
+        }
+        tbody.innerHTML = '';
+
+        if (!Array.isArray(logs) || logs.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" class="text-muted">No logs found</td></tr>';
+            return;
+        }
+
+        logs.forEach(log => {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td><small>${escapeHtml(log.timestamp || '')}</small></td>
+                <td>${escapeHtml(log.user_email || log.user_id || 'system')}</td>
+                <td>${escapeHtml(log.group || '-')}</td>
+                <td><code>${escapeHtml(log.action || '-')}</code></td>
+                <td><small>${formatDetails(log)}</small></td>
+            `;
+            tbody.appendChild(row);
+        });
+    }
+
     function performSearch() {
         const group = filterGroup.value || '';
         const action = filterAction.value || '';
         const limit = filterLimit.value || 100;
-        
-        // Fetch filtered logs via API
-        const url = `/api/admin/activity-logs?group=${encodeURIComponent(group)}&action=${encodeURIComponent(action)}&limit=${limit}`;
-        
+        const url = `/api/admin/activity-logs?group=${encodeURIComponent(group)}&action=${encodeURIComponent(action)}&limit=${encodeURIComponent(limit)}`;
+
         fetch(url)
             .then(resp => resp.json())
             .then(data => {
-                if (data && Array.isArray(data)) {
-                    renderLogs(data);
-                } else {
+                const logs = Array.isArray(data)
+                    ? data
+                    : Array.isArray(data?.logs)
+                        ? data.logs
+                        : Array.isArray(data?.data)
+                            ? data.data
+                            : [];
+                renderLogs(logs);
+            })
+            .catch(err => {
+                console.error('Failed to fetch activity logs', err);
+                if (typeof uiAlert === 'function') {
                     uiAlert('Failed to fetch logs');
                 }
-            })
-            .catch(err => uiAlert('Error: ' + err));
-    }
-    
-    if (filterForm) {
-        // Handle form submit (e.g., pressing Enter)
-        filterForm.addEventListener('submit', function(e) {
-            e.preventDefault();
-            performSearch();
-        });
-        
-        // Live search on input with debouncing
-        if (filterGroup) {
-            filterGroup.addEventListener('input', function() {
-                clearTimeout(debounceTimer);
-                debounceTimer = setTimeout(performSearch, 500);
             });
-        }
-        
-        if (filterAction) {
-            filterAction.addEventListener('input', function() {
-                clearTimeout(debounceTimer);
-                debounceTimer = setTimeout(performSearch, 500);
-            });
-        }
-        
-        if (filterLimit) {
-            filterLimit.addEventListener('input', function() {
-                clearTimeout(debounceTimer);
-                debounceTimer = setTimeout(performSearch, 500);
-            });
-        }
     }
-    
-    function renderLogs(logs) {
-        const tbody = logsTable.querySelector('tbody');
-        tbody.innerHTML = '';
-        
-        logs.forEach(log => {
-            const row = document.createElement('tr');
-            row.innerHTML = `
-                <td><small>${formatTimestamp(log.timestamp)}</small></td>
-                <td>${log.user_id || 'system'}</td>
-                <td>${log.group || '-'}</td>
-                <td><code>${log.action}</code></td>
-                <td><small>${JSON.stringify(log.details || {})}</small></td>
-            `;
-            tbody.appendChild(row);
-        });
-        
-        if (logs.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="5" class="text-muted">No logs found</td></tr>';
-        }
-    }
-    
-    function formatTimestamp(ts) {
-        if (!ts) return '';
-        try {
-            const date = new Date(ts);
-            return date.toLocaleString();
-        } catch (e) {
-            return ts;
-        }
-    }
-});
 
-// Auto-refresh activity logs every 60 seconds
-setInterval(() => {
+    filterForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        performSearch();
+    });
+
+    [filterGroup, filterAction, filterLimit].forEach(input => {
+        input.addEventListener('input', function() {
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(performSearch, 500);
+        });
+    });
+
     performSearch();
-}, 60000);
+    setInterval(performSearch, 60000);
+});
