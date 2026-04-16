@@ -8715,10 +8715,17 @@ def _is_active_group_admin_user() -> bool:
     try:
         from flask_login import current_user
         from auth import get_active_group
+
+        if not getattr(current_user, 'is_authenticated', False):
+            return False
+
+        # Global admins can access admin bulk actions even if the currently
+        # active group role is not resolved yet during a partial reload.
+        if bool(getattr(current_user, 'is_admin', False)):
+            return True
+
         grp = get_active_group()
         if not grp:
-            return False
-        if not getattr(current_user, 'is_authenticated', False):
             return False
         return current_user.role_for_group(grp) == 'admin'
     except Exception:
@@ -8790,7 +8797,27 @@ def api_fetch_bulk_start():
     aade_user_default = os.getenv("AADE_USER_ID", AADE_USER_ENV)
     aade_key_default = os.getenv("AADE_SUBSCRIPTION_KEY", AADE_KEY_ENV)
 
-    def _bulk_worker(_job_id: str, _targets: List[Dict[str, Any]], _d1: str, _d2: str, _group_dir: str):
+    log_actor_id = 'anonymous'
+    log_actor_email = None
+    log_actor_username = None
+    log_group_name = 'system'
+    log_group_obj = None
+    app_obj = None
+    try:
+        from flask_login import current_user
+        from auth import get_active_group
+        app_obj = current_app._get_current_object()
+        grp = get_active_group()
+        log_group_obj = grp
+        log_group_name = str(getattr(grp, 'name', None) or getattr(grp, 'data_folder', None) or 'system')
+        if getattr(current_user, 'is_authenticated', False):
+            log_actor_id = str(getattr(current_user, 'id', 'anonymous'))
+            log_actor_email = getattr(current_user, 'email', None)
+            log_actor_username = getattr(current_user, 'username', None)
+    except Exception:
+        pass
+
+    def _bulk_worker(_job_id: str, _targets: List[Dict[str, Any]], _d1: str, _d2: str, _group_dir: str, _log_group_name: str, _log_group_obj, _log_actor_id: str, _log_actor_email: str, _log_actor_username: str, _app_obj):
         results: List[Dict[str, Any]] = []
         failed = 0
         done = 0
@@ -8906,6 +8933,66 @@ def api_fetch_bulk_start():
 
                 set_last_fetch_date(_get_fetch_tracking_key(name, vat))
 
+                try:
+                    from utils import log_user_activity
+                    activity_details = {
+                        'date_from': str(_d1),
+                        'date_to': str(_d2),
+                        'vat': vat,
+                        'added_docs': added_docs,
+                        'added_summaries': added_summaries,
+                        'fetched_count': len(all_rows)
+                    }
+                    if _app_obj is not None:
+                        with _app_obj.app_context():
+                            try:
+                                log_user_activity(
+                                    _log_actor_id,
+                                    _log_group_name,
+                                    'bulk_fetch_data',
+                                    details=activity_details,
+                                    user_email=_log_actor_email,
+                                    user_username=_log_actor_username
+                                )
+                            except Exception:
+                                pass
+                            if _log_group_obj is not None:
+                                try:
+                                    from auth import _append_group_log
+                                    entry_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                                    _append_group_log(_log_group_obj, {
+                                        'user_id': str(_log_actor_id) if _log_actor_id is not None else 'anonymous',
+                                        'group': str(_log_group_name or getattr(_log_group_obj, 'name', None) or getattr(_log_group_obj, 'data_folder', None) or 'system'),
+                                        'action': 'bulk_fetch_data',
+                                        'details': {
+                                            'user_id': str(_log_actor_id) if _log_actor_id is not None else 'anonymous',
+                                            'user_email': _log_actor_email,
+                                            'user_username': _log_actor_username,
+                                            'group': str(_log_group_name or getattr(_log_group_obj, 'name', None) or getattr(_log_group_obj, 'data_folder', None) or 'system'),
+                                            'action': 'bulk_fetch_data',
+                                            'timestamp': entry_timestamp,
+                                            'ip_address': None,
+                                            'details': activity_details,
+                                            'description': 'Μαζική Ανάκτηση Δεδομένων MyDATA'
+                                        }
+                                    })
+                                except Exception:
+                                    pass
+                    else:
+                        try:
+                            log_user_activity(
+                                _log_actor_id,
+                                _log_group_name,
+                                'bulk_fetch_data',
+                                details=activity_details,
+                                user_email=_log_actor_email,
+                                user_username=_log_actor_username
+                            )
+                        except Exception:
+                            pass
+                except Exception:
+                    log.exception('Failed to write bulk fetch activity log for credential=%s', name)
+
                 done += 1
                 results.append({
                     'credential': name,
@@ -8980,7 +9067,11 @@ def api_fetch_bulk_start():
             )
 
     try:
-        t = threading.Thread(target=_bulk_worker, args=(job_id, targets, d1, d2, group_dir), daemon=True)
+        t = threading.Thread(
+            target=_bulk_worker,
+            args=(job_id, targets, d1, d2, group_dir, log_group_name, log_group_obj, log_actor_id, log_actor_email, log_actor_username, app_obj),
+            daemon=True
+        )
         t.start()
     except Exception:
         log.exception('Failed to start bulk fetch worker')
@@ -9115,9 +9206,31 @@ def fetch():
                                active_credential=active_name,
                                last_fetch_date_display=initial_last_fetch_date)
 
+        # capture logging context before entering the background thread
+        log_group = None
+        log_group_name = None
+        log_actor_id = 'anonymous'
+        log_actor_email = None
+        log_actor_username = None
+        try:
+            from auth import get_active_group
+            log_group = get_active_group()
+            if log_group:
+                log_group_name = getattr(log_group, 'name', None) or getattr(log_group, 'data_folder', None)
+        except Exception:
+            log_group = None
+            log_group_name = None
+        try:
+            if getattr(current_user, 'is_authenticated', False):
+                log_actor_id = getattr(current_user, 'id', 'anonymous')
+                log_actor_email = getattr(current_user, 'email', None)
+                log_actor_username = getattr(current_user, 'username', None)
+        except Exception:
+            pass
+
         # perform the actual fetch+save in background so the request can
         # return immediately and avoid timeouts.
-        def _do_fetch(aade_user, aade_key, vat, d1, d2, selected, group_dir, fetch_key):
+        def _do_fetch(aade_user, aade_key, vat, d1, d2, selected, group_dir, fetch_key, _log_group_name=None, _log_group_obj=None, _log_actor_id='anonymous', _log_actor_email=None, _log_actor_username=None):
             # store the captured group directory in thread-local storage so that
             # any subsequent calls to ``group_path``/``get_group_base_dir``
             # inside this worker use the correct folder even though the Flask
@@ -9185,29 +9298,50 @@ def fetch():
                     set_last_fetch_date(fetch_key)
 
                 try:
-                    from auth import get_active_group
                     from utils import log_user_activity
-                    grp = get_active_group()
-                    if grp:
-                        uid = getattr(current_user, 'id', 'anonymous') if getattr(current_user, 'is_authenticated', False) else 'anonymous'
-                        u_email = getattr(current_user, 'email', None) if getattr(current_user, 'is_authenticated', False) else None
-                        u_name = getattr(current_user, 'username', None) if getattr(current_user, 'is_authenticated', False) else None
-                        details = {
-                            'date_from': str(d1),
-                            'date_to': str(d2),
-                            'vat': vat,
-                            'added_docs': added_docs,
-                            'added_summaries': added_summaries,
-                            'fetched_count': len(all_rows)
-                        }
+                    details = {
+                        'date_from': str(d1),
+                        'date_to': str(d2),
+                        'vat': vat,
+                        'added_docs': added_docs,
+                        'added_summaries': added_summaries,
+                        'fetched_count': len(all_rows)
+                    }
+                    if _log_group_name:
                         try:
-                            log_user_activity(uid, grp.name if getattr(grp, 'name', None) else grp.data_folder, 'fetch_data', details=details, user_email=u_email, user_username=u_name)
+                            log_user_activity(
+                                _log_actor_id,
+                                _log_group_name,
+                                'fetch_data',
+                                details=details,
+                                user_email=_log_actor_email,
+                                user_username=_log_actor_username,
+                            )
                         except Exception:
-                            try:
-                                from auth import _append_group_log
-                                _append_group_log(grp, f"Bulk fetch performed: {d1} to {d2}, VAT {vat}, {added_docs} docs + {added_summaries} summaries by {u_name or 'anonymous'}")
-                            except Exception:
-                                pass
+                            pass
+                    if _log_group_obj:
+                        try:
+                            from auth import _append_group_log
+                            resolved_group_name = str(_log_group_name or getattr(_log_group_obj, 'name', None) or getattr(_log_group_obj, 'data_folder', None) or 'system')
+                            entry_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                            _append_group_log(_log_group_obj, {
+                                'user_id': str(_log_actor_id) if _log_actor_id is not None else 'anonymous',
+                                'group': resolved_group_name,
+                                'action': 'fetch_data',
+                                'details': {
+                                    'user_id': str(_log_actor_id) if _log_actor_id is not None else 'anonymous',
+                                    'user_email': _log_actor_email,
+                                    'user_username': _log_actor_username,
+                                    'group': resolved_group_name,
+                                    'action': 'fetch_data',
+                                    'timestamp': entry_timestamp,
+                                    'ip_address': None,
+                                    'details': details,
+                                    'description': 'Ανάκτηση δεδομένων MyDATA'
+                                }
+                            })
+                        except Exception:
+                            pass
                 except Exception:
                     pass
                 completed_ok = True
@@ -9254,7 +9388,21 @@ def fetch():
         try:
             t = threading.Thread(
                 target=_do_fetch,
-                args=(aade_user, aade_key, vat, d1, d2, selected, group_dir, fetch_key),
+                args=(
+                    aade_user,
+                    aade_key,
+                    vat,
+                    d1,
+                    d2,
+                    selected,
+                    group_dir,
+                    fetch_key,
+                    log_group_name,
+                    log_group,
+                    log_actor_id,
+                    log_actor_email,
+                    log_actor_username,
+                ),
                 daemon=True,
             )
             t.start()
@@ -15141,14 +15289,24 @@ DELETE_UNDO_STACKS: Dict[str, List[Dict[str, Any]]] = {}
 def _delete_undo_scope_key() -> str:
     try:
         active = get_active_credential_from_session() or {}
-        vat = str(active.get("vat") or "default").strip() or "default"
     except Exception:
-        vat = "default"
+        active = {}
+
+    vat = str(active.get("vat") or "default").strip() or "default"
+    name = str(active.get("name") or "default").strip() or "default"
+
+    try:
+        from auth import get_active_group
+        grp = get_active_group()
+        group_name = str(getattr(grp, "name", "") or "default").strip() or "default"
+    except Exception:
+        group_name = "default"
+
     try:
         uid = str(getattr(current_user, "id", "") or getattr(current_user, "pw_hash", "") or "anon").strip() or "anon"
     except Exception:
         uid = "anon"
-    return f"{uid}:{vat}"
+    return f"{uid}:{group_name}:{vat}:{name}"
 
 
 def _cleanup_delete_undo_stack(scope_key: str):
@@ -15291,7 +15449,18 @@ def delete_undo():
     except Exception:
         pass
 
-    msg = f"Έγινε αναίρεση διαγραφής. Επαναφέρθηκαν από Excel: {restored_excel}, από Epsilon cache: {restored_epsilon}."
+    customer_name = str(entry.get("customer_name") or "").strip()
+    customer_vat = str(entry.get("customer_vat") or "").strip()
+    if customer_name and customer_vat:
+        customer_part = f" για τον πελάτη {customer_name} ({customer_vat})"
+    elif customer_name:
+        customer_part = f" για τον πελάτη {customer_name}"
+    elif customer_vat:
+        customer_part = f" για τον πελάτη με ΑΦΜ {customer_vat}"
+    else:
+        customer_part = ""
+
+    msg = f"Έγινε αναίρεση διαγραφής{customer_part}. Επαναφέρθηκαν από Excel: {restored_excel}, από Epsilon cache: {restored_epsilon}."
     if is_ajax_request:
         return jsonify({"ok": True, "message": msg, "restored_excel": restored_excel, "restored_epsilon": restored_epsilon}), 200
     flash(msg, "success")
@@ -15510,6 +15679,8 @@ def delete_invoices():
                 "excel_rows": deleted_excel_rows,
                 "excel_columns": deleted_excel_columns,
                 "epsilon_snapshots": deleted_epsilon_snapshots,
+                "customer_vat": active.get("vat") if active else None,
+                "customer_name": active.get("name") if active else None,
             }
             _push_delete_undo_entry(undo_entry)
     except Exception:
@@ -15553,6 +15724,8 @@ def delete_invoices():
                 "token": undo_token,
                 "count": total_requested,
                 "created_ts": (undo_entry or {}).get("created_ts"),
+                "customer_vat": (undo_entry or {}).get("customer_vat"),
+                "customer_name": (undo_entry or {}).get("customer_name"),
             } if undo_token else None,
         }), 200
 

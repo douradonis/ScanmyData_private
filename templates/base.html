@@ -2165,6 +2165,83 @@
       const FETCH_TARGET_KEY = 'scanmydata:fetchProgressTarget:v1';
       const FETCH_SNAPSHOT_KEY = 'scanmydata:fetchProgressSnapshot:v1';
       const FETCH_FLASH_ID = 'globalFetchProgressFlash';
+      const BULK_FETCH_TARGET_KEY = 'scanmydata:bulkFetchProgressTarget:v1';
+      const BULK_FETCH_SNAPSHOT_KEY = 'scanmydata:bulkFetchProgressSnapshot:v1';
+      const BULK_FETCH_JOB_KEY = 'scanmydata.bulkFetchJobId';
+      const FETCH_FLASH_DISMISSED_KEY = 'scanmydata:fetchFlashDismissed:v1';
+      let globalFetchFlashHideTimer = null;
+
+      function scheduleGlobalFetchFlashHide(ms){
+        try {
+          if (globalFetchFlashHideTimer) {
+            clearTimeout(globalFetchFlashHideTimer);
+            globalFetchFlashHideTimer = null;
+          }
+        } catch (_) {}
+        const delay = Number(ms || 0);
+        if (delay > 0) {
+          globalFetchFlashHideTimer = setTimeout(function(){
+            clearGlobalFetchProgressFlash();
+            try {
+              const bulkSnap = readBulkFetchSnapshot();
+              const singleSnap = readFetchSnapshot();
+              if (!bulkSnap || !['running','stopping'].includes(String(bulkSnap.status || ''))) setBulkFetchSnapshot(null);
+              if (!singleSnap || !['running','stopping'].includes(String(singleSnap.status || ''))) setFetchSnapshot(null);
+            } catch (_) {}
+          }, delay);
+        }
+      }
+
+      function stateShouldRemainVisible(state){
+        if (!state) return false;
+        const status = String(state.status || '');
+        if (['running','stopping'].includes(status)) return true;
+        const hideAt = Number(state.hide_after_at || 0);
+        return !!hideAt && Date.now() < hideAt;
+      }
+
+      function getFetchFlashSignature(state){
+        const s = state || {};
+        const status = String(s.status || 'not_started').toLowerCase();
+        const lifecycle = ['running', 'stopping'].includes(status) ? 'active' : (status || 'terminal');
+        const mode = (String(s.mode || '') === 'bulk' || String(s.job_id || '').trim()) ? 'bulk' : 'single';
+        const bulkId = String(s.job_id || '').trim();
+        const singleId = [String(s.credential || '').trim(), String(s.vat || '').trim()].filter(Boolean).join('|');
+        const id = mode === 'bulk' ? bulkId : singleId;
+        return id ? [mode, lifecycle, id].join('::') : '';
+      }
+
+      function readDismissedFetchFlash(){
+        return readJson(FETCH_FLASH_DISMISSED_KEY) || null;
+      }
+
+      function clearDismissedFetchFlash(){
+        writeJson(FETCH_FLASH_DISMISSED_KEY, null);
+      }
+
+      function dismissFetchFlashState(state){
+        const signature = getFetchFlashSignature(state);
+        if (!signature) return;
+        writeJson(FETCH_FLASH_DISMISSED_KEY, {
+          signature,
+          dismissed_at: new Date().toISOString(),
+        });
+      }
+
+      function dismissFetchFlashSignature(signature){
+        const sig = String(signature || '').trim();
+        if (!sig) return;
+        writeJson(FETCH_FLASH_DISMISSED_KEY, {
+          signature: sig,
+          dismissed_at: new Date().toISOString(),
+        });
+      }
+
+      function isFetchFlashDismissed(state){
+        const marker = readDismissedFetchFlash();
+        const signature = getFetchFlashSignature(state);
+        return !!(marker && signature && String(marker.signature || '') === signature);
+      }
 
       function readJson(key){
         try {
@@ -2187,13 +2264,25 @@
 
       function readFetchTarget(){
         const t = readJson(FETCH_TARGET_KEY) || {};
-        const credential = String(t.credential || '').trim();
-        const vat = String(t.vat || '').trim();
+        let credential = String(t.credential || '').trim();
+        let vat = String(t.vat || '').trim();
+        let updated_at = t.updated_at || null;
+
+        if (!credential && !vat) {
+          const snap = readFetchSnapshot() || {};
+          const snapStatus = String(snap.status || '').toLowerCase();
+          if (['running', 'stopping'].includes(snapStatus)) {
+            credential = String(snap.credential || '').trim();
+            vat = String(snap.vat || '').trim();
+            updated_at = snap.updated_at || updated_at;
+          }
+        }
+
         if (!credential && !vat) return null;
         return {
           credential,
           vat,
-          updated_at: t.updated_at || null,
+          updated_at,
         };
       }
 
@@ -2201,9 +2290,13 @@
         const p = payload || {};
         const credential = String(p.credential || '').trim();
         const vat = String(p.vat || '').trim();
+        const prev = readJson(FETCH_TARGET_KEY) || {};
         if (!credential && !vat) {
           writeJson(FETCH_TARGET_KEY, null);
           return;
+        }
+        if (String(prev.credential || '').trim() !== credential || String(prev.vat || '').trim() !== vat) {
+          clearDismissedFetchFlash();
         }
         writeJson(FETCH_TARGET_KEY, {
           credential,
@@ -2221,13 +2314,18 @@
           writeJson(FETCH_SNAPSHOT_KEY, null);
           return;
         }
+        const status = String(state.status || 'not_started');
+        const existing = readFetchSnapshot() || {};
+        const isTerminal = ['completed', 'error', 'stopped'].includes(status);
         writeJson(FETCH_SNAPSHOT_KEY, {
-          status: String(state.status || 'not_started'),
+          mode: 'single',
+          status: status,
           percent: Math.max(0, Math.min(100, Number(state.percent || 0))),
           message: String(state.message || ''),
           credential: String(state.credential || ''),
           vat: String(state.vat || ''),
           updated_at: new Date().toISOString(),
+          hide_after_at: isTerminal ? (Date.now() + 5000) : (['running','stopping'].includes(status) ? null : Number(existing.hide_after_at || 0) || null),
         });
       }
 
@@ -2235,13 +2333,222 @@
         return readJson(FETCH_SNAPSHOT_KEY) || null;
       }
 
+      function readBulkFetchTarget(){
+        const t = readJson(BULK_FETCH_TARGET_KEY) || {};
+        let job_id = String(t.job_id || '').trim();
+        let updated_at = t.updated_at || null;
+
+        if (!job_id) {
+          try {
+            job_id = String(localStorage.getItem(BULK_FETCH_JOB_KEY) || '').trim();
+          } catch (_) {}
+        }
+
+        if (!job_id) {
+          const snap = readBulkFetchSnapshot() || {};
+          const snapStatus = String(snap.status || '').toLowerCase();
+          if (['running', 'stopping'].includes(snapStatus)) {
+            job_id = String(snap.job_id || '').trim();
+            updated_at = snap.updated_at || updated_at;
+          }
+        }
+
+        if (!job_id) return null;
+        return {
+          job_id,
+          updated_at,
+        };
+      }
+
+      function setBulkFetchTarget(payload){
+        const p = payload || {};
+        const job_id = String(p.job_id || '').trim();
+        const prev = readJson(BULK_FETCH_TARGET_KEY) || {};
+        if (!job_id) {
+          writeJson(BULK_FETCH_TARGET_KEY, null);
+          return;
+        }
+        if (String(prev.job_id || '').trim() !== job_id) {
+          clearDismissedFetchFlash();
+        }
+        writeJson(BULK_FETCH_TARGET_KEY, {
+          job_id,
+          updated_at: new Date().toISOString(),
+        });
+      }
+
+      function clearBulkFetchTarget(){
+        writeJson(BULK_FETCH_TARGET_KEY, null);
+      }
+
+      function setBulkFetchSnapshot(state){
+        if (!state) {
+          writeJson(BULK_FETCH_SNAPSHOT_KEY, null);
+          return;
+        }
+        const status = String(state.status || 'not_started');
+        const existing = readBulkFetchSnapshot() || {};
+        const isTerminal = ['completed', 'error', 'stopped'].includes(status);
+        writeJson(BULK_FETCH_SNAPSHOT_KEY, {
+          mode: 'bulk',
+          status: status,
+          percent: Math.max(0, Math.min(100, Number(state.percent || 0))),
+          message: String(state.message || ''),
+          job_id: String(state.job_id || ''),
+          current_customer: String(state.current_customer || ''),
+          current_index: Number(state.current_index || 0),
+          total_customers: Number(state.total_customers || 0),
+          updated_at: new Date().toISOString(),
+          hide_after_at: isTerminal ? (Date.now() + 5000) : (['running','stopping'].includes(status) ? null : Number(existing.hide_after_at || 0) || null),
+        });
+      }
+
+      function readBulkFetchSnapshot(){
+        return readJson(BULK_FETCH_SNAPSHOT_KEY) || null;
+      }
+
+      async function requestGlobalBulkFetchStop(){
+        const target = readBulkFetchTarget() || {};
+        const snap = readBulkFetchSnapshot() || {};
+        const jobId = String(target.job_id || snap.job_id || '').trim();
+        if (!jobId) return;
+
+        const stoppingState = {
+          mode: 'bulk',
+          status: 'stopping',
+          percent: Math.max(1, Number(snap.percent || 1)),
+          message: 'Η διακοπή της μαζικής λήψης ζητήθηκε.',
+          job_id: jobId,
+          current_customer: String(snap.current_customer || ''),
+          current_index: Number(snap.current_index || 0),
+          total_customers: Number(snap.total_customers || 0),
+        };
+        setBulkFetchSnapshot(stoppingState);
+        upsertGlobalFetchProgressFlash(stoppingState);
+
+        try {
+          const res = await fetch('/api/fetch_bulk/stop', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Requested-With': 'XMLHttpRequest',
+              'Accept': 'application/json'
+            },
+            body: JSON.stringify({ job_id: jobId, source: 'global_flash' })
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || !data || data.ok !== true) {
+            throw new Error((data && (data.error || data.message)) ? (data.error || data.message) : 'Αποτυχία αίτησης διακοπής.');
+          }
+          const msg = String(data.message || 'Η διακοπή ζητήθηκε.');
+          const updated = Object.assign({}, stoppingState, { message: msg });
+          setBulkFetchSnapshot(updated);
+          upsertGlobalFetchProgressFlash(updated);
+        } catch (err) {
+          const errorState = {
+            mode: 'bulk',
+            status: 'error',
+            percent: Math.max(1, Number(snap.percent || 1)),
+            message: String((err && err.message) || 'Αποτυχία αίτησης διακοπής.'),
+            job_id: jobId,
+            current_customer: String(snap.current_customer || ''),
+            current_index: Number(snap.current_index || 0),
+            total_customers: Number(snap.total_customers || 0),
+          };
+          setBulkFetchSnapshot(errorState);
+          upsertGlobalFetchProgressFlash(errorState);
+        }
+      }
+
       function ensureFlashContainer(){
-        return document.getElementById('flashContainer') || document.body;
+        let container = document.getElementById('flashContainer');
+        if (container) return container;
+        try {
+          container = document.createElement('div');
+          container.id = 'flashContainer';
+          container.className = 'space-y-2 mb-4';
+          container.style.position = 'fixed';
+          container.style.top = 'calc(env(safe-area-inset-top, 0px) + 8.75rem)';
+          container.style.right = '1rem';
+          container.style.zIndex = '100120';
+          container.style.width = 'min(92vw, 380px)';
+          container.style.margin = '0';
+          container.style.display = 'flex';
+          container.style.flexDirection = 'column';
+          container.style.gap = '0.5rem';
+          container.style.pointerEvents = 'none';
+          document.body.appendChild(container);
+          return container;
+        } catch (_) {
+          return document.body;
+        }
       }
 
       function clearGlobalFetchProgressFlash(){
+        try {
+          document.querySelectorAll('[data-progress-flash="1"]').forEach(function(node){ node.remove(); });
+        } catch (_) {}
         const existing = document.getElementById(FETCH_FLASH_ID);
         if (existing) existing.remove();
+      }
+
+      function showStandardFetchFlash(message, type, ttl, flashId, state){
+        const container = ensureFlashContainer();
+        if (!container || !message) return;
+
+        const kind = String(type || 'success').toLowerCase();
+        const cls = kind === 'error' ? 'flash-error' : (kind === 'warning' ? 'flash-warning' : 'flash-success');
+        const id = String(flashId || 'fetchFinalFlashMessage');
+        const timeoutMs = Number(ttl || 5000);
+
+        let el = document.getElementById(id);
+        if (!el) {
+          el = document.createElement('div');
+          el.id = id;
+          el.setAttribute('data-flash', '');
+          container.prepend(el);
+        }
+
+        el.className = 'flash-banner ' + cls;
+        el.setAttribute('data-ttl', String(timeoutMs));
+        el.style.pointerEvents = 'auto';
+        el.dataset.fetchFlashSignature = getFetchFlashSignature(state || {});
+        el.style.display = 'flex';
+        el.style.alignItems = 'center';
+        el.style.justifyContent = 'space-between';
+        el.style.gap = '0.75rem';
+
+        const textNode = document.createElement('span');
+        textNode.textContent = String(message || '');
+        textNode.style.flex = '1 1 auto';
+
+        const closeBtn = document.createElement('button');
+        closeBtn.type = 'button';
+        closeBtn.setAttribute('aria-label', 'Close');
+        closeBtn.textContent = '×';
+        closeBtn.style.background = 'transparent';
+        closeBtn.style.border = '0';
+        closeBtn.style.cursor = 'pointer';
+        closeBtn.style.fontSize = '20px';
+        closeBtn.style.lineHeight = '1';
+        closeBtn.style.opacity = '0.75';
+        closeBtn.addEventListener('click', function(){
+          try { dismissFetchFlashState(state || {}); } catch(_) {}
+          try { clearFetchTarget(); setFetchSnapshot(null); clearBulkFetchTarget(); setBulkFetchSnapshot(null); } catch(_) {}
+          try { localStorage.removeItem(BULK_FETCH_JOB_KEY); } catch(_) {}
+          try { el.remove(); } catch(_) {}
+        });
+
+        el.replaceChildren(textNode, closeBtn);
+
+        scheduleGlobalFetchFlashHide(0);
+        try {
+          if (el.__hideTimer) clearTimeout(el.__hideTimer);
+        } catch (_) {}
+        el.__hideTimer = setTimeout(function(){
+          try { el.remove(); } catch(_) {}
+        }, timeoutMs);
       }
 
       function upsertGlobalFetchProgressFlash(state){
@@ -2250,39 +2557,91 @@
           clearGlobalFetchProgressFlash();
           return;
         }
+        if (isFetchFlashDismissed(state)) {
+          clearGlobalFetchProgressFlash();
+          return;
+        }
 
         const container = ensureFlashContainer();
         if (!container) return;
+
+        try {
+          container.querySelectorAll('[data-progress-flash="1"]').forEach(function(node){
+            if (node && node.id !== FETCH_FLASH_ID) node.remove();
+          });
+        } catch (_) {}
 
         let el = document.getElementById(FETCH_FLASH_ID);
         if (!el) {
           el = document.createElement('div');
           el.id = FETCH_FLASH_ID;
           el.setAttribute('data-flash', '');
+          el.setAttribute('data-progress-flash', '1');
           container.prepend(el);
+        } else {
+          el.setAttribute('data-progress-flash', '1');
         }
+        el.dataset.fetchFlashSignature = getFetchFlashSignature(state || {});
 
         const pct = Math.max(0, Math.min(100, Number(state.percent || 0)));
         const msg = String(state.message || '').trim();
+        const isBulk = String(state.mode || '') === 'bulk' || String(state.job_id || '').trim() !== '';
         const credential = String(state.credential || '').trim();
         const vat = String(state.vat || '').trim();
-        const who = (credential || vat)
-          ? (' [' + [credential, vat].filter(Boolean).join(' - ') + ']')
-          : '';
-        const baseText = 'Πρόοδος λήψης: ' + pct + '%';
-        const fullText = msg ? (baseText + who + ' — ' + msg) : (baseText + who);
+        const currentCustomer = String(state.current_customer || '').trim();
+        const currentIndex = Number(state.current_index || 0);
+        const totalCustomers = Number(state.total_customers || 0);
+        const who = isBulk
+          ? (currentCustomer ? (' [' + currentCustomer + (totalCustomers ? ' (' + currentIndex + '/' + totalCustomers + ')' : '') + ']') : '')
+          : ((credential || vat) ? (' [' + [credential, vat].filter(Boolean).join(' - ') + ']') : '');
+        const baseText = (isBulk ? 'Μαζική λήψη: ' : 'Πρόοδος λήψης: ') + pct + '%';
+        const terminalByMessage = /ολοκληρώθηκε|διακόπηκε|σταμάτησε|σταματησε|επιτυχίες\s*:|αποτυχίες\s*:|σφάλμα/i.test(msg);
+        const runningLike = (status === 'running' || status === 'stopping') && !terminalByMessage;
+        const fullText = runningLike
+          ? (msg ? (baseText + who + ' — ' + msg) : (baseText + who))
+          : ((msg || (status === 'error' ? 'Σφάλμα κατά τη λήψη.' : (isBulk ? 'Η μαζική λήψη ολοκληρώθηκε.' : 'Η λήψη ολοκληρώθηκε.'))) + who);
 
-        if (status === 'running') {
-          el.className = 'flash-banner flash-info';
-          el.setAttribute('data-ttl', '0');
-        } else if (status === 'error') {
-          el.className = 'flash-banner flash-error';
-          el.setAttribute('data-ttl', '9000');
-        } else {
-          el.className = 'flash-banner flash-success';
-          el.setAttribute('data-ttl', '9000');
+        if (!runningLike) {
+          clearGlobalFetchProgressFlash();
+          showStandardFetchFlash(fullText, status === 'error' ? 'error' : 'success', 5000, isBulk ? 'bulkFetchFinalFlash' : 'singleFetchFinalFlash', state);
+          try {
+            if (isBulk) {
+              clearBulkFetchTarget();
+              setBulkFetchSnapshot(null);
+            } else {
+              clearFetchTarget();
+              setFetchSnapshot(null);
+            }
+          } catch (_) {}
+          return;
         }
-        el.textContent = fullText;
+
+        el.className = 'flash-banner flash-info';
+        el.setAttribute('data-ttl', '0');
+        scheduleGlobalFetchFlashHide(0);
+
+        el.style.display = 'flex';
+        el.style.alignItems = 'center';
+        el.style.justifyContent = 'space-between';
+        el.style.gap = '0.75rem';
+        el.style.pointerEvents = 'auto';
+
+        const textNode = document.createElement('span');
+        textNode.textContent = fullText;
+        textNode.style.flex = '1 1 auto';
+        el.replaceChildren(textNode);
+
+        if (isBulk && runningLike) {
+          const stopBtn = document.createElement('button');
+          stopBtn.type = 'button';
+          stopBtn.textContent = 'Διακοπή';
+          stopBtn.className = 'px-3 py-1 rounded-md bg-red-600 hover:bg-red-700 text-white font-semibold border-0';
+          stopBtn.disabled = status === 'stopping';
+          stopBtn.addEventListener('click', function(){
+            requestGlobalBulkFetchStop().catch(function(){});
+          });
+          el.appendChild(stopBtn);
+        }
       }
 
       async function pollGlobalNotifs(){
@@ -2325,9 +2684,23 @@
 
       async function pollGlobalFetchProgress(){
         const target = readFetchTarget();
+        if (target && !readJson(FETCH_TARGET_KEY)) {
+          setFetchTarget(target);
+        }
         if (!target) {
           const snap = readFetchSnapshot();
-          if (!snap || String(snap.status || '') !== 'running') clearGlobalFetchProgressFlash();
+          const bulkSnap = readBulkFetchSnapshot();
+          if (bulkSnap && stateShouldRemainVisible(bulkSnap)) {
+            upsertGlobalFetchProgressFlash(bulkSnap);
+            return;
+          }
+          if (snap && stateShouldRemainVisible(snap)) {
+            upsertGlobalFetchProgressFlash(snap);
+            return;
+          }
+          if (snap && !stateShouldRemainVisible(snap)) setFetchSnapshot(null);
+          if (bulkSnap && !stateShouldRemainVisible(bulkSnap)) setBulkFetchSnapshot(null);
+          clearGlobalFetchProgressFlash();
           return;
         }
         await refreshLastFetchFromServer(target);
@@ -2364,6 +2737,54 @@
         }
       }
 
+      async function pollGlobalBulkFetchProgress(){
+        const target = readBulkFetchTarget();
+        if (target && !readJson(BULK_FETCH_TARGET_KEY)) {
+          setBulkFetchTarget(target);
+        }
+        if (!target || !target.job_id) {
+          const snap = readBulkFetchSnapshot();
+          const regularSnap = readFetchSnapshot();
+          if (snap && stateShouldRemainVisible(snap)) {
+            upsertGlobalFetchProgressFlash(snap);
+            return;
+          }
+          if (regularSnap && stateShouldRemainVisible(regularSnap)) {
+            upsertGlobalFetchProgressFlash(regularSnap);
+            return;
+          }
+          if (snap && !stateShouldRemainVisible(snap)) setBulkFetchSnapshot(null);
+          if (regularSnap && !stateShouldRemainVisible(regularSnap)) setFetchSnapshot(null);
+          clearGlobalFetchProgressFlash();
+          return;
+        }
+
+        try {
+          const res = await fetch('/api/fetch_bulk/progress?job_id=' + encodeURIComponent(target.job_id), { credentials:'same-origin' });
+          if (!res.ok) return;
+          const data = await res.json().catch(() => ({}));
+          const state = {
+            status: String(data.status || 'not_started'),
+            percent: Number(data.percent || 0),
+            message: String(data.message || ''),
+            mode: 'bulk',
+            job_id: target.job_id,
+            current_customer: String(data.current_customer || ''),
+            current_index: Number(data.current_index || 0),
+            total_customers: Number(data.total_customers || 0),
+          };
+
+          setBulkFetchSnapshot(state);
+          upsertGlobalFetchProgressFlash(state);
+
+          if (!['running', 'stopping'].includes(state.status)) {
+            clearBulkFetchTarget();
+          }
+        } catch (e) {
+          console.warn('global bulk fetch progress poll failed', e);
+        }
+      }
+
       window.__setGlobalFetchProgressTarget = function(payloadOrCredential, maybeVat){
         if (typeof payloadOrCredential === 'string') {
           setFetchTarget({ credential: payloadOrCredential, vat: maybeVat || '' });
@@ -2377,14 +2798,46 @@
         if (state) upsertGlobalFetchProgressFlash(state);
       };
 
+      window.__setGlobalBulkFetchTarget = function(payload){
+        setBulkFetchTarget(payload || {});
+      };
+
+      window.__setGlobalBulkFetchSnapshot = function(state){
+        setBulkFetchSnapshot(state || null);
+        if (state) upsertGlobalFetchProgressFlash(state);
+      };
+
+      window.__clearGlobalBulkFetchTarget = function(){
+        clearBulkFetchTarget();
+        setBulkFetchSnapshot(null);
+        const regularSnap = readFetchSnapshot();
+        if (!regularSnap || !['running','stopping'].includes(String(regularSnap.status || ''))) {
+          clearGlobalFetchProgressFlash();
+        }
+      };
+
       window.__clearGlobalFetchProgressTarget = function(){
         clearFetchTarget();
         setFetchSnapshot(null);
-        clearGlobalFetchProgressFlash();
+        const bulkSnap = readBulkFetchSnapshot();
+        if (!bulkSnap || !['running','stopping'].includes(String(bulkSnap.status || ''))) {
+          clearGlobalFetchProgressFlash();
+        }
       };
 
+      window.__dismissFetchFlashState = dismissFetchFlashState;
+      window.__dismissFetchFlashSignature = dismissFetchFlashSignature;
+      window.__isFetchFlashDismissed = isFetchFlashDismissed;
+      window.__getFetchFlashSignature = getFetchFlashSignature;
+      window.__clearDismissedFetchFlash = clearDismissedFetchFlash;
+
+      ensureFlashContainer();
+
       const bootSnapshot = readFetchSnapshot();
-      if (bootSnapshot && String(bootSnapshot.status || '') === 'running') {
+      const bootBulkSnapshot = readBulkFetchSnapshot();
+      if (bootBulkSnapshot && ['running', 'stopping'].includes(String(bootBulkSnapshot.status || ''))) {
+        upsertGlobalFetchProgressFlash(bootBulkSnapshot);
+      } else if (bootSnapshot && ['running', 'stopping'].includes(String(bootSnapshot.status || ''))) {
         upsertGlobalFetchProgressFlash(bootSnapshot);
       }
 
@@ -2392,20 +2845,39 @@
         if (!ev || !ev.key) return;
         if (ev.key === FETCH_SNAPSHOT_KEY) {
           const snap = readFetchSnapshot();
-          if (snap) upsertGlobalFetchProgressFlash(snap);
+          const bulkSnap = readBulkFetchSnapshot();
+          if (bulkSnap && ['running', 'stopping'].includes(String(bulkSnap.status || ''))) upsertGlobalFetchProgressFlash(bulkSnap);
+          else if (snap) upsertGlobalFetchProgressFlash(snap);
           else clearGlobalFetchProgressFlash();
+        }
+        if (ev.key === BULK_FETCH_SNAPSHOT_KEY) {
+          const bulkSnap = readBulkFetchSnapshot();
+          if (bulkSnap) upsertGlobalFetchProgressFlash(bulkSnap);
+          else {
+            const snap = readFetchSnapshot();
+            if (snap) upsertGlobalFetchProgressFlash(snap);
+            else clearGlobalFetchProgressFlash();
+          }
         }
         if (ev.key === FETCH_TARGET_KEY && !readFetchTarget()) {
           const snap = readFetchSnapshot();
-          if (!snap || String(snap.status || '') !== 'running') clearGlobalFetchProgressFlash();
+          const bulkSnap = readBulkFetchSnapshot();
+          if ((!snap || !['running','stopping'].includes(String(snap.status || ''))) && (!bulkSnap || !['running','stopping'].includes(String(bulkSnap.status || '')))) clearGlobalFetchProgressFlash();
+        }
+        if (ev.key === BULK_FETCH_TARGET_KEY && !readBulkFetchTarget()) {
+          const snap = readFetchSnapshot();
+          const bulkSnap = readBulkFetchSnapshot();
+          if ((!snap || !['running','stopping'].includes(String(snap.status || ''))) && (!bulkSnap || !['running','stopping'].includes(String(bulkSnap.status || '')))) clearGlobalFetchProgressFlash();
         }
       });
 
       {% if current_user and current_user.is_authenticated %}
       pollGlobalNotifs();
       pollGlobalFetchProgress();
+      pollGlobalBulkFetchProgress();
       setInterval(pollGlobalNotifs, 5000);
       setInterval(pollGlobalFetchProgress, 1500);
+      setInterval(pollGlobalBulkFetchProgress, 1500);
       {% endif %}
     })();
     </script>
@@ -3206,7 +3678,15 @@
           const pr = parseFloat(cs.paddingRight || '0');
           if (pr < 22) el.style.paddingRight = '28px';
         }
-        btn.addEventListener('click', ()=> { try{ el.remove(); }catch(_){ } });
+        btn.addEventListener('click', ()=> {
+          try {
+            const sig = String(el.dataset.fetchFlashSignature || '').trim();
+            if (sig && typeof window.__dismissFetchFlashSignature === 'function') {
+              window.__dismissFetchFlashSignature(sig);
+            }
+          } catch(_) {}
+          try{ el.remove(); }catch(_){ }
+        });
         el.appendChild(btn);
 
         if (AUTO_HIDE_MS > 0) setTimeout(()=>{ try{ el.remove(); }catch(_){ } }, AUTO_HIDE_MS);
@@ -3233,8 +3713,19 @@
         const b = e.target.closest && e.target.closest('[data-dismiss="flash"], .btn-close, .close');
         if (!b) return;
         const host = b.closest(SELECTORS.join(',')) || b.parentElement;
-        if (host) { e.preventDefault(); try{ host.remove(); }catch(_){ } }
+        if (host) {
+          e.preventDefault();
+          try {
+            const sig = String(host.dataset.fetchFlashSignature || '').trim();
+            if (sig && typeof window.__dismissFetchFlashSignature === 'function') {
+              window.__dismissFetchFlashSignature(sig);
+            }
+          } catch(_) {}
+          try{ host.remove(); }catch(_){ }
+        }
       }, true);
+
+      try { window.__scanDismissableFlashes = scan; } catch (_) {}
     })();
 
     // Side menu toggle functionality
@@ -3831,9 +4322,10 @@
       function initFetchDateInputsFallback(pathname) {
         if (normalizePath(pathname) !== '/fetch') return;
 
-        const fromInput = document.getElementById('date_from');
-        const toInput = document.getElementById('date_to');
-        if (!fromInput || !toInput) return;
+        const fetchDateInputs = ['date_from', 'date_to', 'bulk_date_from', 'bulk_date_to']
+          .map(function(id) { return document.getElementById(id); })
+          .filter(Boolean);
+        if (!fetchDateInputs.length) return;
 
         function formatDateInputWithSlashes(raw) {
           const digits = String(raw || '').replace(/\D/g, '').slice(0, 8);
@@ -3854,8 +4346,7 @@
           });
         }
 
-        bindManualDateMask(fromInput);
-        bindManualDateMask(toInput);
+        fetchDateInputs.forEach(bindManualDateMask);
 
         function loadScriptOnce(src) {
           return new Promise((resolve, reject) => {
@@ -3902,13 +4393,15 @@
         function initFlatpickr() {
           if (typeof window.flatpickr !== 'function') return;
           try {
-            if (fromInput._flatpickr) fromInput._flatpickr.destroy();
-            if (toInput._flatpickr) toInput._flatpickr.destroy();
+            fetchDateInputs.forEach(function(input) {
+              if (input && input._flatpickr) input._flatpickr.destroy();
+            });
           } catch (_) {}
 
           try {
-            window.flatpickr(fromInput, { locale: 'el', dateFormat: 'd/m/Y', allowInput: true });
-            window.flatpickr(toInput, { locale: 'el', dateFormat: 'd/m/Y', allowInput: true });
+            fetchDateInputs.forEach(function(input) {
+              window.flatpickr(input, { locale: 'el', dateFormat: 'd/m/Y', allowInput: true });
+            });
           } catch (e) {
             console.warn('Fetch fallback flatpickr init failed', e);
           }
@@ -3919,7 +4412,338 @@
         setTimeout(initFlatpickr, 240);
       }
 
+      function initFetchBulkControlsFallback(pathname) {
+        if (normalizePath(pathname) !== '/fetch') return;
+
+        const searchInput = document.getElementById('bulkCustomerSearch');
+        const list = document.getElementById('bulkFetchCustomerList');
+        const selectAllBtn = document.getElementById('bulkSelectAllBtn');
+        const deselectAllBtn = document.getElementById('bulkDeselectAllBtn');
+        if (!list) return;
+
+        function applyFilter() {
+          if (!searchInput) return;
+          const q = String(searchInput.value || '').trim().toLowerCase();
+          const rows = Array.from(list.querySelectorAll('.bulk-customer-row'));
+          rows.forEach(function(row) {
+            const txt = String((row.dataset && row.dataset.bulkSearch) || row.textContent || '').toLowerCase();
+            row.style.display = (!q || txt.includes(q)) ? '' : 'none';
+          });
+        }
+
+        function getVisibleBoxes() {
+          const rows = Array.from(list.querySelectorAll('.bulk-customer-row'));
+          const visibleRows = rows.filter(function(row) { return row.style.display !== 'none'; });
+          const sourceRows = visibleRows.length ? visibleRows : rows;
+          return sourceRows
+            .map(function(row) { return row.querySelector('.bulkCustomerCheckbox'); })
+            .filter(Boolean);
+        }
+
+        if (searchInput) {
+          searchInput.oninput = applyFilter;
+          searchInput.onkeyup = applyFilter;
+          searchInput.onsearch = applyFilter;
+        }
+        if (selectAllBtn) {
+          selectAllBtn.onclick = function() {
+            getVisibleBoxes().forEach(function(cb) { cb.checked = true; });
+          };
+        }
+        if (deselectAllBtn) {
+          deselectAllBtn.onclick = function() {
+            getVisibleBoxes().forEach(function(cb) { cb.checked = false; });
+          };
+        }
+
+        applyFilter();
+        setTimeout(applyFilter, 80);
+        setTimeout(applyFilter, 240);
+      }
+
+      function initFetchModeTabsFallback(pathname) {
+        if (normalizePath(pathname) !== '/fetch') return;
+
+        const singleTabBtn = document.getElementById('singleFetchTabBtn');
+        const bulkTabBtn = document.getElementById('bulkFetchTabBtn');
+        const singlePanel = document.getElementById('singleFetchPanel');
+        const bulkPanel = document.getElementById('bulkFetchPanel');
+        if (!singleTabBtn || !bulkTabBtn || !singlePanel || !bulkPanel) return;
+
+        function applyMode(mode) {
+          const next = String(mode || 'single').toLowerCase() === 'bulk' ? 'bulk' : 'single';
+          singlePanel.classList.toggle('hidden', next !== 'single');
+          bulkPanel.classList.toggle('hidden', next !== 'bulk');
+          singleTabBtn.classList.toggle('is-active', next === 'single');
+          bulkTabBtn.classList.toggle('is-active', next === 'bulk');
+          singleTabBtn.setAttribute('aria-selected', next === 'single' ? 'true' : 'false');
+          bulkTabBtn.setAttribute('aria-selected', next === 'bulk' ? 'true' : 'false');
+          try { localStorage.setItem('scanmydata.fetchAdminTab', next); } catch (_) {}
+        }
+
+        singleTabBtn.onclick = function() { applyMode('single'); };
+        bulkTabBtn.onclick = function() { applyMode('bulk'); };
+
+        let stored = 'single';
+        try {
+          stored = String(localStorage.getItem('scanmydata.fetchAdminTab') || 'single').trim().toLowerCase();
+        } catch (_) {}
+
+        applyMode(stored);
+        setTimeout(function() { applyMode(stored); }, 80);
+        setTimeout(function() { applyMode(stored); }, 240);
+      }
+
+      function initFetchBulkActionsFallback(pathname) {
+        if (normalizePath(pathname) !== '/fetch') {
+          try {
+            if (window.__fetchBulkFallbackTimer) clearInterval(window.__fetchBulkFallbackTimer);
+            window.__fetchBulkFallbackTimer = null;
+          } catch (_) {}
+          return;
+        }
+
+        const startBtn = document.getElementById('bulkFetchStartBtn');
+        const stopBtn = document.getElementById('bulkFetchStopBtn');
+        const statusEl = document.getElementById('bulkFetchStatus');
+        const fromInput = document.getElementById('bulk_date_from');
+        const toInput = document.getElementById('bulk_date_to');
+        const list = document.getElementById('bulkFetchCustomerList');
+        const JOB_KEY = 'scanmydata.bulkFetchJobId';
+        if (!startBtn || !stopBtn || !statusEl || !fromInput || !toInput || !list) return;
+
+        function saveJobId(jobId) {
+          try {
+            const normalized = String(jobId || '').trim();
+            if (normalized) localStorage.setItem(JOB_KEY, normalized);
+            else localStorage.removeItem(JOB_KEY);
+          } catch (_) {}
+        }
+
+        function loadJobId() {
+          try {
+            return String(localStorage.getItem(JOB_KEY) || '').trim();
+          } catch (_) {
+            return '';
+          }
+        }
+
+        function setStatus(msg) {
+          statusEl.textContent = String(msg || '');
+        }
+
+        function setButtons(state) {
+          const s = String(state || 'idle').toLowerCase();
+          const runningLike = (s === 'running' || s === 'stopping');
+          startBtn.disabled = runningLike;
+          stopBtn.disabled = !runningLike;
+          startBtn.textContent = runningLike ? (s === 'stopping' ? 'Γίνεται Διακοπή...' : 'Σε Εξέλιξη...') : 'Εκκίνηση Μαζικής Λήψης';
+        }
+
+        function flash(msg, type, options) {
+          const opts = options || {};
+          try {
+            if (typeof window.__fetchUpsertProgressFlash === 'function') {
+              window.__fetchUpsertProgressFlash(String(msg || ''), Number(opts.percent || 1), type || 'info', {
+                mode: 'bulk',
+                canStop: !!opts.canStop,
+                state: String(opts.state || '')
+              });
+              return;
+            }
+            if (typeof window.__setGlobalBulkFetchSnapshot === 'function') {
+              const fallbackStatus = String(
+                opts.state || (
+                  type === 'error' ? 'error' : (
+                    type === 'success' ? 'completed' : 'running'
+                  )
+                )
+              );
+              window.__setGlobalBulkFetchSnapshot({
+                status: fallbackStatus,
+                percent: Number(opts.percent || 1),
+                message: String(msg || ''),
+                mode: 'bulk'
+              });
+              return;
+            }
+          } catch (_) {}
+        }
+
+        function getSelectedNames() {
+          return Array.from(list.querySelectorAll('.bulkCustomerCheckbox:checked'))
+            .map(function(cb) { return String(cb.value || '').trim(); })
+            .filter(Boolean);
+        }
+
+        async function pollOnce() {
+          const jobId = loadJobId();
+          if (!jobId) {
+            setButtons('idle');
+            return { status: 'not_started' };
+          }
+
+          const res = await fetch('/api/fetch_bulk/progress?job_id=' + encodeURIComponent(jobId), {
+            credentials: 'same-origin'
+          });
+          const data = await res.json().catch(function() { return {}; });
+          if (!res.ok || !data || data.ok !== true) {
+            saveJobId('');
+            setButtons('idle');
+            throw new Error((data && (data.error || data.message)) ? (data.error || data.message) : 'Αποτυχία ανάγνωσης προόδου μαζικής λήψης.');
+          }
+
+          const status = String(data.status || 'not_started');
+          const message = String(data.message || '');
+          const percent = Number(data.percent || 0);
+          setButtons(status);
+          if (message) setStatus(message);
+
+          if (status === 'running' || status === 'stopping') {
+            flash(message || 'Η μαζική λήψη είναι σε εξέλιξη.', 'info', { canStop: true, state: status, percent: percent });
+          } else if (status === 'completed') {
+            flash(message || 'Η μαζική λήψη ολοκληρώθηκε.', 'success', { percent: 100, state: 'completed' });
+          } else if (status === 'stopped') {
+            flash(message || 'Η μαζική λήψη διακόπηκε.', 'success', { percent: percent || 1, state: 'stopped' });
+          } else if (status === 'error') {
+            flash(message || 'Σφάλμα στη μαζική λήψη.', 'error', { percent: percent || 1 });
+          }
+
+          if (status !== 'running' && status !== 'stopping') {
+            saveJobId('');
+          }
+          return data;
+        }
+
+        function startPolling() {
+          try {
+            if (window.__fetchBulkFallbackTimer) {
+              clearInterval(window.__fetchBulkFallbackTimer);
+            }
+          } catch (_) {}
+
+          const tick = function() {
+            pollOnce().then(function(state) {
+              const status = String((state && state.status) || 'not_started');
+              if (status !== 'running' && status !== 'stopping') {
+                try {
+                  if (window.__fetchBulkFallbackTimer) clearInterval(window.__fetchBulkFallbackTimer);
+                } catch (_) {}
+              }
+            }).catch(function(err) {
+              setStatus(String((err && err.message) || 'Σφάλμα polling μαζικής λήψης.'));
+              setButtons('idle');
+            });
+          };
+
+          window.__fetchBulkFallbackTimer = setInterval(tick, 1500);
+          tick();
+        }
+
+        startBtn.onclick = async function() {
+          const dateFrom = String(fromInput.value || '').trim();
+          const dateTo = String(toInput.value || '').trim();
+          const selectedNames = getSelectedNames();
+
+          if (!dateFrom || !dateTo) {
+            const msg = 'Συμπλήρωσε τις ημερομηνίες της μαζικής λήψης (Από/Έως) πριν την εκκίνηση.';
+            setStatus(msg);
+            flash(msg, 'error', { percent: 1 });
+            return;
+          }
+          if (!selectedNames.length) {
+            const msg = 'Επίλεξε τουλάχιστον έναν πελάτη.';
+            setStatus(msg);
+            flash(msg, 'error', { percent: 1 });
+            return;
+          }
+
+          setButtons('running');
+          setStatus('Ξεκινά η μαζική λήψη...');
+
+          try {
+            const res = await fetch('/api/fetch_bulk/start', {
+              method: 'POST',
+              credentials: 'same-origin',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Accept': 'application/json'
+              },
+              body: JSON.stringify({
+                date_from: dateFrom,
+                date_to: dateTo,
+                all_customers: false,
+                credential_names: selectedNames,
+              })
+            });
+            const data = await res.json().catch(function() { return {}; });
+            if (!res.ok || !data || data.ok !== true) {
+              throw new Error((data && (data.error || data.message)) ? (data.error || data.message) : 'Αποτυχία εκκίνησης μαζικής λήψης.');
+            }
+            saveJobId(String(data.job_id || '').trim());
+            setStatus(String(data.message || 'Η μαζική λήψη ξεκίνησε.'));
+            flash(String(data.message || 'Η μαζική λήψη ξεκίνησε.'), 'info', { canStop: true, state: 'running', percent: 1 });
+            startPolling();
+          } catch (err) {
+            saveJobId('');
+            setButtons('idle');
+            const msg = String((err && err.message) || 'Αποτυχία εκκίνησης μαζικής λήψης.');
+            setStatus(msg);
+            flash(msg, 'error', { percent: 1 });
+          }
+        };
+
+        stopBtn.onclick = async function() {
+          const jobId = loadJobId();
+          if (!jobId) {
+            const msg = 'Δεν βρέθηκε ενεργή μαζική λήψη για διακοπή.';
+            setStatus(msg);
+            flash(msg, 'error', { percent: 1 });
+            setButtons('idle');
+            return;
+          }
+
+          stopBtn.disabled = true;
+          try {
+            const res = await fetch('/api/fetch_bulk/stop', {
+              method: 'POST',
+              credentials: 'same-origin',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Accept': 'application/json'
+              },
+              body: JSON.stringify({ job_id: jobId })
+            });
+            const data = await res.json().catch(function() { return {}; });
+            if (!res.ok || !data || data.ok !== true) {
+              throw new Error((data && (data.error || data.message)) ? (data.error || data.message) : 'Αποτυχία αίτησης διακοπής.');
+            }
+            setButtons('stopping');
+            setStatus(String(data.message || 'Η διακοπή ζητήθηκε.'));
+            flash(String(data.message || 'Η διακοπή ζητήθηκε.'), 'info', { canStop: true, state: 'stopping', percent: 1 });
+            startPolling();
+          } catch (err) {
+            const msg = String((err && err.message) || 'Αποτυχία αίτησης διακοπής.');
+            setStatus(msg);
+            flash(msg, 'error', { percent: 1 });
+            pollOnce().catch(function() {});
+          }
+        };
+
+        if (loadJobId()) {
+          startPolling();
+        } else {
+          setButtons('idle');
+        }
+      }
+
       function cleanupTransientDatepickers() {
+        try {
+          if (window.__fetchBulkFallbackTimer) clearInterval(window.__fetchBulkFallbackTimer);
+          window.__fetchBulkFallbackTimer = null;
+        } catch (_) {}
         try {
           document.querySelectorAll('input').forEach(function(input) {
             try {
@@ -4157,6 +4981,9 @@
         initSearchRepeatProfileHintSync(url.pathname);
         initFetchCredentialLockFallback(url.pathname);
         initFetchDateInputsFallback(url.pathname);
+        initFetchBulkControlsFallback(url.pathname);
+        initFetchModeTabsFallback(url.pathname);
+        initFetchBulkActionsFallback(url.pathname);
         initSearchReceiptsOutlineSync(url.pathname);
         initSearchRepeatSwitchStateSync(url.pathname);
 
@@ -4223,6 +5050,9 @@
         initSearchRepeatProfileHintSync(url.pathname);
         initFetchCredentialLockFallback(url.pathname);
         initFetchDateInputsFallback(url.pathname);
+        initFetchBulkControlsFallback(url.pathname);
+        initFetchModeTabsFallback(url.pathname);
+        initFetchBulkActionsFallback(url.pathname);
         initSearchReceiptsOutlineSync(url.pathname);
         initSearchRepeatSwitchStateSync(url.pathname);
       });

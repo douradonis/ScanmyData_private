@@ -997,6 +997,7 @@ def log_user_activity(user_id, group_name, action, details=None, user_email=None
         - 'export_bridge': {'book_category': str, 'rows_count': int, 'file_size_mb': float, 'file_name': str}
         - 'export_expenses': {'book_category': str, 'rows_count': int, 'file_size_mb': float, 'file_name': str}
         - 'fetch_data': {'date_from': str, 'date_to': str, 'records_count': int}
+        - 'bulk_fetch_data': {'date_from': str, 'date_to': str, 'vat': str, 'added_docs': int, 'added_summaries': int, 'fetched_count': int}
     """
     try:
         import firebase_config
@@ -1038,6 +1039,7 @@ def log_user_activity(user_id, group_name, action, details=None, user_email=None
             'export_expenses': 'Λήψη εξοδολογίου (Excel)',
             'ληψη παραστατικων': 'Λήψη Παραστατικών',
             'fetch_data': 'Ανάκτηση δεδομένων MyDATA',
+            'bulk_fetch_data': 'Μαζική Ανάκτηση Δεδομένων MyDATA',
             'search_mark': 'Αναζήτηση MARK',
             'save_invoice': 'Αποθήκευση παραστατικού',
         }

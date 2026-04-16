@@ -307,16 +307,45 @@
         stack: [],
         max: 5,
       };
-      const undoStorageKey = 'fbp_delete_undo_stack_v1';
+      const ACTIVE_CUSTOMER_VAT = String("{{ active_credential_vat|default('', true)|e }}" || '').trim();
+      const ACTIVE_CUSTOMER_NAME = String("{{ active_credential|default('', true)|e }}" || '').trim();
+      const ACTIVE_CUSTOMER_SCOPE = ACTIVE_CUSTOMER_VAT || ACTIVE_CUSTOMER_NAME || 'default';
+      const ACTIVE_CUSTOMER_LABEL = ACTIVE_CUSTOMER_NAME
+        ? `${ACTIVE_CUSTOMER_NAME}${ACTIVE_CUSTOMER_VAT ? ' (' + ACTIVE_CUSTOMER_VAT + ')' : ''}`
+        : (ACTIVE_CUSTOMER_VAT ? `ΑΦΜ ${ACTIVE_CUSTOMER_VAT}` : 'ενεργός πελάτης');
+      const undoStorageKey = `fbp_delete_undo_stack_v2:${ACTIVE_CUSTOMER_SCOPE}`;
+
+      function normalizeUndoItem(item){
+        const token = String(item && item.token || '').trim();
+        if(!token) return null;
+        const scope = String(item && (item.customer_scope || item.customer_vat || item.customer_name) || ACTIVE_CUSTOMER_SCOPE).trim() || ACTIVE_CUSTOMER_SCOPE;
+        const name = String(item && item.customer_name || '').trim() || ACTIVE_CUSTOMER_NAME;
+        const vat = String(item && item.customer_vat || '').trim() || ACTIVE_CUSTOMER_VAT;
+        let label = String(item && (item.customer_label || item.customer_name) || '').trim();
+        if(!label){
+          label = name || (vat ? `ΑΦΜ ${vat}` : ACTIVE_CUSTOMER_LABEL);
+        }
+        if(vat && !label.includes(vat)){
+          label = `${label} (${vat})`;
+        }
+        return {
+          token,
+          count: Number(item && item.count) || 0,
+          created_ts: Number(item && item.created_ts) || Math.floor(Date.now()/1000),
+          customer_scope: scope,
+          customer_label: label || ACTIVE_CUSTOMER_LABEL,
+          customer_vat: vat,
+          customer_name: name,
+        };
+      }
 
       function saveUndoState(){
         try{
           if(!window.localStorage) return;
-          const serializable = (undoState.stack || []).slice(0, undoState.max).map(item => ({
-            token: String(item && item.token || ''),
-            count: Number(item && item.count) || 0,
-            created_ts: Number(item && item.created_ts) || Math.floor(Date.now()/1000),
-          })).filter(item => item.token);
+          const serializable = (undoState.stack || [])
+            .map(normalizeUndoItem)
+            .filter(item => item && item.token && String(item.customer_scope || '') === ACTIVE_CUSTOMER_SCOPE)
+            .slice(0, undoState.max);
           window.localStorage.setItem(undoStorageKey, JSON.stringify(serializable));
         }catch(_){ }
       }
@@ -325,15 +354,22 @@
         try{
           if(!window.localStorage) return;
           const raw = window.localStorage.getItem(undoStorageKey);
-          if(!raw) return;
+          if(!raw){
+            undoState.stack = [];
+            return;
+          }
           const parsed = JSON.parse(raw);
-          if(!Array.isArray(parsed)) return;
-          undoState.stack = parsed.map(item => ({
-            token: String(item && item.token || ''),
-            count: Number(item && item.count) || 0,
-            created_ts: Number(item && item.created_ts) || Math.floor(Date.now()/1000),
-          })).filter(item => item.token).slice(0, undoState.max);
-        }catch(_){ }
+          if(!Array.isArray(parsed)){
+            undoState.stack = [];
+            return;
+          }
+          undoState.stack = parsed
+            .map(normalizeUndoItem)
+            .filter(item => item && item.token && String(item.customer_scope || '') === ACTIVE_CUSTOMER_SCOPE)
+            .slice(0, undoState.max);
+        }catch(_){
+          undoState.stack = [];
+        }
       }
 
       function fmtUndoLabel(item){
@@ -342,7 +378,8 @@
           const hh = String(when.getHours()).padStart(2, '0');
           const mm = String(when.getMinutes()).padStart(2, '0');
           const count = Number(item && item.count) || 0;
-          return `Διαγραφή ${count} εγγραφών (${hh}:${mm})`;
+          const label = String(item && item.customer_label || ACTIVE_CUSTOMER_LABEL).trim();
+          return `${label} · Διαγραφή ${count} εγγραφών (${hh}:${mm})`;
         }catch(_){
           const count = Number(item && item.count) || 0;
           return `Διαγραφή ${count} εγγραφών`;
@@ -401,13 +438,11 @@
       }
 
       function pushUndo(item){
-        if(!item || !item.token) return;
-        undoState.stack = undoState.stack.filter(x => String(x.token||'') !== String(item.token||''));
-        undoState.stack.unshift({
-          token: String(item.token || ''),
-          count: Number(item.count) || 0,
-          created_ts: Number(item.created_ts) || Math.floor(Date.now()/1000),
-        });
+        const normalized = normalizeUndoItem(item);
+        if(!normalized || !normalized.token) return;
+        if(String(normalized.customer_scope || '') !== ACTIVE_CUSTOMER_SCOPE) return;
+        undoState.stack = undoState.stack.filter(x => String(x.token||'') !== String(normalized.token||''));
+        undoState.stack.unshift(normalized);
         undoState.stack = undoState.stack.slice(0, undoState.max);
         saveUndoState();
         renderUndoMenu();

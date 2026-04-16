@@ -1009,7 +1009,7 @@ async function loadActivity() {
       }
     }
     
-    const response = await fetch('/api/admin/activity-logs?limit=500&_ts=' + encodeURIComponent(String(Date.now())), {
+    const response = await fetch('/api/admin/activity-logs?limit=5000&_ts=' + encodeURIComponent(String(Date.now())), {
       cache: 'no-store',
       credentials: 'same-origin',
       headers: {

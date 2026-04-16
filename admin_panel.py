@@ -785,24 +785,34 @@ def _create_detailed_description(action: str, details: Dict[str, Any], entry: Op
         entry: The full entry object (for accessing entry-level fields when details is empty)
     """
     try:
+        def unwrap_details(obj: Any) -> Dict[str, Any]:
+            current = obj if isinstance(obj, dict) else {}
+            try:
+                for _ in range(5):
+                    nested = current.get('details') if isinstance(current, dict) else None
+                    if isinstance(nested, dict) and nested:
+                        current = nested
+                    else:
+                        break
+            except Exception:
+                pass
+            return current if isinstance(current, dict) else {}
+
         # Helper to get a field from details first, then fall back to entry level
         def get_field(key: str, default=None):
-            # Check top-level details
             try:
-                if details and isinstance(details, dict):
-                    if key in details and details.get(key):
-                        return details.get(key)
-                    # Check nested details inside details (common wrapper)
-                    nested = details.get('details')
-                    if isinstance(nested, dict) and key in nested and nested.get(key):
-                        return nested.get(key)
-                # Check entry-level keys
+                normalized_details = unwrap_details(details)
+                if key in normalized_details and normalized_details.get(key) not in [None, '']:
+                    return normalized_details.get(key)
+                if details and isinstance(details, dict) and key in details and details.get(key) not in [None, '']:
+                    return details.get(key)
+
                 if entry and isinstance(entry, dict):
-                    if key in entry and entry.get(key):
+                    normalized_entry_details = unwrap_details(entry.get('details'))
+                    if key in normalized_entry_details and normalized_entry_details.get(key) not in [None, '']:
+                        return normalized_entry_details.get(key)
+                    if key in entry and entry.get(key) not in [None, '']:
                         return entry.get(key)
-                    nested_e = entry.get('details')
-                    if isinstance(nested_e, dict) and key in nested_e and nested_e.get(key):
-                        return nested_e.get(key)
             except Exception:
                 pass
             return default
@@ -932,15 +942,19 @@ def _create_detailed_description(action: str, details: Dict[str, Any], entry: Op
             group = get_field('group') or get_field('group_name') or '-'
             return f"Αποχώρηση χρήστη {who} από ομάδα {group}"
         
-        elif action in ['fetch_data', 'ληψη παραστατικων']:
-            # details may be nested under 'details' or present directly
-            actual = details.get('details', details) if isinstance(details, dict) else details
+        elif action in ['fetch_data', 'bulk_fetch_data', 'ληψη παραστατικων']:
+            actual = unwrap_details(details)
             date_from = actual.get('date_from') or actual.get('από') or ''
             date_to = actual.get('date_to') or actual.get('έως') or ''
             vat = actual.get('client_vat') or actual.get('vat') or actual.get('πελατης') or ''
+            client_label = actual.get('client_label') or ''
             added_docs = actual.get('added_docs') or 0
             added_summaries = actual.get('added_summaries') or actual.get('summaries') or 0
-            return f"Λήψη παραστατικών για πελάτη {vat} από {date_from} έως {date_to}. Προστέθηκαν {added_docs} έγγραφα, {added_summaries} συνοψίσεις."
+            fetched_count = actual.get('fetched_count') or 0
+            label = vat or client_label or 'Άγνωστο'
+            prefix = 'Μαζική λήψη παραστατικών' if action == 'bulk_fetch_data' else 'Λήψη παραστατικών'
+            count_text = f", {fetched_count} συνολικά ευρήματα" if fetched_count else ''
+            return f"{prefix} για πελάτη {label} από {date_from} έως {date_to}. Προστέθηκαν {added_docs} έγγραφα, {added_summaries} συνοψίσεις{count_text}."
 
         elif action in ['user_logged_in', 'login']:
             ip_address = details.get('ip_address', 'Άγνωστο')
@@ -1254,7 +1268,7 @@ def admin_get_activity_logs(group_name: Optional[str] = None, limit: int = 100) 
                                         entry = {
                                             'timestamp': ts,
                                             'group': str(group_name),
-                                            'action': 'ληψη παραστατικων',
+                                            'action': 'bulk_fetch_data',
                                             'details': {
                                                 'date_from': d1,
                                                 'date_to': d2,
@@ -1369,12 +1383,32 @@ def admin_get_activity_logs(group_name: Optional[str] = None, limit: int = 100) 
                                 try:
                                     if ' - ' in line:
                                         ts_part, msg_part = line.split(' - ', 1)
-                                        entry = {
-                                            'timestamp': ts_part.strip(),
-                                            'group': folder_name,
-                                            'action': 'log_message',
-                                            'details': {'message': msg_part.strip()}
-                                        }
+                                        ts = ts_part.strip()
+                                        msg = msg_part.strip()
+                                        import re
+                                        bulk_match = re.search(r'Bulk fetch performed:\s*(?P<d1>\d{2}/\d{2}/\d{4})\s*to\s*(?P<d2>\d{2}/\d{2}/\d{4}),\s*VAT\s*(?P<vat>\d+),\s*(?P<docs>\d+)\s*docs\s*\+\s*(?P<summaries>\d+)\s*summaries\s*by\s*(?P<by>.+)$', msg)
+                                        if bulk_match:
+                                            entry = {
+                                                'timestamp': ts,
+                                                'group': folder_name,
+                                                'action': 'bulk_fetch_data',
+                                                'details': {
+                                                    'date_from': bulk_match.group('d1'),
+                                                    'date_to': bulk_match.group('d2'),
+                                                    'client_vat': bulk_match.group('vat'),
+                                                    'client_label': bulk_match.group('vat'),
+                                                    'added_docs': int(bulk_match.group('docs') or 0),
+                                                    'added_summaries': int(bulk_match.group('summaries') or 0),
+                                                    'by': bulk_match.group('by').strip()
+                                                }
+                                            }
+                                        else:
+                                            entry = {
+                                                'timestamp': ts,
+                                                'group': folder_name,
+                                                'action': 'log_message',
+                                                'details': {'message': msg}
+                                            }
                                         all_logs.append(entry)
                                         continue
                                 except Exception:
@@ -1648,6 +1682,7 @@ def admin_get_activity_logs(group_name: Optional[str] = None, limit: int = 100) 
                 'group_restored': 'Επαναφορά ομάδας',
                 'export_bridge': 'Λήψη γέφυρας',
                 'fetch_data': 'Λήψη Παραστατικών',
+                'bulk_fetch_data': 'Μαζική Λήψη Παραστατικών',
                 'export_expenses': 'Λήψη εξοδολογίου',
                 'ληψη παραστατικων': 'Λήψη Παραστατικών',
                 'user_deleted': 'Διαγραφή χρήστη',
