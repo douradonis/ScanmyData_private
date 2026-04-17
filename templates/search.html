@@ -5394,8 +5394,10 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
           repeatSwitch.checked = enabled;
           setActiveProfileHint(enabled ? ((repeat && repeat.profile_name) || "") : "");
 
-          // show edit button if mapping exists and receipts not selected
-          if(mapping && Object.keys(mapping).length && !(useReceiptsSwitch && useReceiptsSwitch.checked)) editRepeatBtn.classList.remove('hidden');
+          // show edit button whenever repeat is enabled in invoices mode
+          if (!(useReceiptsSwitch && useReceiptsSwitch.checked) && enabled) {
+            editRepeatBtn.classList.remove('hidden');
+          }
           repeatSwitch.addEventListener('change', async function(){
             const now = this.checked;
             if(now){
@@ -5439,7 +5441,7 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
 
         // Wire edit button
         if(editRepeatBtn){
-          editRepeatBtn.classList.toggle('hidden', !mapping || Object.keys(mapping).length===0 || (useReceiptsSwitch && useReceiptsSwitch.checked));
+          editRepeatBtn.classList.toggle('hidden', !(repeatSwitch && repeatSwitch.checked) || (useReceiptsSwitch && useReceiptsSwitch.checked));
           editRepeatBtn.addEventListener('click', function(){
             openRepeatModalWithMapping(mapping);
           });
@@ -5475,7 +5477,7 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
             const resp = await apiGetRepeatEntry(VAT);
             if(resp && resp.ok){
               const mapping = (resp.repeat_entry && resp.repeat_entry.mapping) ? resp.repeat_entry.mapping : {};
-              if(mapping && Object.keys(mapping).length && repeatSwitch && repeatSwitch.checked){
+              if(repeatSwitch && repeatSwitch.checked){
                 editRepeatBtn.classList.remove('hidden');
               } else {
                 editRepeatBtn.classList.add('hidden');
@@ -5499,6 +5501,65 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
   const existingBanner = document.getElementById('existingBanner');
   const dismissBannerBtn = document.getElementById('dismissBannerBtn');
 
+  function rcSyncSearchBoxYellowFrame(){
+    try {
+      const banner = document.getElementById('existingBanner');
+      const bannerVisible = !!(banner && banner.style.display !== 'none' && !banner.classList.contains('hidden'));
+      const receiptsOn = !!document.getElementById('useReceiptsSwitch')?.checked;
+      const markEl = document.getElementById('markInput');
+      const urlEl = document.getElementById('scrapeUrlInput');
+
+      const clearStyle = (el) => {
+        if (!el) return;
+        el.style.outline = '';
+        el.style.boxShadow = '';
+        el.style.borderColor = '';
+      };
+      const applyStyle = (el) => {
+        if (!el) return;
+        el.style.outline = '2px solid #f59e0b';
+        el.style.boxShadow = '0 0 0 3px rgba(253, 224, 71, 0.35)';
+        el.style.borderColor = '#f59e0b';
+      };
+
+      clearStyle(markEl);
+      clearStyle(urlEl);
+      if (!bannerVisible) return;
+      if (receiptsOn) applyStyle(urlEl || markEl);
+      else applyStyle(markEl || urlEl);
+    } catch(_) {}
+  }
+
+  function rcBindYellowFrameObservers(){
+    if (window.__RC_YELLOW_FRAME_OBS_BOUND) return;
+    window.__RC_YELLOW_FRAME_OBS_BOUND = true;
+
+    let rafPending = false;
+    const safeSync = () => {
+      if (rafPending) return;
+      rafPending = true;
+      const run = () => {
+        rafPending = false;
+        try { rcSyncSearchBoxYellowFrame(); } catch(_) {}
+      };
+      try { window.requestAnimationFrame(run); } catch(_) { setTimeout(run, 0); }
+    };
+
+    // Re-apply frame when dynamic nodes are added/removed (partial updates, input recreation).
+    try {
+      const obs = new MutationObserver(() => { safeSync(); });
+      obs.observe(document.body, { subtree: true, childList: true });
+      window.__RC_YELLOW_FRAME_OBSERVER = obs;
+    } catch(_) {}
+
+    document.addEventListener('focusin', function(e){
+      const t = e.target;
+      if (!t || (t.id !== 'markInput' && t.id !== 'scrapeUrlInput')) return;
+      safeSync();
+    }, true);
+  }
+  window.rcSyncSearchBoxYellowFrame = rcSyncSearchBoxYellowFrame;
+
   function rcEnsureExistingBanner(markText){
     let banner = document.getElementById('existingBanner');
     if (!banner) {
@@ -5520,6 +5581,7 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
     banner.dataset.mark = String(markText || '').trim();
     banner.style.display = '';
     rcBindExistingBannerButtons();
+    rcSyncSearchBoxYellowFrame();
     return banner;
   }
 
@@ -5542,6 +5604,7 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
       const next = u.pathname + (u.searchParams.toString() ? ('?' + u.searchParams.toString()) : '') + (u.hash || '');
       window.history.replaceState({}, '', next);
     } catch(_){ }
+    rcSyncSearchBoxYellowFrame();
   }
 
   function rcOpenSummaryModalFromObject(obj){
@@ -5773,6 +5836,7 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
       dismissBtn.addEventListener('click', function(){
         const bb = document.getElementById('existingBanner');
         if (bb) bb.style.display = 'none';
+        rcSyncSearchBoxYellowFrame();
         rcClearReclassSearchState();
       });
     }
@@ -5784,6 +5848,22 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
   }
 
   rcBindExistingBannerButtons();
+  rcSyncSearchBoxYellowFrame();
+  rcBindYellowFrameObservers();
+
+  if (!window.__RC_YELLOW_FRAME_PAGE_READY_BOUND) {
+    window.__RC_YELLOW_FRAME_PAGE_READY_BOUND = true;
+    window.addEventListener('app:page-ready', function(){
+      setTimeout(rcSyncSearchBoxYellowFrame, 0);
+      setTimeout(rcSyncSearchBoxYellowFrame, 140);
+    });
+  }
+
+  document.getElementById('useReceiptsSwitch')?.addEventListener('change', function(){
+    setTimeout(rcSyncSearchBoxYellowFrame, 0);
+    setTimeout(rcSyncSearchBoxYellowFrame, 120);
+    setTimeout(rcSyncSearchBoxYellowFrame, 320);
+  }, true);
 
   const modal = document.getElementById('summaryModal');
   const modalCloseBtns = Array.from(document.querySelectorAll('#modalCloseX, #modalCloseBtn'));
@@ -6231,6 +6311,17 @@ evt.preventDefault();
       if (!res.ok || !j || j.ok === false) {
         const msg = j && (j.error || j.message) ? (j.error || j.message) : ('Server ' + (res.status || ''));
         showFlash('Σφάλμα scraper: ' + msg, 'error', 6000);
+        try {
+          if (urlInput) urlInput.value = '';
+          const markEl = document.getElementById('markInput');
+          if (markEl) markEl.value = '';
+          const hiddenUrl = document.getElementById('scrapeUrlField');
+          if (hiddenUrl) hiddenUrl.value = '';
+          const hiddenCategory = document.getElementById('scrapeCategoryField');
+          if (hiddenCategory) hiddenCategory.value = '';
+          window.__RC_LAST_SEARCH_MARK_OR_URL = '';
+          if (typeof clearReceiptSearchCacheOnClose === 'function') clearReceiptSearchCacheOnClose();
+        } catch(_) {}
         return;
       }
 
@@ -6555,7 +6646,63 @@ try {
 // --- replace the previous payload construction + fetch with this robust version ---
 
 // ===== Helper function for partial table reload (after save) =====
-async function partiallyReloadInvoiceTable() {
+async function partiallyReloadInvoiceTable(options = {}) {
+  const opts = (options && typeof options === 'object') ? options : {};
+  const candidateFromOptions = String(opts.highlightMark || '').trim();
+  const candidateFromGlobal = String(window.__RC_PENDING_LIST_HIGHLIGHT_MARK || '').trim();
+  const candidateFromInput = (function(){
+    try {
+      const src = JSON.parse(document.getElementById('summaryJsonInput')?.value || '{}');
+      return String((src && (src.mark || src.MARK || src.number)) || '').trim();
+    } catch(_) { return ''; }
+  })();
+  const highlightMark = candidateFromOptions || candidateFromGlobal || candidateFromInput;
+
+  const normalizeMark = (value) => String(value || '').replace(/\D+/g, '').trim();
+
+  const tryHighlightRow = (markValue) => {
+    const target = String(markValue || '').trim();
+    const targetDigits = normalizeMark(target);
+    if (!target) return false;
+    let row = null;
+    try {
+      const cb = document.querySelector(`#summary-container input[name="delete_mark"][value="${CSS.escape(target)}"]`);
+      if (cb) row = cb.closest('tr');
+    } catch(_) {}
+    if (!row && targetDigits) {
+      const cbs = Array.from(document.querySelectorAll('#summary-container input[name="delete_mark"]'));
+      const cb2 = cbs.find(el => normalizeMark(el.value) === targetDigits);
+      if (cb2) row = cb2.closest('tr');
+    }
+    if (!row) {
+      const rows = Array.from(document.querySelectorAll('#summary-container tr'));
+      row = rows.find(r => {
+        const txt = String(r.textContent || '');
+        if (txt.includes(target)) return true;
+        return !!(targetDigits && normalizeMark(txt).includes(targetDigits));
+      }) || null;
+    }
+    if (!row) return false;
+
+    row.classList.add('rc-new-row-highlight');
+    row.style.backgroundColor = '#dcfce7';
+    row.style.outline = '2px solid #16a34a';
+    row.style.outlineOffset = '-2px';
+    row.style.boxShadow = '0 0 0 3px rgba(34, 197, 94, 0.28)';
+    row.style.transition = 'background-color 1.2s ease, box-shadow 1.2s ease, outline-color 1.2s ease';
+    try { row.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch(_) {}
+    setTimeout(() => {
+      try {
+        row.style.backgroundColor = '';
+        row.style.outline = '';
+        row.style.outlineOffset = '';
+        row.style.boxShadow = '';
+        row.classList.remove('rc-new-row-highlight');
+      } catch(_) {}
+    }, 2400);
+    return true;
+  };
+
   const reinitTable = () => {
     setTimeout(() => {
       try {
@@ -6566,6 +6713,21 @@ async function partiallyReloadInvoiceTable() {
           initializeSelectAllCheckbox();
         }
       } catch(e) { console.warn('Table reinitialization failed:', e); }
+      try {
+        if (typeof window.__rcEnsureRepeatUiSync === 'function') {
+          window.__rcEnsureRepeatUiSync();
+        }
+      } catch(_) {}
+      try {
+        if (typeof window.updateReceiptClassEditButton === 'function') {
+          window.updateReceiptClassEditButton();
+        }
+      } catch(_) {}
+      try {
+        if (typeof window.rcSyncSearchBoxYellowFrame === 'function') {
+          window.rcSyncSearchBoxYellowFrame();
+        }
+      } catch(_) {}
     }, 50);
   };
 
@@ -6580,7 +6742,8 @@ async function partiallyReloadInvoiceTable() {
   };
 
   try {
-    const tableRes = await fetch('/list/fragment', { method: 'GET', credentials: 'same-origin' });
+    const query = highlightMark ? ('?highlight_mark=' + encodeURIComponent(highlightMark)) : '';
+    const tableRes = await fetch('/list/fragment' + query, { method: 'GET', credentials: 'same-origin' });
     if (tableRes.ok) {
       const data = await tableRes.json();
       if (data.ok && data.table_html) {
@@ -6589,6 +6752,13 @@ async function partiallyReloadInvoiceTable() {
           container.innerHTML = data.table_html;
           syncDownloadControls(!!data.file_exists);
           reinitTable();
+          const markToHighlight = String((data && data.highlight_mark) || highlightMark || '').trim();
+          if (markToHighlight) {
+            setTimeout(() => { tryHighlightRow(markToHighlight); }, 40);
+            setTimeout(() => { tryHighlightRow(markToHighlight); }, 220);
+            setTimeout(() => { tryHighlightRow(markToHighlight); }, 520);
+          }
+          window.__RC_PENDING_LIST_HIGHLIGHT_MARK = '';
           return true;
         }
       }
@@ -6613,6 +6783,11 @@ async function partiallyReloadInvoiceTable() {
           controls.className = freshControls.className;
         }
         reinitTable();
+        if (highlightMark) {
+          setTimeout(() => { tryHighlightRow(highlightMark); }, 60);
+          setTimeout(() => { tryHighlightRow(highlightMark); }, 260);
+        }
+        window.__RC_PENDING_LIST_HIGHLIGHT_MARK = '';
         return true;
       }
     }
@@ -9871,6 +10046,9 @@ document.addEventListener('submit', function(ev){
       markInput && markInput.classList.remove('hidden');
       urlInput && urlInput.classList.add('hidden');
     }
+    try {
+      if (typeof window.rcSyncSearchBoxYellowFrame === 'function') window.rcSyncSearchBoxYellowFrame();
+    } catch(_) {}
     // chooser visibility is independent of switch position
     if (receiptsModeChooser) {
       if (showChooser) receiptsModeChooser.classList.remove('hidden');
@@ -11887,6 +12065,13 @@ document.addEventListener('click', function(e){
       const fd = new FormData(form);
       fd.set('ajax', '1');
 
+      const markBeforeSave = (function(){
+        try {
+          const parsed = JSON.parse(document.getElementById('summaryJsonInput')?.value || '{}');
+          return String((parsed && (parsed.mark || parsed.MARK || parsed.number)) || '').trim();
+        } catch(_) { return ''; }
+      })();
+
       const res = await fetch(form.getAttribute('action') || '/save_summary', {
         method: 'POST',
         credentials: 'same-origin',
@@ -11912,9 +12097,12 @@ document.addEventListener('click', function(e){
         window.__RC_SERVER_MODAL_SUMMARY = null;
       } catch(_) {}
 
+      const savedMark = String((j && (j.saved_mark || j.mark)) || markBeforeSave || '').trim();
+      if (savedMark) window.__RC_PENDING_LIST_HIGHLIGHT_MARK = savedMark;
+
       try {
         if (typeof partiallyReloadInvoiceTable === 'function') {
-          await partiallyReloadInvoiceTable();
+          await partiallyReloadInvoiceTable({ highlightMark: savedMark });
         }
       } catch(_) {}
 
@@ -11946,5 +12134,227 @@ document.addEventListener('click', function(e){
       window.__RC_FORCE_AJAX_SAVE_IN_PROGRESS = false;
     }
   }, false);
+})();
+</script>
+
+<script>
+// Canonical submit hardening for URL paste + Enter to avoid duplicate/conflicting handlers.
+(function(){
+  const form = document.getElementById('markSearchForm');
+  if (!form || form.dataset.rcCanonicalSubmitBound === '1') return;
+  form.dataset.rcCanonicalSubmitBound = '1';
+
+  function normalizeUrlLike(value){
+    let v = String(value || '').trim();
+    if (!v) return '';
+    if (/^https?:\/\//i.test(v)) return v;
+    if (/^www\./i.test(v)) return 'https://' + v;
+    if (/^[a-z0-9.-]+\.[a-z]{2,}(\/.*)?$/i.test(v)) return 'https://' + v;
+    return v;
+  }
+
+  form.addEventListener('submit', function(ev){
+    const now = Date.now();
+    const lastSubmit = Number(form.dataset.rcLastSubmitTs || '0');
+    if (lastSubmit && (now - lastSubmit) < 900) {
+      ev.preventDefault();
+      return;
+    }
+
+    const receiptsOn = !!document.getElementById('useReceiptsSwitch')?.checked;
+    const markEl = document.getElementById('markInput');
+    const urlEl = document.getElementById('scrapeUrlInput');
+    const hiddenUrlEl = document.getElementById('scrapeUrlField');
+
+    let markVal = String(markEl?.value || '').trim();
+    let urlVal = String(urlEl?.value || '').trim();
+    markVal = normalizeUrlLike(markVal);
+    urlVal = normalizeUrlLike(urlVal);
+
+    // In receipts mode, treat URL pasted in MARK input as scrape URL source of truth.
+    if (receiptsOn && !urlVal && markVal && /^https?:\/\//i.test(markVal)) {
+      urlVal = markVal;
+      if (urlEl) urlEl.value = urlVal;
+    }
+
+    if (hiddenUrlEl) hiddenUrlEl.value = receiptsOn ? urlVal : '';
+    if (markEl) markEl.value = markVal;
+
+    if (!markVal && !urlVal) {
+      ev.preventDefault();
+      return;
+    }
+
+    form.dataset.rcLastSubmitTs = String(now);
+  }, true);
+})();
+</script>
+
+<script>
+// Repeat-entry UI hardening after partial reloads and multi-listener flows.
+(function(){
+  const REPEAT_LS_KEY = 'REPEAT:enabled';
+
+  function repeatLsGet(){
+    try {
+      const raw = localStorage.getItem(REPEAT_LS_KEY);
+      if (raw === '1') return true;
+      if (raw === '0') return false;
+    } catch(_) {}
+    return null;
+  }
+
+  function repeatLsSet(enabled){
+    try { localStorage.setItem(REPEAT_LS_KEY, enabled ? '1' : '0'); } catch(_) {}
+    try { document.body.dataset.repeatEnabled = enabled ? '1' : '0'; } catch(_) {}
+    try { window.REPEAT_ENABLED = !!enabled; } catch(_) {}
+  }
+
+  async function hydrateRepeatState(reason){
+    const sw = document.getElementById('repeatEntrySwitch');
+    if (!sw) return;
+
+    const lsVal = repeatLsGet();
+    if (lsVal !== null) sw.checked = !!lsVal;
+
+    const now = Date.now();
+    const last = Number(window.__RC_REPEAT_STATE_LAST_FETCH_TS || 0);
+    const shouldFetch = (!last || (now - last) > 1200 || reason === 'initial');
+    if (!shouldFetch) {
+      repeatLsSet(!!sw.checked);
+      return;
+    }
+
+    window.__RC_REPEAT_STATE_LAST_FETCH_TS = now;
+    try {
+      const r = await fetch('/api/repeat_state/get', { credentials: 'include' });
+      const j = await r.json().catch(() => null);
+      if (j && j.ok && typeof j.enabled !== 'undefined') {
+        sw.checked = !!j.enabled;
+        repeatLsSet(!!j.enabled);
+      } else {
+        repeatLsSet(!!sw.checked);
+      }
+    } catch(_) {
+      repeatLsSet(!!sw.checked);
+    }
+  }
+
+  function repeatUiState(){
+    const repeatSwitch = document.getElementById('repeatEntrySwitch');
+    const receiptsSwitch = document.getElementById('useReceiptsSwitch');
+    const editBtn = document.getElementById('editRepeatMappingBtn');
+    return {
+      repeatSwitch,
+      receiptsSwitch,
+      editBtn,
+      repeatOn: !!(repeatSwitch && repeatSwitch.checked),
+      receiptsOn: !!(receiptsSwitch && receiptsSwitch.checked),
+    };
+  }
+
+  function syncRepeatEditButton(){
+    const s = repeatUiState();
+    if (!s.editBtn) return;
+    const show = s.repeatOn && !s.receiptsOn;
+    s.editBtn.classList.toggle('hidden', !show);
+  }
+
+  function openRepeatModalFromUi(){
+    try {
+      if (typeof window.openRepeatModal === 'function') {
+        window.__RC_REPEAT_MODAL_FORCE_RECEIPTS = false;
+        window.openRepeatModal();
+      }
+    } catch(err) {
+      console.warn('openRepeatModalFromUi failed', err);
+    }
+  }
+
+  function ensureRepeatModalOpenedWhenInvoices(){
+    try {
+      const repeatOn = !!document.getElementById('repeatEntrySwitch')?.checked;
+      const receiptsOn = !!document.getElementById('useReceiptsSwitch')?.checked;
+      if (!repeatOn || receiptsOn) return;
+
+      const editBtn = document.getElementById('editRepeatMappingBtn');
+      if (editBtn) editBtn.classList.remove('hidden');
+
+      const modal = document.getElementById('repeatMappingModal');
+      const isOpen = !!(modal && modal.style.display === 'flex');
+      if (!isOpen) openRepeatModalFromUi();
+
+      setTimeout(() => {
+        const m2 = document.getElementById('repeatMappingModal');
+        const stillClosed = !(m2 && m2.style.display === 'flex');
+        const stillInvoices = !document.getElementById('useReceiptsSwitch')?.checked;
+        const stillRepeat = !!document.getElementById('repeatEntrySwitch')?.checked;
+        if (stillClosed && stillInvoices && stillRepeat) openRepeatModalFromUi();
+      }, 150);
+    } catch(_) {}
+  }
+
+  function ensureBindings(){
+    hydrateRepeatState('ensure-bindings').finally(() => {
+      const s = repeatUiState();
+
+      if (s.repeatSwitch && s.repeatSwitch.dataset.rcRepeatUiBound !== '1') {
+        s.repeatSwitch.dataset.rcRepeatUiBound = '1';
+        s.repeatSwitch.addEventListener('change', function(){
+          repeatLsSet(!!this.checked);
+          syncRepeatEditButton();
+          if (this.checked && !(document.getElementById('useReceiptsSwitch')?.checked)) {
+            setTimeout(ensureRepeatModalOpenedWhenInvoices, 60);
+          }
+        }, true);
+      }
+
+      if (s.editBtn && s.editBtn.dataset.rcRepeatUiBound !== '1') {
+        s.editBtn.dataset.rcRepeatUiBound = '1';
+        s.editBtn.addEventListener('click', function(ev){
+          ev.preventDefault();
+          ev.stopPropagation();
+          syncRepeatEditButton();
+          openRepeatModalFromUi();
+        }, true);
+      }
+
+      if (s.receiptsSwitch && s.receiptsSwitch.dataset.rcRepeatUiBound !== '1') {
+        s.receiptsSwitch.dataset.rcRepeatUiBound = '1';
+        s.receiptsSwitch.addEventListener('change', function(){
+          syncRepeatEditButton();
+          try {
+            if (!this.checked && document.getElementById('repeatEntrySwitch')?.checked) {
+              setTimeout(ensureRepeatModalOpenedWhenInvoices, 60);
+            }
+          } catch(_) {}
+        }, true);
+      }
+
+      syncRepeatEditButton();
+      setTimeout(syncRepeatEditButton, 80);
+      setTimeout(syncRepeatEditButton, 260);
+      if (document.getElementById('repeatEntrySwitch')?.checked && !document.getElementById('useReceiptsSwitch')?.checked) {
+        setTimeout(ensureRepeatModalOpenedWhenInvoices, 100);
+      }
+    });
+  }
+
+  window.__rcEnsureRepeatUiSync = ensureBindings;
+
+  if (!window.__rcRepeatUiPageReadyBound) {
+    window.__rcRepeatUiPageReadyBound = true;
+    window.addEventListener('app:page-ready', function(){
+      ensureBindings();
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function(){
+      hydrateRepeatState('initial').finally(ensureBindings);
+    }, { once: true });
+  } else {
+    hydrateRepeatState('initial').finally(ensureBindings);
+  }
 })();
 </script>

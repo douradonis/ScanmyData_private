@@ -6855,25 +6855,43 @@ def _delete_credential_and_related_data(name: str):
 @app.route('/credentials/delete/<name>', methods=['POST'])
 @monitor_resources('credentials_delete_post')
 def credentials_delete_post(name):
+    is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+
     # Only group admin may delete credentials
     try:
         from auth import get_active_group
         from flask_login import current_user
         grp = get_active_group()
         if not grp:
+            if is_ajax:
+                return jsonify({'status': 'error', 'error': 'no active group selected'}), 403
             flash('Δεν έχει επιλεγεί ενεργή ομάδα', 'error')
             return redirect(url_for('credentials'))
         if not getattr(current_user, 'is_authenticated', False) or current_user.role_for_group(grp) != 'admin':
+            if is_ajax:
+                return jsonify({'status': 'error', 'error': 'admin privileges required'}), 403
             flash('Απαιτούνται δικαιώματα διαχειριστή για διαγραφή credentials', 'error')
             return redirect(url_for('credentials'))
     except Exception:
+        if is_ajax:
+            return jsonify({'status': 'error', 'error': 'permission check failed'}), 500
         flash('Αποτυχία ελέγχου δικαιωμάτων', 'error')
         return redirect(url_for('credentials'))
 
     credential, was_active, cleanup = _delete_credential_and_related_data(name)
     if not credential:
+        if is_ajax:
+            return jsonify({'status': 'error', 'error': 'not found'}), 404
         flash(f"Το credential '{name}' δεν βρέθηκε", "error")
         return redirect(url_for('credentials'))
+
+    if is_ajax:
+        return jsonify({
+            'status': 'ok',
+            'deleted': name,
+            'was_active': was_active,
+            'data_files_removed': cleanup,
+        }), 200
 
     suffix = ''
     if cleanup.get('count'):
@@ -11709,6 +11727,13 @@ def save_summary():
                 payload["message"] = message
             if error:
                 payload["error"] = error
+            if "saved_mark" not in extra:
+                try:
+                    saved_mark = str((summary or {}).get("mark") or (summary or {}).get("MARK") or "").strip()
+                    if saved_mark:
+                        payload["saved_mark"] = saved_mark
+                except Exception:
+                    pass
             if extra:
                 payload.update(extra)
             return jsonify(payload), status
@@ -14817,11 +14842,17 @@ def list_fragment():
     try:
         active = get_active_credential_from_session() or {}
         active_vat = str(active.get("vat") or "").strip()
+        highlight_mark = str(request.args.get("highlight_mark") or "").strip()
         table_html, exists, _ = _render_table_html_for_vat(active_vat, with_checkbox_value=True)
         if not exists:
             table_html = '<div class="p-3 text-gray-500">Δεν βρέθηκαν εγγραφές στο epsilon_invoices.json.</div>'
 
-        return jsonify({"ok": True, "table_html": table_html, "file_exists": bool(exists)})
+        return jsonify({
+            "ok": True,
+            "table_html": table_html,
+            "file_exists": bool(exists),
+            "highlight_mark": highlight_mark,
+        })
     except Exception as exc:
         current_app.logger.exception('list_fragment failed')
         return jsonify({'ok': False, 'error': str(exc)}), 500

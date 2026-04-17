@@ -230,8 +230,6 @@
             : 'Συμπλήρωσε το Είδος Κίνησης για τις αποδείξεις πριν την αποθήκευση.';
           if (typeof window.showModalAlert === 'function') await window.showModalAlert('Ελλιπή πεδία', msg);
           else showFlash(msg, 'warning', 3500);
-          try { if (typeof window.clearSearchInputs === 'function') window.clearSearchInputs(); } catch(_) {}
-          try { if (typeof window.clearReceiptSearchCacheOnClose === 'function') window.clearReceiptSearchCacheOnClose(); } catch(_) {}
           return false;
         }
       } catch(_) {}
