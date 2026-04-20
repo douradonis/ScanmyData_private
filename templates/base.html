@@ -1972,7 +1972,7 @@
     
   {% block head_extra %}{% endblock %}
 </head>
-<body>
+<body data-active-vat="{{ active_credential_vat|default('', true)|e }}">
   <div class="container">
     <div id="appShell">
     <header class="mb-6">
@@ -4016,13 +4016,10 @@
         if (normalizePath(pathname) !== '/search') return;
 
         // Search page includes several scripts with one-time guards that are valid
-        // for full reload, but block re-binding after partial DOM swaps.
+        // for full reload. Keep receipt/autosubmit guards intact on partial swaps
+        // to avoid duplicate listeners that cause stale second-receipt state.
         const keysToReset = [
-          '__labelsPrimed',
-          '__rc_receipts_strict__',
-          '__FAST_FLOW_ATTACHED__',
-          '__REPEAT_FLOW_GUARD_ATTACHED__',
-          '__rc_direct_bypass__'
+          '__labelsPrimed'
         ];
 
         for (const k of keysToReset) {
@@ -4040,8 +4037,8 @@
         const receiptsSw = document.getElementById('useReceiptsSwitch');
         const profileSel = document.getElementById('charProfileSelect');
 
-        if (!window.__LAST_REPEAT_PROFILE_BY_MODE) {
-          window.__LAST_REPEAT_PROFILE_BY_MODE = { receipts: '', invoices: '' };
+        if (!window.__LAST_REPEAT_PROFILE_BY_SCOPE) {
+          window.__LAST_REPEAT_PROFILE_BY_SCOPE = {};
         }
 
         function currentModeKey() {
@@ -4054,6 +4051,20 @@
         }
 
         function currentVat() {
+          try {
+            if (typeof window.rcResolveActiveVat === 'function') {
+              const liveVat = String(window.rcResolveActiveVat() || '').trim();
+              if (liveVat) return liveVat;
+            }
+          } catch (_) {}
+          try {
+            const dsVat = String(document.body?.dataset?.activeVat || '').trim();
+            if (dsVat) return dsVat;
+          } catch (_) {}
+          try {
+            const modalVat = String(window._repeatModalVAT || '').trim();
+            if (modalVat) return modalVat;
+          } catch (_) {}
           try {
             const vat = String('{{ active_credential_vat or "" }}').trim();
             if (vat) return vat;
@@ -4078,23 +4089,37 @@
           if (remembered) return remembered;
           try {
             const mode = currentModeKey();
-            const cachedByMode = String((window.__LAST_REPEAT_PROFILE_BY_MODE || {})[mode] || '').trim();
-            if (cachedByMode) return cachedByMode;
+            const vat = currentVat();
+            const scopedKey = (vat || 'default') + ':' + mode;
+            const cachedByScope = String((window.__LAST_REPEAT_PROFILE_BY_SCOPE || {})[scopedKey] || '').trim();
+            if (cachedByScope) return cachedByScope;
           } catch (_) {}
-          try {
-            const opt = profileSel && profileSel.selectedOptions ? profileSel.selectedOptions[0] : null;
-            const raw = (opt && (opt.dataset.profileName || opt.textContent || opt.value)) || '';
-            return String(raw || '').trim();
-          } catch (_) {
-            return '';
-          }
+          return '';
         }
 
         function renderHint() {
           const profileName = readCurrentProfileName();
           const mode = currentModeKey();
           const modeLabel = mode === 'receipts' ? 'Αποδείξεις' : 'Τιμολόγια';
-          const shouldShow = !!(repeatSw && repeatSw.checked);
+          let allowReceiptsHint = true;
+          if (mode === 'receipts') {
+            try {
+              if (typeof window.isReceiptModeAnalysisStrict === 'function') {
+                allowReceiptsHint = !!window.isReceiptModeAnalysisStrict();
+              } else {
+                const bodyMode = String(document.body?.dataset?.receiptMode || '').toLowerCase();
+                if (bodyMode) allowReceiptsHint = (bodyMode === 'analysis');
+                else {
+                  const storedMode = String(localStorage.getItem('rc:receiptMode') || '').toLowerCase();
+                  allowReceiptsHint = (storedMode === 'analysis');
+                }
+              }
+            } catch (_) {
+              allowReceiptsHint = false;
+            }
+          }
+
+          const shouldShow = !!(repeatSw && repeatSw.checked) && (mode !== 'receipts' || allowReceiptsHint);
           if (shouldShow) {
             hint.style.display = '';
             hint.textContent = 'Ενεργό προφίλ επαναληψιμης (' + modeLabel + '): ' + (profileName || 'Γενικό');
@@ -4119,7 +4144,9 @@
               const opt = profileSel.selectedOptions ? profileSel.selectedOptions[0] : null;
               const raw = (opt && (opt.dataset.profileName || opt.textContent || opt.value)) || '';
               const mode = currentModeKey();
-              window.__LAST_REPEAT_PROFILE_BY_MODE[mode] = String(raw || '').trim();
+              const vat = currentVat();
+              const scopedKey = (vat || 'default') + ':' + mode;
+              window.__LAST_REPEAT_PROFILE_BY_SCOPE[scopedKey] = String(raw || '').trim();
             } catch (_) {}
             renderHint();
           });
@@ -4927,6 +4954,15 @@
           window.location.href = url.toString();
           return;
         }
+
+        try {
+          const nextActiveVat = String(doc.body?.dataset?.activeVat || '').trim();
+          if (nextActiveVat && document.body && document.body.dataset) {
+            document.body.dataset.activeVat = nextActiveVat;
+          } else if (nextActiveVat === '' && document.body && document.body.dataset && 'activeVat' in document.body.dataset) {
+            delete document.body.dataset.activeVat;
+          }
+        } catch (_) {}
 
         resetSearchPageGlobals(url.pathname);
         cleanupTransientDatepickers();

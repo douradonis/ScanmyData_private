@@ -1,5 +1,6 @@
 /* receipts_repeat_direct.js — Bypass summary modal for receipts when repeat is ON */
 (function(){
+  if (window.__RC_USE_CANONICAL_RECEIPT_AUTOCONFIRM === true) return;
   if (window.__rc_direct_bypass__) return;
   window.__rc_direct_bypass__ = true;
 

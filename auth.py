@@ -5,12 +5,62 @@ from flask_login import LoginManager, login_user, logout_user, login_required, c
 import firebase_config
 from models import db, User, Group
 import datetime
+import threading
+import time
 from firebase_auth_handlers import FirebaseAuthHandler
 import email_utils
 import secrets
 import utils
 
 auth_bp = Blueprint('auth', __name__)
+
+_GROUP_WARMUP_LOCK = threading.Lock()
+_GROUP_WARMUP_LAST_TS = {}
+_GROUP_WARMUP_COOLDOWN_SECONDS = 30.0
+
+
+def _schedule_group_folder_warmup(data_folder: str, reason: str = '') -> bool:
+    """Warm group folder state in background without blocking request latency."""
+    folder = (data_folder or '').strip()
+    if not folder:
+        return False
+
+    now = time.monotonic()
+    with _GROUP_WARMUP_LOCK:
+        last_ts = float(_GROUP_WARMUP_LAST_TS.get(folder, 0.0) or 0.0)
+        if (now - last_ts) < _GROUP_WARMUP_COOLDOWN_SECONDS:
+            return False
+        _GROUP_WARMUP_LAST_TS[folder] = now
+
+    app_logger = current_app.logger._get_current_object()
+
+    def _worker(target_folder: str, target_reason: str):
+        try:
+            import firebase_config
+            ok = firebase_config.ensure_group_data_local(target_folder)
+            try:
+                app_logger.info(
+                    "Group warmup finished folder=%s ok=%s reason=%s",
+                    target_folder,
+                    ok,
+                    target_reason,
+                )
+            except Exception:
+                pass
+        except Exception as exc:
+            try:
+                app_logger.warning(
+                    "Group warmup failed folder=%s reason=%s error=%s",
+                    target_folder,
+                    target_reason,
+                    exc,
+                )
+            except Exception:
+                pass
+
+    th = threading.Thread(target=_worker, args=(folder, reason or ''), daemon=True)
+    th.start()
+    return True
 
 login_manager = LoginManager()
 login_manager.login_view = 'auth.login'
@@ -1077,19 +1127,15 @@ def select_group():
     session.pop('_remote_qr_owner', None)
     current_app.logger.info(f'Ο χρήστης {current_user.username} επέλεξε την ομάδα {group_name}')
     
-    # Ensure local group folder exists (server-authoritative mode; no automatic pull)
+    # Warmup the local group folder asynchronously to keep selection fast.
     try:
-        import firebase_config
-        if getattr(grp, 'data_folder', None):
-            current_app.logger.info(f'Έλεγχος τοπικού φακέλου για την ομάδα {group_name}...')
-            success = firebase_config.ensure_group_data_local(grp.data_folder)
-            if success:
-                current_app.logger.info(f'Ο τοπικός φάκελος της ομάδας {group_name} είναι έτοιμος')
-            else:
-                current_app.logger.warning(f'Αποτυχία προετοιμασίας τοπικού φακέλου για την ομάδα {group_name}')
+        data_folder = getattr(grp, 'data_folder', None)
+        if data_folder:
+            scheduled = _schedule_group_folder_warmup(data_folder, reason='select_group')
+            if scheduled:
+                current_app.logger.info('Scheduled async group warmup for %s (%s)', group_name, data_folder)
     except Exception as e:
-        # Log but don't fail - folder prep is non-critical
-        current_app.logger.warning(f"Local folder prep failed when selecting group {group_name}: {e}")
+        current_app.logger.warning(f"Async group warmup scheduling failed for {group_name}: {e}")
     
     # Return JSON for AJAX requests, redirect for form submissions
     if request.is_json:

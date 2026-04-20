@@ -8,6 +8,7 @@
  * NO USER BUTTON - automatically activates when repeat mode enabled
  */
 (function(){
+  if (window.__RC_USE_CANONICAL_RECEIPT_AUTOCONFIRM === true) return;
   if (window.__FAST_FLOW_ATTACHED__) return;
   window.__FAST_FLOW_ATTACHED__ = true;
 

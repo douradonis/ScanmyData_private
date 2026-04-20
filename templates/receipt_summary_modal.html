@@ -90,6 +90,13 @@
             const fd = new FormData(form);
             fd.set('ajax', '1');
 
+            let markBeforeSave = '';
+            try {
+                const raw = String(fd.get('summary_json') || '').trim();
+                const parsed = raw ? JSON.parse(raw) : null;
+                markBeforeSave = String((parsed && (parsed.mark || parsed.MARK || parsed.number)) || fd.get('mark') || '').trim();
+            } catch(_) {}
+
             const res = await fetch(form.getAttribute('action') || '/save_summary', {
                 method: 'POST',
                 credentials: 'same-origin',
@@ -103,6 +110,11 @@
                 try { if (typeof clearSearchInputs === 'function') clearSearchInputs(); } catch(_) {}
                 try { if (typeof clearReceiptSearchCacheOnClose === 'function') clearReceiptSearchCacheOnClose(); } catch(_) {}
                 return;
+            }
+
+            const savedMark = String((j && (j.saved_mark || j.mark || j.MARK || j.number)) || markBeforeSave || '').trim();
+            if (savedMark) {
+                try { window.__RC_PENDING_LIST_HIGHLIGHT_MARK = savedMark; } catch(_) {}
             }
 
             try {
@@ -123,10 +135,11 @@
             try {
                 let reloaded = false;
                 if (typeof partiallyReloadInvoiceTable === 'function') {
-                    reloaded = !!(await partiallyReloadInvoiceTable());
+                    reloaded = !!(await partiallyReloadInvoiceTable({ highlightMark: savedMark }));
                 }
                 if (!reloaded) {
-                    const tableRes = await fetch('/list/fragment', { method: 'GET', credentials: 'same-origin' });
+                    const query = savedMark ? ('?highlight_mark=' + encodeURIComponent(savedMark)) : '';
+                    const tableRes = await fetch('/list/fragment' + query, { method: 'GET', credentials: 'same-origin' });
                     if (tableRes.ok) {
                         const data = await tableRes.json().catch(() => null);
                         const container = document.getElementById('summary-container');
@@ -134,6 +147,12 @@
                             container.innerHTML = data.table_html;
                             if (typeof window.FBP_INIT_TABULATOR === 'function') window.FBP_INIT_TABULATOR();
                             else if (typeof window.FBP_INIT_TABLE === 'function') window.FBP_INIT_TABLE();
+                            try {
+                                if (savedMark && typeof window.FBP_HIGHLIGHT_ROW_BY_MARK === 'function') {
+                                    setTimeout(function(){ try { window.FBP_HIGHLIGHT_ROW_BY_MARK(savedMark); } catch(_) {} }, 80);
+                                    setTimeout(function(){ try { window.FBP_HIGHLIGHT_ROW_BY_MARK(savedMark); } catch(_) {} }, 260);
+                                }
+                            } catch(_) {}
                         }
                     }
                 }

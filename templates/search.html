@@ -334,6 +334,10 @@
 {% block scripts %}
 
 <script src="/static/loop_hard_guard.js"></script>
+<script>
+  // Canonical receipt pipeline switch must be set before external flow scripts load.
+  window.__RC_USE_CANONICAL_RECEIPT_AUTOCONFIRM = true;
+</script>
 <script src="{{ url_for('static', filename='repeat_flow_guard.js') }}"></script>
 <script>
 // Loading overlay helpers
@@ -515,7 +519,30 @@ function isReceiptAnalysisActive(){
 
 function isReceiptModeAnalysisStrict(){
   try {
+    if (String(window.__RC_RECEIPT_MODE_CURRENT || '').toLowerCase() === 'analysis') return true;
+  } catch(_){
+    // ignore
+  }
+  try {
+    const bodyMode = String(document.body?.dataset?.receiptMode || '').toLowerCase();
+    if (bodyMode === 'analysis') return true;
+    if (bodyMode === 'mixed') return false;
+  } catch(_){
+    // ignore
+  }
+  try {
+    const selectedBtn = document.querySelector('[data-receipt-mode].font-semibold');
+    if (selectedBtn) {
+      const mode = String(selectedBtn.getAttribute('data-receipt-mode') || '').toLowerCase();
+      if (mode === 'analysis') return true;
+      if (mode === 'mixed') return false;
+    }
+  } catch(_){
+    // ignore
+  }
+  try {
     const mode = localStorage.getItem('rc:receiptMode');
+    if (String(mode || '').toLowerCase() === 'mixed') return false;
     return String(mode || '').toLowerCase() === 'analysis';
   } catch(_){
     return false;
@@ -538,6 +565,15 @@ function rcShouldSuppressModalSwitch(){
 
 function receiptModeAllowsProfileHint(){
   try {
+    const receiptsOn = !!document.getElementById('useReceiptsSwitch')?.checked;
+    if (!receiptsOn) return false;
+  } catch(_) { return false; }
+  try {
+    if (typeof isReceiptModeAnalysisStrict === 'function') {
+      return !!isReceiptModeAnalysisStrict();
+    }
+  } catch(_) {}
+  try {
     const chooserExists = !!document.querySelector('[data-receipt-mode]');
     const stored = (localStorage.getItem('rc:receiptMode') || '').trim().toLowerCase();
     if (chooserExists) {
@@ -551,19 +587,114 @@ function receiptModeAllowsProfileHint(){
   return false;
 }
 
+function rcResolveActiveVat(){
+  try {
+    const serverVat = String("{{ active_credential_vat|default('', true) }}" || "{{ vat or '' }}" || '').trim();
+    if (serverVat) {
+      try { window.__RC_ACTIVE_VAT = serverVat; } catch(_) {}
+      try { if (document.body && document.body.dataset) document.body.dataset.activeVat = serverVat; } catch(_) {}
+      return serverVat;
+    }
+  } catch(_) {}
+
+  try {
+    const ds = String((document.body && document.body.dataset && document.body.dataset.activeVat) || '').trim();
+    if (ds) {
+      try { window.__RC_ACTIVE_VAT = ds; } catch(_) {}
+      return ds;
+    }
+  } catch(_) {}
+
+  try {
+    const vatSelector = String((document.querySelector('#vatSelector') && document.querySelector('#vatSelector').value) || '').trim();
+    if (vatSelector) {
+      try { window.__RC_ACTIVE_VAT = vatSelector; } catch(_) {}
+      return vatSelector;
+    }
+  } catch(_) {}
+
+  try {
+    const vatInput = String((document.querySelector('[name="vat"]') && document.querySelector('[name="vat"]').value) || '').trim();
+    if (vatInput) {
+      try { window.__RC_ACTIVE_VAT = vatInput; } catch(_) {}
+      return vatInput;
+    }
+  } catch(_) {}
+
+  try {
+    const modalVat = String(window._repeatModalVAT || '').trim();
+    if (modalVat) {
+      try { window.__RC_ACTIVE_VAT = modalVat; } catch(_) {}
+      return modalVat;
+    }
+  } catch(_) {}
+
+  try {
+    const cached = String(window.__RC_ACTIVE_VAT || '').trim();
+    if (cached) return cached;
+  } catch(_) {}
+
+  return '';
+}
+window.rcResolveActiveVat = rcResolveActiveVat;
+
 function setActiveProfileHint(name){
   const el = document.getElementById('activeRepeatProfileHint');
   const sw = document.getElementById('repeatEntrySwitch');
+  const receiptsSw = document.getElementById('useReceiptsSwitch');
   if(!el || !sw) return;
-  try { window.__LAST_REPEAT_PROFILE_NAME = name || ''; } catch(_) { window.__LAST_REPEAT_PROFILE_NAME = name || ''; }
+  const resolvedName = String(name || '').trim();
+  const mode = (typeof rcRepeatModalShouldUseReceiptsMode === 'function' && rcRepeatModalShouldUseReceiptsMode()) ? 'receipts' : 'invoices';
+  const vat = String((typeof rcResolveActiveVat === 'function' ? rcResolveActiveVat() : '') || '').trim();
+  const cacheKey = (vat || 'default') + ':' + mode;
 
-  if (sw.checked && receiptModeAllowsProfileHint()) {
+  try {
+    window.__LAST_REPEAT_PROFILE_BY_SCOPE = window.__LAST_REPEAT_PROFILE_BY_SCOPE || {};
+    window.__LAST_REPEAT_PROFILE_BY_SCOPE[cacheKey] = resolvedName;
+  } catch(_) {}
+  try { window.__LAST_REPEAT_PROFILE_NAME = resolvedName; } catch(_) { window.__LAST_REPEAT_PROFILE_NAME = resolvedName; }
+
+  try {
+    if (typeof rememberRepeatSelectedProfile === 'function') {
+      rememberRepeatSelectedProfile(vat, mode, resolvedName);
+    }
+  } catch(_) {}
+
+  const receiptsOn = !!(receiptsSw && receiptsSw.checked);
+  const canShow = !!sw.checked && (!receiptsOn || receiptModeAllowsProfileHint());
+  if (canShow) {
     el.style.display = '';
-    el.textContent = "Ενεργό προφίλ επαναληψιμης: " + (name || "Γενικό");
+    el.textContent = "Ενεργό προφίλ επαναληψιμης: " + (resolvedName || "Γενικό");
   } else {
     el.style.display = 'none';
     el.textContent = '';
   }
+}
+
+function rcResolveProfileHintName(){
+  const mode = (typeof rcRepeatModalShouldUseReceiptsMode === 'function' && rcRepeatModalShouldUseReceiptsMode()) ? 'receipts' : 'invoices';
+  const vat = String((typeof rcResolveActiveVat === 'function' ? rcResolveActiveVat() : '') || '').trim();
+  const cacheKey = (vat || 'default') + ':' + mode;
+
+  try {
+    if (typeof loadRememberedRepeatProfile === 'function') {
+      const rememberedByMode = String(loadRememberedRepeatProfile(vat, mode) || '').trim();
+      if (rememberedByMode) return rememberedByMode;
+      const rememberedReceipts = String(loadRememberedRepeatProfile(vat, 'receipts') || '').trim();
+      const rememberedInvoices = String(loadRememberedRepeatProfile(vat, 'invoices') || '').trim();
+      if (mode === 'receipts' && rememberedReceipts) return rememberedReceipts;
+      if (mode === 'invoices' && rememberedInvoices) return rememberedInvoices;
+    }
+  } catch(_) {}
+
+  try {
+    const byScope = window.__LAST_REPEAT_PROFILE_BY_SCOPE || {};
+    const scoped = String(byScope[cacheKey] || '').trim();
+    if (scoped) return scoped;
+  } catch(_) {}
+
+  // Avoid leaking previous-customer profile names across VAT switches.
+  return '';
 }
 
 
@@ -1062,7 +1193,8 @@ function katToPercent(k){
     try {
       const mode = (typeof rcRepeatModalShouldUseReceiptsMode === 'function' && rcRepeatModalShouldUseReceiptsMode()) ? 'receipts' : 'invoices';
       const selectedName = String((opt && opt.dataset && opt.dataset.profileName) || selProfile.value || '').trim();
-      rememberRepeatSelectedProfile(window._repeatModalVAT || "{{ vat or '' }}", mode, selectedName);
+      const vatForRemember = String((typeof rcResolveActiveVat === 'function' ? rcResolveActiveVat() : '') || '').trim();
+      rememberRepeatSelectedProfile(vatForRemember, mode, selectedName);
     } catch(_) {}
     setHint('');
   });
@@ -1076,7 +1208,7 @@ function katToPercent(k){
   const profileName = (selectedProfileOpt && selectedProfileOpt.dataset && selectedProfileOpt.dataset.profileName)
     ? String(selectedProfileOpt.dataset.profileName || '').trim()
     : String(selProfile?.value || '');   // "" = Γενικό
-  const vatToUse = window._repeatModalVAT || "{{ vat or '' }}";  // χρησιμοποίησε το ανιχνευθέν VAT
+  const vatToUse = String((typeof rcResolveActiveVat === 'function' ? rcResolveActiveVat() : '') || '').trim();
 
   // Για Γ Κατηγορία: έλεγχος ΑΠΑΡΑΙΤΗΤΟΥ invoice MTYPE
   const repeatMtypeSelect = document.getElementById('repeatMtypeSelect');
@@ -1153,6 +1285,10 @@ function katToPercent(k){
       if (repeatSw) {
         // switch should already be checked; just persist flag locally
         try { localStorage.setItem('REPEAT:enabled', '1'); } catch(_) {}
+        try {
+          const vatScoped = String((typeof rcResolveActiveVat === 'function' ? rcResolveActiveVat() : '') || '').trim() || 'default';
+          localStorage.setItem('REPEAT:enabled:' + vatScoped, '1');
+        } catch(_) {}
         // do NOT dispatch change: it would reopen the modal via its listener
       }
     } catch(_) {}
@@ -1206,7 +1342,7 @@ function katToPercent(k){
 }
   // Άνοιγμα modal: ΠΑΝΤΑ καθαρό render, χωρίς διπλο-append
   async function openModal(){
-  let VAT = "{{ vat or '' }}";
+  let VAT = String((typeof rcResolveActiveVat === 'function' ? rcResolveActiveVat() : '') || '').trim();
   if (!VAT || !VAT.trim()) {
     try {
       const r = await fetch('/api/repeat_entry/get', {credentials:'same-origin'});
@@ -1217,6 +1353,8 @@ function katToPercent(k){
   }
 
   window._repeatModalVAT = VAT;
+  try { window.__RC_ACTIVE_VAT = String(VAT || '').trim(); } catch(_) {}
+  try { if (document.body && document.body.dataset) document.body.dataset.activeVat = String(VAT || '').trim(); } catch(_) {}
 
   const hint = document.getElementById('charMissingHint');
   if(hint){ hint.style.display='none'; hint.textContent=''; }
@@ -1415,7 +1553,7 @@ function katToPercent(k){
       if (!extra || extra.remember !== false) {
         try {
           const modeForRemember = (typeof rcRepeatModalShouldUseReceiptsMode === 'function' && rcRepeatModalShouldUseReceiptsMode()) ? 'receipts' : 'invoices';
-          const targetVat = window._repeatModalVAT || "{{ vat or '' }}";
+          const targetVat = String((typeof rcResolveActiveVat === 'function' ? rcResolveActiveVat() : '') || '').trim();
           rememberRepeatSelectedProfile(targetVat, modeForRemember, data.name || '');
         } catch(_) {}
       }
@@ -1566,13 +1704,11 @@ function katToPercent(k){
     }
     try { window.__RC_REPEAT_MODAL_FORCE_RECEIPTS = true; } catch(_) {}
     try {
-      const summaryInput = document.getElementById('summaryJsonInput');
-      const summaryObj = summaryInput && summaryInput.value ? JSON.parse(summaryInput.value) : (window._lastSummaryObj || {});
       if (typeof openReceiptClassModal === 'function') {
-        openReceiptClassModal(summaryObj || {});
+        openReceiptClassModal(getCurrentReceiptSummaryObj());
       }
     } catch(_) {
-      if (typeof openReceiptClassModal === 'function') openReceiptClassModal(window._lastSummaryObj || {});
+      if (typeof openReceiptClassModal === 'function') openReceiptClassModal({});
     }
   });
   
@@ -1787,7 +1923,7 @@ try {
 
   async function loadReceiptMtypeFromBackend(){
     try {
-      const vat = (window._repeatModalVAT || "{{ vat or '' }}" || '').trim();
+      const vat = String((typeof rcResolveActiveVat === 'function' ? rcResolveActiveVat() : '') || '').trim();
       if (!vat) return '';
       
       const resp = await fetch('/api/repeat_entry/get?vat=' + encodeURIComponent(vat), {
@@ -4520,6 +4656,73 @@ function clearReceiptSearchCacheOnClose(){
 }
 window.clearReceiptSearchCacheOnClose = clearReceiptSearchCacheOnClose;
 
+function rcResetReceiptCycleState(){
+  try {
+    const saveForm = document.getElementById('saveSummaryForm');
+    if (saveForm && saveForm.dataset) {
+      saveForm.dataset._receiptAutoHandled = '';
+      saveForm.dataset._autoSubmitted = '';
+      saveForm.dataset._autoSubmittedKey = '';
+      saveForm.dataset._autoSubmittedMark = '';
+    }
+  } catch(_) {}
+
+  try {
+    const summaryInput = document.getElementById('summaryJsonInput');
+    if (summaryInput) summaryInput.value = '{}';
+    const summaryDataInput = document.getElementById('summaryDataInput');
+    if (summaryDataInput) summaryDataInput.value = '{}';
+    const scrapeUrlField = document.getElementById('scrapeUrlField');
+    if (scrapeUrlField) scrapeUrlField.value = '';
+    const scrapeCategoryField = document.getElementById('scrapeCategoryField');
+    if (scrapeCategoryField) scrapeCategoryField.value = '';
+    const scrapeForceField = document.getElementById('scrapeForceField');
+    if (scrapeForceField) scrapeForceField.value = 'false';
+  } catch(_) {}
+
+  try {
+    window._lastSummaryObj = {};
+    window.__RC_LAST_SUMMARY = {};
+    window.__RC_SERVER_MODAL_SUMMARY = null;
+    window.modal_summary = null;
+  } catch(_) {}
+
+  try {
+    window.__RC_RECEIPT_SAVE_IN_PROGRESS = false;
+    window.__RC_FORCE_AJAX_SAVE_IN_PROGRESS = false;
+    window.__RC_BLOCK_REPEAT_AUTOSUBMIT = false;
+    window.__RC_SUPPRESS_SUMMARY_MODAL = false;
+    window.__RC_SUPPRESS_SUMMARY_MODAL_UNTIL = 0;
+    window.__RC_BLOCK_SUMMARY_AUTOSHOW = false;
+    if (window.__RC_LOCKS && typeof window.__RC_LOCKS === 'object') {
+      window.__RC_LOCKS.confirm = false;
+    }
+    if (window.__RC_FLAGS && typeof window.__RC_FLAGS === 'object') {
+      window.__RC_FLAGS.autoHandled = false;
+    }
+  } catch(_) {}
+
+  try {
+    if (typeof hideSummaryModal === 'function') hideSummaryModal();
+  } catch(_) {}
+
+  try {
+    const linesContainer = document.getElementById('summaryLinesContainer');
+    if (linesContainer) linesContainer.innerHTML = '';
+  } catch(_) {}
+
+  try {
+    if (typeof window.__rcEnsureRepeatUiSync === 'function') {
+      window.__rcEnsureRepeatUiSync({ force: true, reason: 'partial-reload' });
+    }
+  } catch(_) {}
+
+  try {
+    document.dispatchEvent(new CustomEvent('rc:receipt-cycle-reset'));
+  } catch(_) {}
+}
+window.rcResetReceiptCycleState = rcResetReceiptCycleState;
+
 function clearSummaryModalUI(){
   try {
     const ids = [
@@ -4778,10 +4981,91 @@ function prefillSummaryModal(){
         if (compInput) compInput.value = JSON.stringify(data);
       } catch(_) {}
 
+      try {
+        if (typeof window.rcSyncSaveSummaryButtonState === 'function') {
+          window.rcSyncSaveSummaryButtonState();
+        }
+      } catch(_) {}
+
     } catch(err){
       console.warn('updateSummaryFromDom error', err);
     }
   }
+
+  function rcIsValidCategoryValue(raw){
+    const v = String(raw || '').trim();
+    if (!v) return false;
+    const low = v.toLowerCase();
+    if (low === 'καθαρισμός' || low === 'καθαρισμος' || low === 'clear' || low === '-' || low === '—') return false;
+    return true;
+  }
+
+  function rcResolveSingleLineCategory(summaryObj){
+    const lines = Array.isArray(summaryObj && summaryObj.lines) ? summaryObj.lines : [];
+    if (lines.length !== 1) return '';
+
+    const line = lines[0] || {};
+    let category = String(line.category || line.characteristic || line['χαρακτηρισμός'] || '').trim();
+    const lineId = String(line.id || line.line_id || '').trim();
+    const esc = (function(){
+      if (window.CSS && typeof CSS.escape === 'function') return CSS.escape(lineId);
+      return String(lineId).replace(/([ #;?%&,.+*~\':"!^$[\]()=>|\/@])/g, '\\$1');
+    })();
+
+    if (!category && lineId) {
+      try {
+        const sel = document.querySelector('#summaryLinesContainer select.expense-category[data-line-id="' + esc + '"]');
+        category = String((sel && sel.value) || '').trim();
+      } catch(_) {}
+      if (!category) {
+        try {
+          const btn = document.querySelector('#summaryLinesContainer .category-btn.bg-sky-600[data-line-id="' + esc + '"]');
+          category = String((btn && btn.dataset && btn.dataset.cat) || '').trim();
+        } catch(_) {}
+      }
+    }
+
+    return category;
+  }
+
+  function rcSyncSaveSummaryButtonState(){
+    try {
+      const saveBtn = document.getElementById('saveSummaryBtn') || document.querySelector('#saveSummaryForm button[type="submit"], #saveSummaryForm input[type="submit"]');
+      if (!saveBtn) return;
+
+      const receiptsOn = !!document.getElementById('useReceiptsSwitch')?.checked;
+      const repeatOn = !!document.getElementById('repeatEntrySwitch')?.checked;
+
+      let summary = {};
+      try { summary = JSON.parse(document.getElementById('summaryJsonInput')?.value || '{}') || {}; } catch(_) { summary = {}; }
+      const lines = Array.isArray(summary.lines) ? summary.lines : [];
+
+      const lockBySingleInvoiceRule = (
+        !receiptsOn
+        && !repeatOn
+        && lines.length === 1
+        && !rcIsValidCategoryValue(rcResolveSingleLineCategory(summary))
+      );
+
+      const currentlyLocked = saveBtn.dataset.invalidCategoryLock === '1';
+      if (lockBySingleInvoiceRule) {
+        saveBtn.dataset.invalidCategoryLock = '1';
+        saveBtn.disabled = true;
+        saveBtn.classList.add('opacity-60', 'cursor-not-allowed');
+        saveBtn.title = 'Επίλεξε έγκυρο χαρακτηρισμό πριν την αποθήκευση.';
+        return;
+      }
+
+      if (currentlyLocked) {
+        saveBtn.dataset.invalidCategoryLock = '0';
+        const hasOtherSaveLock = !!(window.__SUMMARY_SAVE_IN_PROGRESS || window.__RC_RECEIPT_SAVE_IN_PROGRESS || window.__RC_FORCE_AJAX_SAVE_IN_PROGRESS);
+        if (!hasOtherSaveLock) saveBtn.disabled = false;
+        saveBtn.classList.remove('opacity-60', 'cursor-not-allowed');
+        saveBtn.removeAttribute('title');
+      }
+    } catch(_) {}
+  }
+  window.rcSyncSaveSummaryButtonState = rcSyncSaveSummaryButtonState;
 
   // only operate inside the modal area to avoid interfering globally
   const container = document.getElementById('summaryLinesContainer');
@@ -4901,10 +5185,34 @@ function prefillSummaryModal(){
           }
           h.value = '1';
         }
+        try { rcSyncSaveSummaryButtonState(); } catch(_) {}
         // small synchronous update only; let the submit continue
       } catch(err){ console.warn('pre-submit update failed', err); }
     });
   }
+
+  try {
+    const summaryModal = document.getElementById('summaryModal');
+    if (summaryModal && typeof MutationObserver === 'function') {
+      const modalObs = new MutationObserver(function(){
+        try { rcSyncSaveSummaryButtonState(); } catch(_) {}
+      });
+      modalObs.observe(summaryModal, { attributes: true, attributeFilter: ['style', 'class'] });
+    }
+  } catch(_) {}
+
+  try {
+    const linesWrap = document.getElementById('summaryLinesContainer');
+    if (linesWrap && typeof MutationObserver === 'function') {
+      const linesObs = new MutationObserver(function(){
+        try { rcSyncSaveSummaryButtonState(); } catch(_) {}
+      });
+      linesObs.observe(linesWrap, { childList: true, subtree: true });
+    }
+  } catch(_) {}
+
+  setTimeout(function(){ try { rcSyncSaveSummaryButtonState(); } catch(_) {} }, 0);
+  setTimeout(function(){ try { rcSyncSaveSummaryButtonState(); } catch(_) {} }, 120);
 
   // Expose helper in case other code wants to call it
   window.updateSummaryFromDom = updateSummaryFromDom;
@@ -5377,6 +5685,22 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
 }
   // ---------- Initialization: load server repeat_entry config ----------
   (async function initRepeatEntry(){
+    const syncEditBtnLegacyBridge = () => {
+      try {
+        if (typeof window.__rcEnsureRepeatUiSync === 'function') {
+          window.__rcEnsureRepeatUiSync({ force: true, reason: 'legacy-bridge' });
+          return;
+        }
+      } catch(_) {}
+      try {
+        if (editRepeatBtn) {
+          const show = !!(repeatSwitch && repeatSwitch.checked) && !(useReceiptsSwitch && useReceiptsSwitch.checked);
+          editRepeatBtn.classList.toggle('hidden', !show);
+          editRepeatBtn.style.display = show ? '' : 'none';
+        }
+      } catch(_) {}
+    };
+
     try {
       const resp = await apiGetRepeatEntry(VAT);
       if(resp && resp.ok){
@@ -5393,23 +5717,19 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
         if(repeatSwitch){
           repeatSwitch.checked = enabled;
           setActiveProfileHint(enabled ? ((repeat && repeat.profile_name) || "") : "");
-
-          // show edit button whenever repeat is enabled in invoices mode
-          if (!(useReceiptsSwitch && useReceiptsSwitch.checked) && enabled) {
-            editRepeatBtn.classList.remove('hidden');
-          }
+          syncEditBtnLegacyBridge();
           repeatSwitch.addEventListener('change', async function(){
             const now = this.checked;
             if(now){
               if(useReceiptsSwitch && useReceiptsSwitch.checked){
                 // receipts + repeat -> do not open mapping modal
-                editRepeatBtn.classList.add('hidden');
+                syncEditBtnLegacyBridge();
               } else {
-                editRepeatBtn.classList.remove('hidden');
+                syncEditBtnLegacyBridge();
                 openRepeatModalWithMapping(mapping || {});
               }
             } else {
-              editRepeatBtn.classList.add('hidden');
+              syncEditBtnLegacyBridge();
             }
             // Persist enabled flag immediately (keep mapping as-is)
             const saveResp = await apiSaveRepeatEntry(now, mapping, VAT);
@@ -5421,6 +5741,7 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
             } else {
               showFlash('Αποτυχία αποθήκευσης ρύθμισης.', 'error');
             }
+            syncEditBtnLegacyBridge();
           });
         }
 
@@ -5441,7 +5762,7 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
 
         // Wire edit button
         if(editRepeatBtn){
-          editRepeatBtn.classList.toggle('hidden', !(repeatSwitch && repeatSwitch.checked) || (useReceiptsSwitch && useReceiptsSwitch.checked));
+          syncEditBtnLegacyBridge();
           editRepeatBtn.addEventListener('click', function(){
             openRepeatModalWithMapping(mapping);
           });
@@ -5451,6 +5772,10 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
       }
     } catch(e){
       console.warn('initRepeatEntry failed', e);
+    } finally {
+      setTimeout(syncEditBtnLegacyBridge, 0);
+      setTimeout(syncEditBtnLegacyBridge, 180);
+      setTimeout(syncEditBtnLegacyBridge, 720);
     }
   })();
 
@@ -5465,7 +5790,7 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
         urlInput?.classList.remove('hidden');
         urlInput?.focus();
         // when receipts are active, edit button must be hidden (even if repeat on)
-        if(editRepeatBtn) editRepeatBtn.classList.add('hidden');
+        syncEditBtnLegacyBridge();
       } else {
         document.getElementById('markInput')?.classList.remove('hidden');
         urlInput?.classList.add('hidden');
@@ -5477,11 +5802,7 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
             const resp = await apiGetRepeatEntry(VAT);
             if(resp && resp.ok){
               const mapping = (resp.repeat_entry && resp.repeat_entry.mapping) ? resp.repeat_entry.mapping : {};
-              if(repeatSwitch && repeatSwitch.checked){
-                editRepeatBtn.classList.remove('hidden');
-              } else {
-                editRepeatBtn.classList.add('hidden');
-              }
+              syncEditBtnLegacyBridge();
             }
           } catch(e){}
         })();
@@ -5504,29 +5825,42 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
   function rcSyncSearchBoxYellowFrame(){
     try {
       const banner = document.getElementById('existingBanner');
-      const bannerVisible = !!(banner && banner.style.display !== 'none' && !banner.classList.contains('hidden'));
+      const isVisible = (el) => {
+        if (!el) return false;
+        try {
+          const cs = window.getComputedStyle(el);
+          if (!cs || cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') return false;
+        } catch(_) {}
+        return true;
+      };
+      const stickyUntil = Number(window.__RC_YELLOW_FRAME_STICKY_UNTIL || 0);
+      const stickyActive = stickyUntil > Date.now();
+      const hasYellowFlow = !!(stickyActive || (banner && isVisible(banner) && !banner.classList.contains('hidden')) || window.__RC_BLOCK_REPEAT_AUTOSUBMIT);
       const receiptsOn = !!document.getElementById('useReceiptsSwitch')?.checked;
       const markEl = document.getElementById('markInput');
       const urlEl = document.getElementById('scrapeUrlInput');
 
       const clearStyle = (el) => {
         if (!el) return;
-        el.style.outline = '';
-        el.style.boxShadow = '';
-        el.style.borderColor = '';
+        el.style.removeProperty('outline');
+        el.style.removeProperty('box-shadow');
+        el.style.removeProperty('border-color');
       };
       const applyStyle = (el) => {
         if (!el) return;
-        el.style.outline = '2px solid #f59e0b';
-        el.style.boxShadow = '0 0 0 3px rgba(253, 224, 71, 0.35)';
-        el.style.borderColor = '#f59e0b';
+        // Use important so late style writes from other listeners cannot drop the frame.
+        el.style.setProperty('outline', '2px solid #f59e0b', 'important');
+        el.style.setProperty('box-shadow', '0 0 0 3px rgba(253, 224, 71, 0.35)', 'important');
+        el.style.setProperty('border-color', '#f59e0b', 'important');
       };
 
       clearStyle(markEl);
       clearStyle(urlEl);
-      if (!bannerVisible) return;
-      if (receiptsOn) applyStyle(urlEl || markEl);
-      else applyStyle(markEl || urlEl);
+      if (!hasYellowFlow && !receiptsOn) return;
+
+      const priority = receiptsOn ? [urlEl, markEl] : [markEl, urlEl];
+      const target = priority.find(isVisible) || priority.find(Boolean) || null;
+      applyStyle(target);
     } catch(_) {}
   }
 
@@ -5613,6 +5947,10 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
       const summaryInputEl = document.getElementById('summaryJsonInput');
       if (summaryInputEl) summaryInputEl.value = JSON.stringify(obj);
       try { window.__RC_SERVER_MODAL_SUMMARY = obj; } catch(_){ }
+      try {
+        if (obj.__rc_cycle_key) window.__RC_RECEIPT_CYCLE_KEY = obj.__rc_cycle_key;
+        if (obj.__rc_source_url) window.__RC_RECEIPT_CYCLE_URL = obj.__rc_source_url;
+      } catch(_) {}
 
       if (typeof window.renderSummaryLinesFromObject === 'function') {
         try { window.renderSummaryLinesFromObject(obj); } catch(_){ }
@@ -5851,19 +6189,34 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
   rcSyncSearchBoxYellowFrame();
   rcBindYellowFrameObservers();
 
+  function rcBindYellowFrameSwitchSync(){
+    const sw = document.getElementById('useReceiptsSwitch');
+    if (!sw || sw.dataset.rcYellowFrameBound === '1') return;
+    sw.dataset.rcYellowFrameBound = '1';
+    sw.addEventListener('change', function(){
+      try {
+        const hasBanner = !!(typeof rcHasActiveExistingBanner === 'function' && rcHasActiveExistingBanner());
+        if (hasBanner || !!window.__RC_BLOCK_REPEAT_AUTOSUBMIT) {
+          window.__RC_YELLOW_FRAME_STICKY_UNTIL = Date.now() + 1800;
+        }
+      } catch(_) {}
+      setTimeout(rcSyncSearchBoxYellowFrame, 0);
+      setTimeout(rcSyncSearchBoxYellowFrame, 120);
+      setTimeout(rcSyncSearchBoxYellowFrame, 320);
+      setTimeout(rcSyncSearchBoxYellowFrame, 720);
+    }, true);
+  }
+
+  rcBindYellowFrameSwitchSync();
+
   if (!window.__RC_YELLOW_FRAME_PAGE_READY_BOUND) {
     window.__RC_YELLOW_FRAME_PAGE_READY_BOUND = true;
     window.addEventListener('app:page-ready', function(){
+      rcBindYellowFrameSwitchSync();
       setTimeout(rcSyncSearchBoxYellowFrame, 0);
       setTimeout(rcSyncSearchBoxYellowFrame, 140);
     });
   }
-
-  document.getElementById('useReceiptsSwitch')?.addEventListener('change', function(){
-    setTimeout(rcSyncSearchBoxYellowFrame, 0);
-    setTimeout(rcSyncSearchBoxYellowFrame, 120);
-    setTimeout(rcSyncSearchBoxYellowFrame, 320);
-  }, true);
 
   const modal = document.getElementById('summaryModal');
   const modalCloseBtns = Array.from(document.querySelectorAll('#modalCloseX, #modalCloseBtn'));
@@ -5933,7 +6286,8 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
           } catch(_) {}
           try {
             if (typeof partiallyReloadInvoiceTable === 'function') {
-              await partiallyReloadInvoiceTable();
+              const savedMark = String(normalized.mark || normalized.MARK || normalized.number || '').trim();
+              await partiallyReloadInvoiceTable({ highlightMark: savedMark });
             }
           } catch(_) {}
         } catch(e) {
@@ -6254,6 +6608,13 @@ document.getElementById('markSearchForm')?.addEventListener('submit', async func
   if (form) form.dataset.receiptsSubmitting = '1';
 
 evt.preventDefault();
+
+    // New scrape cycle: clear any stale modal/autosubmit state from previous receipt.
+    // This is critical after partial reload where globals and form datasets persist.
+    try {
+      if (typeof rcResetReceiptCycleState === 'function') rcResetReceiptCycleState();
+    } catch(_) {}
+
     const urlFromInput = (urlInput && urlInput.value) ? urlInput.value.trim() : '';
     const markCandidate = (document.getElementById('markInput')?.value || '').trim();
     const urlLooksValid = (v) => /^https?:\/\//i.test(v) || /^www\./i.test(v);
@@ -6362,12 +6723,21 @@ try {
         const candidate = String((j && j.mark) || '').trim();
         return /^\d{15}$/.test(candidate) ? candidate : '500000000000000';
       })();
+      const receiptCycleKey = (function(){
+        try {
+          const normalizedUrl = String(url || '').trim().replace(/\/+$/, '');
+          const modePart = String(receiptMode || '').trim().toLowerCase();
+          return [normalizedUrl, modePart, String(nextMark || '').trim()].join('||');
+        } catch(_) {
+          return String(url || '').trim();
+        }
+      })();
 
       // Repeat receipts: πάρε authoritative receipt_mtype από server settings πελάτη.
       let serverReceiptMtype = '';
       try {
         const repeatOnNow = !!document.getElementById('repeatEntrySwitch')?.checked;
-        const activeVat = (window._repeatModalVAT || "{{ vat or '' }}" || '').trim();
+        const activeVat = String((typeof rcResolveActiveVat === 'function' ? rcResolveActiveVat() : '') || '').trim();
         if (repeatOnNow && activeVat) {
           const repRes = await fetch('/api/repeat_entry/get?vat=' + encodeURIComponent(activeVat), { credentials: 'same-origin' });
           const repData = await repRes.json().catch(() => null);
@@ -6459,7 +6829,14 @@ try {
   type: 'ΑΠΟΔΕΙΞΗ',
         category: (receiptAnalysisEnabled ? '' : 'αποδειξακια'),
   is_receipt: true,
-  number: (j.progressive_aa || '')};
+  number: (j.progressive_aa || ''),
+        __rc_cycle_key: receiptCycleKey,
+        __rc_source_url: String(url || '').trim()};
+
+      try {
+        window.__RC_RECEIPT_CYCLE_KEY = receiptCycleKey;
+        window.__RC_RECEIPT_CYCLE_URL = String(url || '').trim();
+      } catch(_) {}
 
       if (serverReceiptMtype) {
         summaryObj.receipt_mtype = serverReceiptMtype;
@@ -6602,6 +6979,7 @@ try {
       // Populate modal inputs
       const summaryInput = document.getElementById('summaryJsonInput');
       if (summaryInput) summaryInput.value = JSON.stringify(summaryObj);
+      try { window.__RC_SERVER_MODAL_SUMMARY = summaryObj; } catch(_) {}
 
 
       document.getElementById('scrapeUrlField')?.setAttribute('value', url);
@@ -6612,6 +6990,15 @@ try {
       );
       document.getElementById('scrapeCategoryField')?.setAttribute('value', desiredCat);
       document.getElementById('scrapeForceField')?.setAttribute('value', 'false');
+
+      try {
+        if (window.RC && typeof RC.handleReceiptAfterScrape === 'function') {
+          const autoSaved = await RC.handleReceiptAfterScrape(JSON.parse(JSON.stringify(summaryObj)), url);
+          if (autoSaved) return;
+        }
+      } catch (autoErr) {
+        console.warn('repeat receipt autosave failed', autoErr);
+      }
 
       // Ενημέρωση modal
       const modal = document.getElementById('summaryModal');
@@ -6658,6 +7045,25 @@ async function partiallyReloadInvoiceTable(options = {}) {
   })();
   const highlightMark = candidateFromOptions || candidateFromGlobal || candidateFromInput;
 
+  try {
+    if (highlightMark) {
+      window.__RC_PENDING_LIST_HIGHLIGHT_MARK = highlightMark;
+      window.__RC_LAST_HIGHLIGHT_SUCCESS_MARK = '';
+    }
+    if (typeof window.FBP_REFRESH_LIST_FRAGMENT === 'function') {
+      const refreshed = await window.FBP_REFRESH_LIST_FRAGMENT();
+      try {
+        if (typeof window.__rcEnsureRepeatUiSync === 'function') window.__rcEnsureRepeatUiSync({ force: true, reason: 'partial-reload' });
+      } catch(_) {}
+      try {
+        if (typeof window.__searchRepeatHintRender === 'function') window.__searchRepeatHintRender();
+      } catch(_) {}
+      return !!refreshed;
+    }
+  } catch(err) {
+    console.warn('Delegated list refresh failed, falling back to local partial reload:', err);
+  }
+
   const normalizeMark = (value) => String(value || '').replace(/\D+/g, '').trim();
 
   const tryHighlightRow = (markValue) => {
@@ -6685,21 +7091,22 @@ async function partiallyReloadInvoiceTable(options = {}) {
     if (!row) return false;
 
     row.classList.add('rc-new-row-highlight');
-    row.style.backgroundColor = '#dcfce7';
-    row.style.outline = '2px solid #16a34a';
-    row.style.outlineOffset = '-2px';
-    row.style.boxShadow = '0 0 0 3px rgba(34, 197, 94, 0.28)';
-    row.style.transition = 'background-color 1.2s ease, box-shadow 1.2s ease, outline-color 1.2s ease';
-    try { row.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch(_) {}
+    row.style.setProperty('background-color', '#dcfce7', 'important');
+    row.style.setProperty('outline', '2px solid #16a34a', 'important');
+    row.style.setProperty('outline-offset', '-2px', 'important');
+    row.style.setProperty('box-shadow', '0 0 0 3px rgba(34, 197, 94, 0.28)', 'important');
+    row.style.setProperty('transition', 'background-color 1.2s ease, box-shadow 1.2s ease, outline-color 1.2s ease', 'important');
     setTimeout(() => {
       try {
-        row.style.backgroundColor = '';
-        row.style.outline = '';
-        row.style.outlineOffset = '';
-        row.style.boxShadow = '';
+        row.style.removeProperty('background-color');
+        row.style.removeProperty('outline');
+        row.style.removeProperty('outline-offset');
+        row.style.removeProperty('box-shadow');
+        row.style.removeProperty('transition');
         row.classList.remove('rc-new-row-highlight');
       } catch(_) {}
-    }, 2400);
+    }, 5000);
+    try { window.__RC_LAST_HIGHLIGHT_SUCCESS_MARK = target; } catch(_) {}
     return true;
   };
 
@@ -6715,7 +7122,7 @@ async function partiallyReloadInvoiceTable(options = {}) {
       } catch(e) { console.warn('Table reinitialization failed:', e); }
       try {
         if (typeof window.__rcEnsureRepeatUiSync === 'function') {
-          window.__rcEnsureRepeatUiSync();
+          window.__rcEnsureRepeatUiSync({ force: true, reason: 'partial-reload' });
         }
       } catch(_) {}
       try {
@@ -6726,6 +7133,14 @@ async function partiallyReloadInvoiceTable(options = {}) {
       try {
         if (typeof window.rcSyncSearchBoxYellowFrame === 'function') {
           window.rcSyncSearchBoxYellowFrame();
+        }
+      } catch(_) {}
+      try {
+        const pendingMark = String(window.__RC_PENDING_LIST_HIGHLIGHT_MARK || '').trim();
+        if (pendingMark && typeof window.FBP_HIGHLIGHT_ROW_BY_MARK === 'function') {
+          setTimeout(() => { try { window.FBP_HIGHLIGHT_ROW_BY_MARK(pendingMark); } catch(_) {} }, 180);
+          setTimeout(() => { try { window.FBP_HIGHLIGHT_ROW_BY_MARK(pendingMark); } catch(_) {} }, 620);
+          setTimeout(() => { try { window.FBP_HIGHLIGHT_ROW_BY_MARK(pendingMark); } catch(_) {} }, 1400);
         }
       } catch(_) {}
     }, 50);
@@ -6754,11 +7169,37 @@ async function partiallyReloadInvoiceTable(options = {}) {
           reinitTable();
           const markToHighlight = String((data && data.highlight_mark) || highlightMark || '').trim();
           if (markToHighlight) {
+            try { window.__RC_PENDING_LIST_HIGHLIGHT_MARK = markToHighlight; } catch(_) {}
             setTimeout(() => { tryHighlightRow(markToHighlight); }, 40);
             setTimeout(() => { tryHighlightRow(markToHighlight); }, 220);
             setTimeout(() => { tryHighlightRow(markToHighlight); }, 520);
+            setTimeout(() => { tryHighlightRow(markToHighlight); }, 1200);
+            setTimeout(() => { tryHighlightRow(markToHighlight); }, 2300);
+            setTimeout(() => {
+              try {
+                if (typeof window.FBP_HIGHLIGHT_ROW_BY_MARK === 'function') {
+                  window.FBP_HIGHLIGHT_ROW_BY_MARK(markToHighlight);
+                }
+              } catch(_) {}
+            }, 180);
+            setTimeout(() => {
+              try {
+                if (typeof window.FBP_HIGHLIGHT_ROW_BY_MARK === 'function') {
+                  window.FBP_HIGHLIGHT_ROW_BY_MARK(markToHighlight);
+                }
+              } catch(_) {}
+            }, 620);
+            setTimeout(() => {
+              try {
+                const lastOk = String(window.__RC_LAST_HIGHLIGHT_SUCCESS_MARK || '').trim();
+                if (String(window.__RC_PENDING_LIST_HIGHLIGHT_MARK || '').trim() === markToHighlight && lastOk === markToHighlight) {
+                  window.__RC_PENDING_LIST_HIGHLIGHT_MARK = '';
+                }
+              } catch(_) {}
+            }, 3600);
+          } else {
+            window.__RC_PENDING_LIST_HIGHLIGHT_MARK = '';
           }
-          window.__RC_PENDING_LIST_HIGHLIGHT_MARK = '';
           return true;
         }
       }
@@ -6784,10 +7225,28 @@ async function partiallyReloadInvoiceTable(options = {}) {
         }
         reinitTable();
         if (highlightMark) {
+          try { window.__RC_PENDING_LIST_HIGHLIGHT_MARK = highlightMark; } catch(_) {}
           setTimeout(() => { tryHighlightRow(highlightMark); }, 60);
           setTimeout(() => { tryHighlightRow(highlightMark); }, 260);
+          setTimeout(() => { tryHighlightRow(highlightMark); }, 1100);
+          setTimeout(() => {
+            try {
+              if (typeof window.FBP_HIGHLIGHT_ROW_BY_MARK === 'function') {
+                window.FBP_HIGHLIGHT_ROW_BY_MARK(highlightMark);
+              }
+            } catch(_) {}
+          }, 220);
+          setTimeout(() => {
+            try {
+              const lastOk = String(window.__RC_LAST_HIGHLIGHT_SUCCESS_MARK || '').trim();
+              if (String(window.__RC_PENDING_LIST_HIGHLIGHT_MARK || '').trim() === highlightMark && lastOk === highlightMark) {
+                window.__RC_PENDING_LIST_HIGHLIGHT_MARK = '';
+              }
+            } catch(_) {}
+          }, 3600);
+        } else {
+          window.__RC_PENDING_LIST_HIGHLIGHT_MARK = '';
         }
-        window.__RC_PENDING_LIST_HIGHLIGHT_MARK = '';
         return true;
       }
     }
@@ -6797,6 +7256,7 @@ async function partiallyReloadInvoiceTable(options = {}) {
 
   return false;
 }
+window.partiallyReloadInvoiceTable = partiallyReloadInvoiceTable;
 
 // ===== Helper to initialize selectAll checkbox with correct logic (only visible rows) =====
 function initializeSelectAllCheckbox() {
@@ -7316,7 +7776,7 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
     // αν υπάρχει receipt_mtype στο repeat_entry του πελάτη, χρησιμοποίησέ το.
     try {
       const repeatOnNow = !!document.getElementById('repeatEntrySwitch')?.checked;
-      const activeVat = (window._repeatModalVAT || "{{ vat or '' }}" || '').trim();
+      const activeVat = String((typeof rcResolveActiveVat === 'function' ? rcResolveActiveVat() : '') || '').trim();
       if (repeatOnNow && activeVat) {
         const repRes = await fetch('/api/repeat_entry/get?vat=' + encodeURIComponent(activeVat), { credentials: 'same-origin' });
         const repData = await repRes.json().catch(() => null);
@@ -7332,6 +7792,8 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
       console.warn('Failed to enforce server receipt_mtype before receipt save', e);
     }
 
+    const markBeforeSave = String(summary.mark || summary.MARK || summary.number || '').trim();
+
     const res = await fetchWithOverlay('/save_summary', {
       method: 'POST',
       credentials: 'same-origin',
@@ -7343,6 +7805,9 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
       await showModalAlert('Σφάλμα', 'Αποτυχία αποθήκευσης (HTTP ' + res.status + '): ' + t);
       return;
     }
+    const savePayload = await res.json().catch(() => null);
+    const savedMark = String((savePayload && (savePayload.saved_mark || savePayload.mark)) || markBeforeSave || '').trim();
+
     try { hideSummaryModal(); } catch(_) {}
 
     // Καθαρίζει το search box & cache όπως γίνεται στην περίπτωση yellow banner "MARK exists"
@@ -7350,7 +7815,10 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
     try { if (typeof clearReceiptSearchCacheOnClose === 'function') clearReceiptSearchCacheOnClose(); } catch(_) {}
 
     // Partial reload: ανανέωσε μόνο τον πίνακα αντί για full page reload
-    const reloaded = await partiallyReloadInvoiceTable();
+    if (savedMark) {
+      try { window.__RC_PENDING_LIST_HIGHLIGHT_MARK = savedMark; } catch(_) {}
+    }
+    const reloaded = await partiallyReloadInvoiceTable({ highlightMark: savedMark });
     if (reloaded) {
       try { if (typeof showFlash === 'function') showFlash('Παραστατικό αποθηκεύτηκε με επιτυχία!', 'success', 2000); } catch(_) {}
     } else {
@@ -7385,8 +7853,10 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
     };
     
     let summary = {};
+    let markBeforeSave = '';
     try {
       summary = JSON.parse(document.getElementById('summaryJsonInput').value || '{}');
+      markBeforeSave = String(summary.mark || summary.MARK || summary.number || '').trim();
     } catch(err){
       console.warn('Failed parsing summaryJsonInput for validation', err);
       try { __rc_debug_repeat_log('invoice_submit_invalid_summary_json', { error: String(err && err.message || err || '') }); } catch(_) {}
@@ -7689,6 +8159,12 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
         body: formData
       });
       try { __rc_debug_repeat_log('invoice_submit_save_response', { ok: !!saveRes.ok, status: saveRes.status }); } catch(_) {}
+
+      let savedMarkFromResponse = '';
+      try {
+        const payload = await saveRes.clone().json().catch(() => null);
+        savedMarkFromResponse = String((payload && (payload.saved_mark || payload.mark || payload.MARK || payload.number)) || '').trim();
+      } catch(_) {}
       
       hideLoadingOverlay();
       
@@ -7739,7 +8215,20 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
       } catch(_) {}
 
       // Successful save - partial reload
-      const reloaded = await partiallyReloadInvoiceTable();
+      const savedMark = String(
+        savedMarkFromResponse
+        || markBeforeSave
+        || summary.mark
+        || summary.MARK
+        || summary.number
+        || formData.get('mark')
+        || document.getElementById('markInput')?.value
+        || ''
+      ).trim();
+      if (savedMark) {
+        try { window.__RC_PENDING_LIST_HIGHLIGHT_MARK = savedMark; } catch(_) {}
+      }
+      const reloaded = await partiallyReloadInvoiceTable({ highlightMark: savedMark });
       if (reloaded) {
         try { if (typeof showFlash === 'function') showFlash('Παραστατικό χαρακτηρίστηκε με επιτυχία!', 'success', 2000); } catch(_) {}
       } else {
@@ -7757,6 +8246,15 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
   
   // Receipt flow
   e.preventDefault();
+  try { e.stopImmediatePropagation(); } catch(_) {}
+  try { e.stopPropagation(); } catch(_) {}
+
+  if (window.__RC_RECEIPT_SAVE_IN_PROGRESS) {
+    try { if (typeof showFlash === 'function') showFlash('Η αποθήκευση απόδειξης εκτελείται ήδη...', 'info', 1800); } catch(_) {}
+    return;
+  }
+  window.__RC_RECEIPT_SAVE_IN_PROGRESS = true;
+  try {
 
   // parse summary from hidden input
   let summary = {};
@@ -7867,7 +8365,25 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
     return;
   }
 
-  const shouldApplyProfile = rcShouldApplyReceiptProfile(summary);
+  // Merge latest component state so analysis classifications/MTYPE are not lost.
+  try {
+    const compEl = document.getElementById('summaryDataInput');
+    if (compEl && String(compEl.value || '').trim() !== '') {
+      const comp = JSON.parse(compEl.value || '{}') || {};
+      if (comp && typeof comp === 'object') {
+        if (Array.isArray(comp.lines) && comp.lines.length) summary.lines = comp.lines;
+        if (comp.mtype) summary.mtype = comp.mtype;
+        if (comp.receipt_mtype) summary.receipt_mtype = comp.receipt_mtype;
+        if (comp.receiptMtype) summary.receipt_mtype = comp.receiptMtype;
+      }
+    }
+  } catch (mergeErr) {
+    console.warn('receipt submit: merge summaryDataInput failed', mergeErr);
+  }
+
+  const analysisUiActiveNow = !!document.querySelector('#summaryLinesContainer .receipt-analysis-amount, #summaryLinesContainer .receipt-analysis-vat, #summaryLinesContainer .receipt-analysis-vat-category');
+  const shouldApplyProfile = rcShouldApplyReceiptProfile(summary) || analysisUiActiveNow;
+  summary.receipt_analysis_enabled = !!shouldApplyProfile;
 
   const payload = {
     url: scrapeUrl,
@@ -7899,7 +8415,20 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
       return;
     }
     const successMsg = 'Αποθηκεύτηκε η απόδειξη (excel + json).';
+    const savedMark = String((j && (j.mark || j.saved_mark)) || summary.mark || markVal || '').trim();
     hideSummaryModal();
+    try { if (typeof rcResetReceiptCycleState === 'function') rcResetReceiptCycleState(); } catch(_) {}
+
+    try {
+      const summaryInput = document.getElementById('summaryJsonInput');
+      if (summaryInput) summaryInput.value = '{}';
+      const summaryDataInput = document.getElementById('summaryDataInput');
+      if (summaryDataInput) summaryDataInput.value = '{}';
+      window._lastSummaryObj = {};
+      window.__RC_LAST_SUMMARY = {};
+      window.__RC_SERVER_MODAL_SUMMARY = null;
+      if (window.__RC_FLAGS) window.__RC_FLAGS.autoHandled = false;
+    } catch(_) {}
 
     try { window.__RC_CLEAR_MARK_AFTER_SAVE = true; } catch(_) {}
     try {
@@ -7912,7 +8441,11 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
     try { if (typeof clearSearchInputs === 'function') clearSearchInputs(); } catch(_) {}
     try { if (typeof clearReceiptSearchCacheOnClose === 'function') clearReceiptSearchCacheOnClose(); } catch(_) {}
 
-    const reloaded = await partiallyReloadInvoiceTable();
+    if (savedMark) {
+      try { window.__RC_PENDING_LIST_HIGHLIGHT_MARK = savedMark; } catch(_) {}
+    }
+    const partialReload = window.partiallyReloadInvoiceTable || partiallyReloadInvoiceTable;
+    const reloaded = await partialReload({ highlightMark: savedMark });
     if (reloaded) {
       showFlash(successMsg, 'success');
       persistReceiptFlash(successMsg, 'success');
@@ -7922,13 +8455,18 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
     }
 
     // clean hidden fields
-    document.getElementById('scrapeUrlField').value = '';
-    document.getElementById('scrapeForceField').value = 'false';
+    const scrapeUrlField = document.getElementById('scrapeUrlField');
+    if (scrapeUrlField) scrapeUrlField.value = '';
+    const scrapeForceField = document.getElementById('scrapeForceField');
+    if (scrapeForceField) scrapeForceField.value = 'false';
   } catch(err){
     console.error('confirm_receipt fetch error', err);
     const errMsg = 'Σφάλμα δικτύου κατά την αποθήκευση.';
     showFlash(errMsg, 'error');
     persistReceiptFlash(errMsg, 'error');
+  }
+  } finally {
+    window.__RC_RECEIPT_SAVE_IN_PROGRESS = false;
   }
 });
 window.__SUMMARY_INVOICE_SUBMIT_READY = true;
@@ -10096,6 +10634,10 @@ document.addEventListener('submit', function(ev){
     if (persist) {
       try { localStorage.setItem('rc:receiptMode', normalized); } catch(_) {}
     }
+    try {
+      window.__RC_RECEIPT_MODE_CURRENT = normalized;
+      if (document.body && document.body.dataset) document.body.dataset.receiptMode = normalized;
+    } catch(_) {}
     updateReceiptModeMenuTick(normalized);
     if (receiptsModeBtn) {
       receiptsModeBtn.setAttribute('title', normalized === 'analysis'
@@ -10106,7 +10648,9 @@ document.addEventListener('submit', function(ev){
     // after switching receipt mode the edit button may need updating
     updateReceiptClassEditButton();
     try {
-      const remembered = window.__LAST_REPEAT_PROFILE_NAME || '';
+      const remembered = (typeof rcResolveProfileHintName === 'function')
+        ? rcResolveProfileHintName()
+        : (window.__LAST_REPEAT_PROFILE_NAME || '');
       setActiveProfileHint(remembered);
     } catch(_) {}
 
@@ -10133,9 +10677,17 @@ document.addEventListener('submit', function(ev){
     if (savedMode === 'analysis' || savedMode === 'mixed') {
       applyReceiptMode(savedMode, false, false);
     } else {
+      try {
+        window.__RC_RECEIPT_MODE_CURRENT = 'mixed';
+        if (document.body && document.body.dataset) document.body.dataset.receiptMode = 'mixed';
+      } catch(_) {}
       updateReceiptModeMenuTick('mixed');
     }
   } catch(_) {
+    try {
+      window.__RC_RECEIPT_MODE_CURRENT = 'mixed';
+      if (document.body && document.body.dataset) document.body.dataset.receiptMode = 'mixed';
+    } catch(_) {}
     updateReceiptModeMenuTick('mixed');
   }
   applyUI(sw.checked);
@@ -10157,6 +10709,7 @@ document.addEventListener('submit', function(ev){
     updateReceiptClassEditButton();
     localStorage.setItem(KEY, sw.checked ? '1' : '0');
     localStorage.setItem(LEGACY_KEY, sw.checked ? '1' : '0');
+    try { window.dispatchEvent(new CustomEvent('useReceiptsChange', { detail: { enabled: !!sw.checked } })); } catch(_) {}
     if (sw.checked && !receiptCustomCheckDone) {
       await refreshReceiptCustomAvailability();
     }
@@ -10281,7 +10834,56 @@ function closeReceiptClassModal(){
     document.body.style.overflow = '';
 }
 
+function rcResolveCurrentReceiptVat(){
+    try {
+      const live = String((typeof rcResolveActiveVat === 'function' ? rcResolveActiveVat() : '') || '').trim();
+      if (live) return live;
+    } catch(_) {}
+    try {
+      const ds = String(document.body?.dataset?.activeVat || '').trim();
+      if (ds) return ds;
+    } catch(_) {}
+    try {
+      const modalVat = String(window._repeatModalVAT || '').trim();
+      if (modalVat) return modalVat;
+    } catch(_) {}
+    try {
+      const serverVat = String("{{ vat or '' }}").trim();
+      if (serverVat) return serverVat;
+    } catch(_) {}
+    return '';
+}
+
+function getCurrentReceiptSummaryObj(){
+    const currentVat = rcResolveCurrentReceiptVat();
+    try {
+      const lastVat = String(window.__RC_LAST_SUMMARY_VAT || '').trim();
+      if (currentVat && lastVat && currentVat !== lastVat) {
+        try { window.__RC_LAST_SUMMARY_VAT = currentVat; } catch(_) {}
+        try { window._lastSummaryObj = {}; } catch(_) {}
+        try { window.__RC_LAST_SUMMARY = {}; } catch(_) {}
+      }
+    } catch(_) {}
+
+    try {
+      const summaryInput = document.getElementById('summaryJsonInput');
+      if (summaryInput && String(summaryInput.value || '').trim()) {
+        const parsed = JSON.parse(summaryInput.value);
+        try { window.__RC_LAST_SUMMARY_VAT = currentVat; } catch(_) {}
+        try { window._lastSummaryObj = parsed; } catch(_) {}
+        return parsed;
+      }
+    } catch(_) {}
+    try {
+      const cached = window._lastSummaryObj || {};
+      try { window.__RC_LAST_SUMMARY_VAT = currentVat; } catch(_) {}
+      return cached;
+    } catch(_) {}
+    return {};
+}
+
 function openReceiptClassModal(summaryObj){
+    summaryObj = summaryObj || getCurrentReceiptSummaryObj();
     const analysisAvailable = !!(
       (typeof window.__rcReceiptAnalysisAvailable === 'function' && window.__rcReceiptAnalysisAvailable())
       || window.__RC_HAS_RECEIPT_CUSTOM_CATEGORIES
@@ -10316,7 +10918,7 @@ function openReceiptClassModal(summaryObj){
 
     const list = document.getElementById('receiptClassList');
     const selProf = document.getElementById('charProfileSelectClass');
-    const activeVat = "{{ vat or '' }}";
+    const activeVat = rcResolveCurrentReceiptVat();
     const repeatSwitchEl = document.getElementById('repeatEntrySwitch');
     let repeatEntryEnabled = !!(repeatSwitchEl && repeatSwitchEl.checked);
     if (!repeatEntryEnabled) {
@@ -10825,6 +11427,21 @@ RC.confirmReceiptOnce = async function(summaryObj, scrapeUrl){
   window.__RC_LOCKS.confirm = true;
 
   try {
+    try {
+      // Sync live modal/component state before auto-confirm so line classifications persist.
+      if (typeof updateSummaryFromDom === 'function') updateSummaryFromDom();
+      const compEl = document.getElementById('summaryDataInput');
+      if (compEl && String(compEl.value || '').trim() !== '') {
+        const comp = JSON.parse(compEl.value || '{}') || {};
+        if (comp && typeof comp === 'object') {
+          if (Array.isArray(comp.lines) && comp.lines.length) summaryObj.lines = comp.lines;
+          if (comp.mtype) summaryObj.mtype = comp.mtype;
+          if (comp.receipt_mtype) summaryObj.receipt_mtype = comp.receipt_mtype;
+          if (comp.receiptMtype) summaryObj.receipt_mtype = comp.receiptMtype;
+        }
+      }
+    } catch(_) {}
+
     const VAT = "{{ vat or '' }}";
     const afmVal = (VAT || summaryObj.AFM_issuer || summaryObj.AFM || (summaryObj.raw && summaryObj.raw.issuer_vat) || '').toString().trim();
     if (!afmVal) return { ok:false, reason:'missing_afm' };
@@ -10845,7 +11462,9 @@ RC.confirmReceiptOnce = async function(summaryObj, scrapeUrl){
       yearVal = m ? m[0] : String((new Date()).getUTCFullYear());
     }
 
-    const shouldApplyProfile = rcShouldApplyReceiptProfile(summaryObj);
+    const analysisUiActiveNow = !!document.querySelector('#summaryLinesContainer .receipt-analysis-amount, #summaryLinesContainer .receipt-analysis-vat, #summaryLinesContainer .receipt-analysis-vat-category');
+    const shouldApplyProfile = rcShouldApplyReceiptProfile(summaryObj) || analysisUiActiveNow;
+    summaryObj.receipt_analysis_enabled = !!shouldApplyProfile;
     try {
       const isReceiptFlow = !!(
         summaryObj && (
@@ -10860,7 +11479,7 @@ RC.confirmReceiptOnce = async function(summaryObj, scrapeUrl){
 
     const payload = {
       url: (scrapeUrl||'').trim(),
-      summary_json: JSON.stringify(summaryObj),
+      summary: summaryObj,
       force: false,
       category: (shouldApplyProfile ? '' : 'αποδειξακια'),
       afm: afmVal,
@@ -10888,7 +11507,10 @@ RC.confirmReceiptOnce = async function(summaryObj, scrapeUrl){
     const jj = await res.json().catch(()=>null);
     if (!res.ok || !jj || !jj.ok) return { ok:false, reason: (jj&&jj.error) || ('HTTP '+res.status) };
 
-    return { ok:true };
+    return {
+      ok:true,
+      mark: String((jj && (jj.mark || jj.saved_mark)) || summaryObj.mark || '').trim()
+    };
   } finally {
     window.__RC_LOCKS.confirm = false;
   }
@@ -10924,11 +11546,15 @@ RC.handleReceiptAfterScrape = async function(summaryObj, scrapeUrl){
     const successMsg = 'Αποθηκεύτηκε η απόδειξη (repeat).';
     showFlash(successMsg, 'success', 4200);
     persistReceiptFlash(successMsg, 'success');
-    try { hideSummaryModal(); } catch(_){}
+    try { if (typeof rcResetReceiptCycleState === 'function') rcResetReceiptCycleState(); else hideSummaryModal(); } catch(_){}
     try { document.getElementById('scrapeUrlInput').value = ''; } catch(_){}
     try { document.getElementById('markInput').value = ''; } catch(_){}
     // Partial reload instead of full page reload
-    const reloaded = await partiallyReloadInvoiceTable();
+    const savedMark = String((r && r.mark) || summaryObj.mark || '').trim();
+    if (savedMark) {
+      try { window.__RC_PENDING_LIST_HIGHLIGHT_MARK = savedMark; } catch(_) {}
+    }
+    const reloaded = await partiallyReloadInvoiceTable({ highlightMark: savedMark });
     if (!reloaded) {
       showFlash('Η αποθήκευση ολοκληρώθηκε, αλλά δεν έγινε ανανέωση πίνακα. Πάτησε αναζήτηση ή ανανέωση λίστας.', 'warning', 4500);
     }
@@ -11111,6 +11737,7 @@ document.addEventListener('DOMContentLoaded', () => {
    - Στο submit της φόρμας αναζήτησης, κάνει ένα φρεσκάρισμα του state πριν τη ροή
 */
 (function() {
+  if (window.__RC_USE_CANONICAL_RECEIPT_AUTOCONFIRM === true) return;
   const LS_KEY_REPEAT_ENABLED = 'REPEAT:enabled';
 
   async function refreshRepeatState() {
@@ -11238,7 +11865,13 @@ document.addEventListener('DOMContentLoaded', () => {
 })();</script>
 
 <script>
+  // Use only the canonical receipt auto-confirm shim to avoid competing stale-state handlers.
+  window.__RC_USE_CANONICAL_RECEIPT_AUTOCONFIRM = true;
+</script>
+
+<script>
  (function(){
+  if (window.__RC_USE_CANONICAL_RECEIPT_AUTOCONFIRM !== false) return;
   function isDetailed(x){
     try{
       if(!x || typeof x !== 'object') return false;
@@ -11299,9 +11932,16 @@ document.addEventListener('DOMContentLoaded', () => {
   // Pick ONE receipt to submit when repeat+receipts is ON
   function pickReceiptSummary(){
     try{
-      // Priority 1: explicit modal summary if page defines it
-      if (window.modal_summary && isReceipt(window.modal_summary)) return window.modal_summary;
-      // Priority 2: data attribute on any modal container
+      // Priority 1: current live summary from hidden input (authoritative at runtime)
+      try {
+        const live = JSON.parse(document.getElementById('summaryJsonInput')?.value || '{}');
+        if (isReceipt(live) && isDetailed(live)) return live;
+      } catch(_) {}
+      // Priority 2: latest server modal cache
+      if (window.__RC_SERVER_MODAL_SUMMARY && isReceipt(window.__RC_SERVER_MODAL_SUMMARY) && isDetailed(window.__RC_SERVER_MODAL_SUMMARY)) {
+        return window.__RC_SERVER_MODAL_SUMMARY;
+      }
+      // Priority 3: data attribute on any modal container
       const el = document.querySelector('[data-modal-summary]');
       if (el){
         try{
@@ -11309,10 +11949,12 @@ document.addEventListener('DOMContentLoaded', () => {
           if (isReceipt(obj)) return obj;
         }catch(_){}
       }
-      // Priority 3: last detailed receipt from afm_epsilon
+      // Priority 4: last detailed receipt from afm_epsilon
       const arr = Array.isArray(window.afm_epsilon) ? window.afm_epsilon.slice() : [];
       const receipts = arr.filter(x => isReceipt(x) && isDetailed(x));
       if (receipts.length) return receipts[receipts.length - 1];
+      // Priority 5: legacy server-side initial value (least trustworthy for later cycles)
+      if (window.modal_summary && isReceipt(window.modal_summary) && isDetailed(window.modal_summary)) return window.modal_summary;
     }catch(e){ console.warn('pickReceiptSummary failed', e); }
     return null;
   }
@@ -11377,20 +12019,32 @@ document.addEventListener('DOMContentLoaded', () => {
           } catch(_) {}
         }
       }catch(_){}
+      try { window.__RC_SERVER_MODAL_SUMMARY = chosen; } catch(_) {}
       summaryInput.value = JSON.stringify(chosen);
       setTimeout(function(){
-        if (!saveForm.dataset._autoSubmitted) {
-          saveForm.dataset._autoSubmitted = '1';
+        const curKey = [
+          String(chosen && (chosen.mark || chosen.MARK || chosen.number) || '').trim(),
+          String(chosen && (chosen.issueDate || chosen.issue_date) || '').trim(),
+          String(chosen && (chosen.AFM_issuer || chosen.AFM) || '').trim(),
+          String(chosen && (chosen.totalValue || chosen.total_amount || chosen.totalNetValue) || '').trim()
+        ].join('|');
+        const lastSubmittedKey = String(saveForm.dataset._autoSubmittedKey || '').trim();
+        if (!curKey || curKey !== lastSubmittedKey) {
+          saveForm.dataset._autoSubmittedKey = curKey;
           if (saveForm.requestSubmit) saveForm.requestSubmit();
           else saveForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
         }
       }, 30);
+      setTimeout(() => {
+        try { saveForm.dataset._receiptAutoHandled = ''; } catch(_) {}
+      }, 1200);
     }
   } catch(e) { console.warn('receipts auto-confirm failed', e); }
 })();</script>
 <!-- === END: Injected fix (v2) === -->
 <!-- RC_RECEIPT_AUTOPILOT_PATCH -->
 <script>(function(){'use strict';
+  if (window.__RC_USE_CANONICAL_RECEIPT_AUTOCONFIRM !== false) return;
   // ====== Robust receipts repeat autopilot (no UI break) ======
   window.__RC_FLAGS = window.__RC_FLAGS || {};
 
@@ -11474,8 +12128,15 @@ document.addEventListener('DOMContentLoaded', () => {
       const finalizeWithoutReload = async () => {
         if (finalized) return;
         finalized = true;
+        let savedMark = '';
+        try {
+          const summaryInput = document.getElementById('summaryJsonInput');
+          const parsed = summaryInput && summaryInput.value ? JSON.parse(summaryInput.value) : null;
+          savedMark = String((parsed && (parsed.mark || parsed.MARK || parsed.number)) || '').trim();
+          if (savedMark) window.__RC_PENDING_LIST_HIGHLIGHT_MARK = savedMark;
+        } catch(_) {}
         rcRememberSearchClear();
-        try { await partiallyReloadInvoiceTable(); } catch(_) {}
+        try { await partiallyReloadInvoiceTable({ highlightMark: savedMark }); } catch(_) {}
       };
       saveForm.addEventListener('ajax:done', () => { void finalizeWithoutReload(); }, { once:true });
     }
@@ -11494,6 +12155,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 <!-- ===== Receipts repeat auto-confirm SHIM (appended) ===== -->
 <script>(function(){
+  if (window.__RC_USE_CANONICAL_RECEIPT_AUTOCONFIRM === true) return;
   // small utility: safe JSON parse
   function parseJSON(x){ try{ return JSON.parse(x); }catch(_){ return null; } }
   function getLS(k, d){ try{ const v = localStorage.getItem(k); return (v===null||v===undefined)?d:v; }catch(_){ return d; } }
@@ -11546,7 +12208,7 @@ document.addEventListener('DOMContentLoaded', () => {
     return u ? (u.value || '') : '';
   }
 
-  let lastMarkTried = null;
+  let lastReceiptKeyTried = null;
   let busy = false;
 
   async function tryAutoConfirm(){
@@ -11558,10 +12220,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const s = readSummaryObject();
     if (!s || !isReceiptSummary(s) || !hasMeaningfulLines(s)) return;
 
-    // avoid double firing for the same mark
-    const mk = String(s.mark || s.MARK || '').trim();
-    if (!mk || mk === lastMarkTried) return;
-    lastMarkTried = mk;
+    // avoid double firing for the same receipt payload snapshot
+    const receiptKey = [
+      String(s.mark || s.MARK || s.number || '').trim(),
+      String(s.issueDate || s.issue_date || '').trim(),
+      String(s.AFM_issuer || s.AFM || '').trim(),
+      String(s.totalValue || s.total_amount || s.totalNetValue || '').trim(),
+      Array.isArray(s.lines) ? s.lines.length : 0
+    ].join('|');
+    if (!receiptKey || receiptKey === lastReceiptKeyTried) return;
+    lastReceiptKeyTried = receiptKey;
 
     // hide modal pre-emptively to avoid flicker
     try { hideSummaryModal(); } catch(_){}
@@ -11579,7 +12247,8 @@ document.addEventListener('DOMContentLoaded', () => {
           await RC.applySavedReceiptAnalysisMapping(normalized);
         }
       } catch(_) {}
-      await RC.confirmReceiptOnce(normalized, getScrapeUrl());
+      const r = await RC.confirmReceiptOnce(normalized, getScrapeUrl());
+      try { if (typeof rcResetReceiptCycleState === 'function') rcResetReceiptCycleState(); } catch(_) {}
       // keep receipts mode sticky on refresh
       setLS('UI:useReceipts', '1');
       // also persist repeat-enabled locally (just in case)
@@ -11591,13 +12260,17 @@ document.addEventListener('DOMContentLoaded', () => {
       } catch(_) {}
       try {
         if (typeof partiallyReloadInvoiceTable === 'function') {
-          await partiallyReloadInvoiceTable();
+          const savedMark = String((r && r.mark) || normalized.mark || normalized.MARK || '').trim();
+          if (savedMark) {
+            try { window.__RC_PENDING_LIST_HIGHLIGHT_MARK = savedMark; } catch(_) {}
+          }
+          await partiallyReloadInvoiceTable({ highlightMark: savedMark });
         }
       } catch(_) {}
     } catch(err){
       console.warn('[RC-AUTOCONFIRM] failed', err);
       // allow another attempt
-      lastMarkTried = null;
+      lastReceiptKeyTried = null;
     } finally {
       busy = false;
     }
@@ -11612,6 +12285,12 @@ document.addEventListener('DOMContentLoaded', () => {
   function stopPoll(){
     if (pollId) { clearInterval(pollId); pollId = null; }
   }
+
+  document.addEventListener('rc:receipt-cycle-reset', function(){
+    lastReceiptKeyTried = null;
+    busy = false;
+    setTimeout(tryAutoConfirm, 0);
+  });
 
   // Start ASAP
   startPoll();
@@ -12191,13 +12870,176 @@ document.addEventListener('click', function(e){
 </script>
 
 <script>
+// Reliability watchdog for receipts auto-submit (scan/paste URL).
+// If submit does not progress to modal/save flow, retry once.
+(function(){
+  const form = document.getElementById('markSearchForm');
+  if (!form || form.dataset.rcReceiptWatchdogBound === '1') return;
+  form.dataset.rcReceiptWatchdogBound = '1';
+
+  function isVisible(el){
+    if (!el) return false;
+    const cs = window.getComputedStyle(el);
+    return !(cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0');
+  }
+
+  function looksUrl(v){
+    return /^https?:\/\//i.test(String(v || '').trim());
+  }
+
+  function hasSubmitProgress(){
+    try {
+      if (window.__RC_FORCE_AJAX_SAVE_IN_PROGRESS) return true;
+    } catch(_) {}
+    try {
+      const modal = document.getElementById('summaryModal');
+      if (isVisible(modal)) return true;
+    } catch(_) {}
+    try {
+      const input = document.getElementById('summaryJsonInput');
+      const raw = String(input && input.value || '').trim();
+      if (raw && raw !== '{}' && raw !== 'null') return true;
+    } catch(_) {}
+    try {
+      if (String(window.__RC_PENDING_LIST_HIGHLIGHT_MARK || '').trim()) return true;
+    } catch(_) {}
+    return false;
+  }
+
+  form.addEventListener('submit', function(){
+    const receiptsOn = !!document.getElementById('useReceiptsSwitch')?.checked;
+    if (!receiptsOn) return;
+
+    const urlInput = String(document.getElementById('scrapeUrlInput')?.value || '').trim();
+    const markInput = String(document.getElementById('markInput')?.value || '').trim();
+    const hasUrl = looksUrl(urlInput) || looksUrl(markInput);
+    if (!hasUrl) return;
+
+    const token = String(Date.now());
+    form.dataset.rcReceiptWatchdogToken = token;
+    form.dataset.rcReceiptWatchdogRetried = '0';
+
+    setTimeout(() => {
+      try {
+        if (form.dataset.rcReceiptWatchdogToken !== token) return;
+        if (hasSubmitProgress()) return;
+
+        if (form.dataset.rcReceiptWatchdogRetried === '1') return;
+        form.dataset.rcReceiptWatchdogRetried = '1';
+
+        const stillReceipts = !!document.getElementById('useReceiptsSwitch')?.checked;
+        const stillUrl = String(document.getElementById('scrapeUrlInput')?.value || document.getElementById('markInput')?.value || '').trim();
+        if (!stillReceipts || !looksUrl(stillUrl)) return;
+
+        try {
+          if (typeof form.requestSubmit === 'function') form.requestSubmit();
+          else form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+        } catch(_) {}
+      } catch(_) {}
+    }, 2400);
+  }, true);
+})();
+</script>
+
+<script>
 // Repeat-entry UI hardening after partial reloads and multi-listener flows.
 (function(){
-  const REPEAT_LS_KEY = 'REPEAT:enabled';
+  const REPEAT_LS_KEY_PREFIX = 'REPEAT:enabled:';
+  const POLL_MS = 900;
+
+  function repeatDebugEnabled(){
+    try { return localStorage.getItem('rc:repeatDebug') === '1'; } catch(_) { return false; }
+  }
+
+  function ensureRepeatDebugOverlay(){
+    try {
+      if (!repeatDebugEnabled()) {
+        const existing = document.getElementById('rcRepeatDebugOverlay');
+        if (existing) existing.style.display = 'none';
+        return null;
+      }
+      let overlay = document.getElementById('rcRepeatDebugOverlay');
+      if (overlay) {
+        overlay.style.display = 'block';
+        return overlay;
+      }
+      overlay = document.createElement('div');
+      overlay.id = 'rcRepeatDebugOverlay';
+      overlay.style.position = 'fixed';
+      overlay.style.zIndex = '99999';
+      overlay.style.right = '12px';
+      overlay.style.top = '12px';
+      overlay.style.maxWidth = '360px';
+      overlay.style.backgroundColor = 'rgba(15, 23, 42, 0.95)';
+      overlay.style.color = '#f8fafc';
+      overlay.style.fontSize = '12px';
+      overlay.style.lineHeight = '1.4';
+      overlay.style.padding = '10px';
+      overlay.style.border = '1px solid rgba(148, 163, 184, 0.65)';
+      overlay.style.borderRadius = '10px';
+      overlay.style.boxShadow = '0 4px 24px rgba(15, 23, 42, 0.55)';
+      overlay.style.fontFamily = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace';
+      overlay.style.whiteSpace = 'pre-wrap';
+      overlay.style.opacity = '0.98';
+      overlay.style.cursor = 'default';
+      overlay.addEventListener('click', function(){
+        try { localStorage.removeItem('rc:repeatDebug'); } catch(_) {}
+        overlay.style.display = 'none';
+      });
+      overlay.textContent = 'Repeat debug active. Click to hide.';
+      document.body.appendChild(overlay);
+      return overlay;
+    } catch(_) { return null; }
+  }
+
+  function updateRepeatDebugOverlay(state){
+    if (!repeatDebugEnabled()) return;
+    const overlay = ensureRepeatDebugOverlay();
+    if (!overlay) return;
+    try {
+      const lines = [];
+      lines.push('REPEAT DEBUG');
+      lines.push('--------------');
+      lines.push('event: ' + String(state.event || 'n/a'));
+      lines.push('vat: ' + String(state.vat || '')); 
+      lines.push('repeatOn: ' + String(!!state.repeatOn));
+      lines.push('receiptsOn: ' + String(!!state.receiptsOn));
+      lines.push('editVisible: ' + String(!!state.editVisible));
+      lines.push('hintVisible: ' + String(!!state.hintVisible));
+      lines.push('hintText: ' + String(state.hintText || '')); 
+      lines.push('resolvedProfile: ' + String(state.resolvedProfile || '')); 
+      lines.push('lastFetchVAT: ' + String(state.lastFetchVAT || '')); 
+      lines.push('lastFetchTS: ' + String(state.lastFetchTS || '')); 
+      lines.push('reason: ' + String(state.reason || '')); 
+      lines.push('---');
+      lines.push('debug: localStorage rc:repeatDebug=1');
+      overlay.textContent = lines.join('\n');
+    } catch(_) {}
+  }
+
+  function repeatDebugLog(eventName, payload){
+    if (!repeatDebugEnabled()) return;
+    try {
+      console.debug('[RC repeat]', eventName, payload || {});
+      updateRepeatDebugOverlay(Object.assign({}, payload || {}, { event: eventName }));
+    } catch(_) {}
+  }
+
+  function currentRepeatStateVat(){
+    try {
+      const live = String((typeof window.rcResolveActiveVat === 'function' ? window.rcResolveActiveVat() : '') || '').trim();
+      if (live) return live;
+    } catch(_) {}
+    return String(window._repeatModalVAT || '').trim() || 'default';
+  }
+
+  function repeatLsKey(){
+    return REPEAT_LS_KEY_PREFIX + currentRepeatStateVat();
+  }
 
   function repeatLsGet(){
     try {
-      const raw = localStorage.getItem(REPEAT_LS_KEY);
+      const raw = localStorage.getItem(repeatLsKey());
       if (raw === '1') return true;
       if (raw === '0') return false;
     } catch(_) {}
@@ -12205,38 +13047,106 @@ document.addEventListener('click', function(e){
   }
 
   function repeatLsSet(enabled){
-    try { localStorage.setItem(REPEAT_LS_KEY, enabled ? '1' : '0'); } catch(_) {}
+    try { localStorage.setItem(repeatLsKey(), enabled ? '1' : '0'); } catch(_) {}
     try { document.body.dataset.repeatEnabled = enabled ? '1' : '0'; } catch(_) {}
     try { window.REPEAT_ENABLED = !!enabled; } catch(_) {}
+    try { window.dispatchEvent(new CustomEvent('repeatStateChange', { detail: { enabled: !!enabled } })); } catch(_) {}
   }
 
   async function hydrateRepeatState(reason){
     const sw = document.getElementById('repeatEntrySwitch');
+    const receiptsSw = document.getElementById('useReceiptsSwitch');
     if (!sw) return;
 
     const lsVal = repeatLsGet();
     if (lsVal !== null) sw.checked = !!lsVal;
 
     const now = Date.now();
+    const vatNow = currentRepeatStateVat();
     const last = Number(window.__RC_REPEAT_STATE_LAST_FETCH_TS || 0);
-    const shouldFetch = (!last || (now - last) > 1200 || reason === 'initial');
+    const lastVat = String(window.__RC_REPEAT_STATE_LAST_FETCH_VAT || '').trim();
+    const forceFetch = (reason === 'force' || reason === 'partial-reload' || reason === 'page-ready');
+    const shouldFetch = (forceFetch || !last || (now - last) > 1200 || reason === 'initial' || lastVat !== vatNow);
     if (!shouldFetch) {
       repeatLsSet(!!sw.checked);
+      repeatDebugLog('hydrateRepeatState-skip', {
+        vat: vatNow,
+        reason,
+        repeatOn: !!sw.checked,
+        lastFetchVAT: lastVat,
+        lastFetchTS: last,
+      });
       return;
     }
 
     window.__RC_REPEAT_STATE_LAST_FETCH_TS = now;
+    window.__RC_REPEAT_STATE_LAST_FETCH_VAT = vatNow;
     try {
+      let resolvedEnabled = !!sw.checked;
+      let resolvedProfileName = '';
+
       const r = await fetch('/api/repeat_state/get', { credentials: 'include' });
       const j = await r.json().catch(() => null);
       if (j && j.ok && typeof j.enabled !== 'undefined') {
-        sw.checked = !!j.enabled;
-        repeatLsSet(!!j.enabled);
-      } else {
-        repeatLsSet(!!sw.checked);
+        resolvedEnabled = !!j.enabled;
+        try {
+          const apiVat = String((j.vat || j.afm || '') || '').trim();
+          if (apiVat) {
+            window.__RC_ACTIVE_VAT = apiVat;
+            window._repeatModalVAT = apiVat;
+            if (document.body && document.body.dataset) document.body.dataset.activeVat = apiVat;
+          }
+        } catch(_) {}
       }
+
+      try {
+        const rg = await fetch('/api/repeat_entry/get?vat=' + encodeURIComponent(vatNow), { credentials: 'same-origin' });
+        const gj = await rg.json().catch(() => null);
+        if (gj && gj.ok && gj.repeat_entry && typeof gj.repeat_entry.enabled !== 'undefined') {
+          // repeat_entry is authoritative for per-customer UI state on partial reload.
+          resolvedEnabled = !!gj.repeat_entry.enabled;
+          resolvedProfileName = String((gj.repeat_entry.profile_name || '') || '').trim();
+        }
+      } catch(_) {}
+
+      sw.checked = !!resolvedEnabled;
+      repeatLsSet(!!resolvedEnabled);
+      if (resolvedEnabled && !(receiptsSw && receiptsSw.checked)) {
+        maybeOpenRepeatProfileModal('hydrate');
+      }
+
+      try {
+        if (resolvedProfileName) {
+          const mode = (receiptsSw && receiptsSw.checked) ? 'receipts' : 'invoices';
+          if (typeof rememberRepeatSelectedProfile === 'function') {
+            rememberRepeatSelectedProfile(vatNow, mode, resolvedProfileName);
+          }
+          window.__LAST_REPEAT_PROFILE_BY_SCOPE = window.__LAST_REPEAT_PROFILE_BY_SCOPE || {};
+          window.__LAST_REPEAT_PROFILE_BY_SCOPE[(vatNow || 'default') + ':' + mode] = resolvedProfileName;
+        }
+      } catch(_) {}
+
+      try {
+        const hintName = resolvedProfileName || (typeof rcResolveProfileHintName === 'function' ? rcResolveProfileHintName() : '');
+        if (typeof setActiveProfileHint === 'function') setActiveProfileHint(hintName);
+      } catch(_) {}
+      repeatDebugLog('hydrateRepeatState', {
+        vat: vatNow,
+        reason,
+        repeatOn: !!resolvedEnabled,
+        receiptsOn: !!(receiptsSw && receiptsSw.checked),
+        resolvedProfile: resolvedProfileName,
+        hintText: resolvedProfileName || '',
+        lastFetchVAT: window.__RC_REPEAT_STATE_LAST_FETCH_VAT,
+        lastFetchTS: window.__RC_REPEAT_STATE_LAST_FETCH_TS,
+      });
     } catch(_) {
       repeatLsSet(!!sw.checked);
+      repeatDebugLog('hydrateRepeatState-error', {
+        vat: vatNow,
+        reason,
+        repeatOn: !!sw.checked,
+      });
     }
   }
 
@@ -12257,7 +13167,40 @@ document.addEventListener('click', function(e){
     const s = repeatUiState();
     if (!s.editBtn) return;
     const show = s.repeatOn && !s.receiptsOn;
-    s.editBtn.classList.toggle('hidden', !show);
+    try {
+      if (show) {
+        s.editBtn.classList.remove('hidden');
+        s.editBtn.style.display = '';
+        s.editBtn.hidden = false;
+        s.editBtn.style.visibility = 'visible';
+        s.editBtn.setAttribute('aria-hidden', 'false');
+      } else {
+        s.editBtn.classList.add('hidden');
+        s.editBtn.style.display = 'none';
+        s.editBtn.hidden = true;
+        s.editBtn.style.visibility = 'hidden';
+        s.editBtn.setAttribute('aria-hidden', 'true');
+      }
+    } catch(_) {}
+    let hintText = '';
+    let hintVisible = false;
+    try {
+      if (typeof window.rcResolveProfileHintName === 'function') {
+        hintText = String(rcResolveProfileHintName() || '').trim();
+        hintVisible = !!hintText;
+      } else if (typeof window.__searchRepeatHintRender === 'function') {
+        hintText = String(window.__LAST_REPEAT_PROFILE_NAME || '').trim();
+        hintVisible = !!hintText;
+      }
+    } catch(_) {}
+    repeatDebugLog('syncRepeatEditButton', {
+      vat: currentRepeatStateVat(),
+      repeatOn: !!s.repeatOn,
+      receiptsOn: !!s.receiptsOn,
+      editVisible: !!show,
+      hintVisible: !!hintVisible,
+      hintText: hintText
+    });
   }
 
   function openRepeatModalFromUi(){
@@ -12271,6 +13214,41 @@ document.addEventListener('click', function(e){
     }
   }
 
+  function maybeOpenRepeatProfileModal(reason){
+    try {
+      const vat = currentRepeatStateVat();
+      if (!vat) return false;
+      const previousVat = String(window.__RC_REPEAT_PROFILE_MODAL_OPENED_FOR_VAT || '').trim();
+      if (previousVat === vat) return false;
+      const repeatSwitch = document.getElementById('repeatEntrySwitch');
+      const receiptsSwitch = document.getElementById('useReceiptsSwitch');
+      if (!repeatSwitch || !repeatSwitch.checked) return false;
+      if (receiptsSwitch && receiptsSwitch.checked) return false;
+      if (typeof window.openRepeatModal !== 'function') {
+        const retryCount = Number(window.__RC_REPEAT_PROFILE_MODAL_OPEN_RETRY_COUNT || 0) || 0;
+        if (retryCount < 10) {
+          window.__RC_REPEAT_PROFILE_MODAL_OPEN_RETRY_COUNT = retryCount + 1;
+          setTimeout(() => { maybeOpenRepeatProfileModal(reason); }, 120);
+        }
+        return false;
+      }
+      window.__RC_REPEAT_PROFILE_MODAL_OPEN_RETRY_COUNT = 0;
+      repeatDebugLog('maybeOpenRepeatProfileModal', {
+        vat,
+        reason,
+        repeatOn: true,
+        receiptsOn: !!(receiptsSwitch && receiptsSwitch.checked)
+      });
+      window.__RC_REPEAT_PROFILE_MODAL_OPENED_FOR_VAT = vat;
+      setTimeout(() => {
+        try { window.openRepeatModal(); } catch(_) {}
+      }, 50);
+      return true;
+    } catch(_) {
+      return false;
+    }
+  }
+
   function ensureRepeatModalOpenedWhenInvoices(){
     try {
       const repeatOn = !!document.getElementById('repeatEntrySwitch')?.checked;
@@ -12279,32 +13257,51 @@ document.addEventListener('click', function(e){
 
       const editBtn = document.getElementById('editRepeatMappingBtn');
       if (editBtn) editBtn.classList.remove('hidden');
-
-      const modal = document.getElementById('repeatMappingModal');
-      const isOpen = !!(modal && modal.style.display === 'flex');
-      if (!isOpen) openRepeatModalFromUi();
-
-      setTimeout(() => {
-        const m2 = document.getElementById('repeatMappingModal');
-        const stillClosed = !(m2 && m2.style.display === 'flex');
-        const stillInvoices = !document.getElementById('useReceiptsSwitch')?.checked;
-        const stillRepeat = !!document.getElementById('repeatEntrySwitch')?.checked;
-        if (stillClosed && stillInvoices && stillRepeat) openRepeatModalFromUi();
-      }, 150);
     } catch(_) {}
   }
 
-  function ensureBindings(){
-    hydrateRepeatState('ensure-bindings').finally(() => {
+  function ensureBindings(options){
+    const opts = options && typeof options === 'object' ? options : {};
+    const reason = opts.force ? 'force' : (opts.reason || 'ensure-bindings');
+    hydrateRepeatState(reason).finally(() => {
       const s = repeatUiState();
+
+      const syncAncillaryRepeatUi = () => {
+        try {
+          const rememberedProfile = (typeof rcResolveProfileHintName === 'function')
+            ? String(rcResolveProfileHintName() || '').trim()
+            : String(window.__LAST_REPEAT_PROFILE_NAME || '').trim();
+          if (typeof window.setActiveProfileHint === 'function') {
+            window.setActiveProfileHint(rememberedProfile);
+          } else if (typeof setActiveProfileHint === 'function') {
+            setActiveProfileHint(rememberedProfile);
+          }
+        } catch(_) {}
+        try {
+          if (typeof window.__searchRepeatHintRender === 'function') {
+            window.__searchRepeatHintRender();
+          }
+        } catch(_) {}
+        try {
+          if (typeof window.updateReceiptClassEditButton === 'function') {
+            window.updateReceiptClassEditButton();
+          }
+        } catch(_) {}
+        try {
+          if (typeof window.rcSyncSearchBoxYellowFrame === 'function') {
+            window.rcSyncSearchBoxYellowFrame();
+          }
+        } catch(_) {}
+      };
 
       if (s.repeatSwitch && s.repeatSwitch.dataset.rcRepeatUiBound !== '1') {
         s.repeatSwitch.dataset.rcRepeatUiBound = '1';
         s.repeatSwitch.addEventListener('change', function(){
           repeatLsSet(!!this.checked);
           syncRepeatEditButton();
+          syncAncillaryRepeatUi();
           if (this.checked && !(document.getElementById('useReceiptsSwitch')?.checked)) {
-            setTimeout(ensureRepeatModalOpenedWhenInvoices, 60);
+            setTimeout(syncRepeatEditButton, 60);
           }
         }, true);
       }
@@ -12323,29 +13320,106 @@ document.addEventListener('click', function(e){
         s.receiptsSwitch.dataset.rcRepeatUiBound = '1';
         s.receiptsSwitch.addEventListener('change', function(){
           syncRepeatEditButton();
+          syncAncillaryRepeatUi();
           try {
             if (!this.checked && document.getElementById('repeatEntrySwitch')?.checked) {
-              setTimeout(ensureRepeatModalOpenedWhenInvoices, 60);
+              setTimeout(syncRepeatEditButton, 60);
             }
           } catch(_) {}
         }, true);
       }
 
       syncRepeatEditButton();
+      syncAncillaryRepeatUi();
+      if (typeof maybeOpenRepeatProfileModal === 'function') {
+        setTimeout(() => maybeOpenRepeatProfileModal(reason), 120);
+      }
       setTimeout(syncRepeatEditButton, 80);
       setTimeout(syncRepeatEditButton, 260);
+      setTimeout(syncAncillaryRepeatUi, 90);
+      setTimeout(syncAncillaryRepeatUi, 280);
       if (document.getElementById('repeatEntrySwitch')?.checked && !document.getElementById('useReceiptsSwitch')?.checked) {
-        setTimeout(ensureRepeatModalOpenedWhenInvoices, 100);
+        setTimeout(syncRepeatEditButton, 100);
       }
+
+      const pollOnce = async () => {
+        try {
+          const ui = repeatUiState();
+          const vat = currentRepeatStateVat();
+          try {
+            const prevVat = String(window.__RC_LAST_REPEAT_UI_VAT || '').trim();
+            if (vat && prevVat !== vat) {
+              window.__RC_LAST_REPEAT_UI_VAT = vat;
+              window.__RC_REPEAT_STATE_LAST_FETCH_TS = 0;
+              window.__RC_REPEAT_STATE_LAST_FETCH_VAT = '';
+              window.__RC_LAST_REPEAT_UI_POLLED_SIG = '';
+              try { window.__RC_REPEAT_PROFILE_MODAL_OPENED_FOR_VAT = ''; } catch(_) {}
+            }
+          } catch(_) {}
+          const sig = [
+            vat,
+            ui.repeatOn ? '1' : '0',
+            ui.receiptsOn ? '1' : '0',
+            String(window.__RC_REPEAT_STATE_LAST_FETCH_VAT || '').trim(),
+            String(window.__RC_LAST_REPEAT_UI_SIG || '').trim()
+          ].join('|');
+          const lastSig = String(window.__RC_LAST_REPEAT_UI_POLLED_SIG || '').trim();
+          if (sig !== lastSig) {
+            window.__RC_LAST_REPEAT_UI_POLLED_SIG = sig;
+            await hydrateRepeatState('poll');
+            syncRepeatEditButton();
+            syncAncillaryRepeatUi();
+          } else {
+            syncRepeatEditButton();
+          }
+        } catch(_) {}
+      };
+
+      if (!window.__RC_REPEAT_POLLING_STARTED) {
+        window.__RC_REPEAT_POLLING_STARTED = true;
+        setInterval(() => { void pollOnce(); }, POLL_MS);
+      }
+
+      try {
+        if (!window.__RC_REPEAT_EVENT_SYNC_BOUND) {
+          window.__RC_REPEAT_EVENT_SYNC_BOUND = true;
+          window.addEventListener('repeatStateChange', function(){ void pollOnce(); }, true);
+          window.addEventListener('useReceiptsChange', function(){ void pollOnce(); }, true);
+          document.addEventListener('visibilitychange', function(){
+            if (!document.hidden) void pollOnce();
+          }, true);
+        }
+      } catch(_) {}
+
+      void pollOnce();
     });
   }
 
   window.__rcEnsureRepeatUiSync = ensureBindings;
 
+  if (!window.__RC_REPEAT_EDIT_UI_EVENTS_BOUND) {
+    window.__RC_REPEAT_EDIT_UI_EVENTS_BOUND = true;
+    window.addEventListener('repeatStateChange', function(){ try { syncRepeatEditButton(); } catch(_) {} }, true);
+    window.addEventListener('useReceiptsChange', function(){ try { syncRepeatEditButton(); } catch(_) {} }, true);
+    window.addEventListener('app:page-ready', function(){
+      try { syncRepeatEditButton(); } catch(_) {}
+      setTimeout(() => { try { syncRepeatEditButton(); } catch(_) {} }, 120);
+      setTimeout(() => { try { syncRepeatEditButton(); } catch(_) {} }, 260);
+    }, true);
+  }
+
   if (!window.__rcRepeatUiPageReadyBound) {
     window.__rcRepeatUiPageReadyBound = true;
     window.addEventListener('app:page-ready', function(){
-      ensureBindings();
+      try {
+        const currentVat = currentRepeatStateVat();
+        const lastSummaryVat = String(window.__RC_LAST_SUMMARY_VAT || '').trim();
+        if (currentVat && lastSummaryVat !== currentVat) {
+          try { window.__RC_LAST_SUMMARY_VAT = currentVat; } catch(_) {}
+          try { window._lastSummaryObj = {}; } catch(_) {}
+        }
+      } catch(_) {}
+      ensureBindings({ force: true, reason: 'page-ready' });
     });
   }
 

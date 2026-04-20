@@ -278,6 +278,152 @@
       }
 
       async function refreshListFragment(){
+        const normalizeMark = (value) => String(value || '').replace(/\D+/g, '').trim();
+        const highlightMark = String(window.__RC_PENDING_LIST_HIGHLIGHT_MARK || '').trim();
+        const rowMatchesTarget = (dataObj, target, targetDigits) => {
+          try {
+            const data = dataObj || {};
+            const rowMark = String((data && data._mark) || '').trim();
+            if (rowMark) {
+              if (rowMark === target) return true;
+              const rowDigits = normalizeMark(rowMark);
+              if (targetDigits && rowDigits === targetDigits) return true;
+            }
+            const values = Object.values(data || {});
+            for (const v of values) {
+              const sv = String(v == null ? '' : v).trim();
+              if (!sv) continue;
+              if (sv === target || sv.includes(target)) return true;
+              if (targetDigits) {
+                const svDigits = normalizeMark(sv);
+                if (svDigits && (svDigits === targetDigits || svDigits.includes(targetDigits))) return true;
+              }
+            }
+          } catch(_) {}
+          return false;
+        };
+        const applyHighlightStyle = (rowEl) => {
+          if (!rowEl) return false;
+          const cellEls = Array.from(rowEl.querySelectorAll ? rowEl.querySelectorAll('.tabulator-cell') : []);
+          rowEl.style.setProperty('background-color', '#dcfce7', 'important');
+          rowEl.style.setProperty('outline', '2px solid #16a34a', 'important');
+          rowEl.style.setProperty('outline-offset', '-2px', 'important');
+          rowEl.style.setProperty('box-shadow', '0 0 0 3px rgba(34, 197, 94, 0.28)', 'important');
+          rowEl.style.setProperty('transition', 'background-color 1.2s ease, box-shadow 1.2s ease, outline-color 1.2s ease', 'important');
+          cellEls.forEach((cell) => {
+            try {
+              cell.style.setProperty('background-color', '#dcfce7', 'important');
+              cell.style.setProperty('transition', 'background-color 1.2s ease', 'important');
+            } catch(_) {}
+          });
+          setTimeout(() => {
+            try {
+              rowEl.style.removeProperty('background-color');
+              rowEl.style.removeProperty('outline');
+              rowEl.style.removeProperty('outline-offset');
+              rowEl.style.removeProperty('box-shadow');
+              rowEl.style.removeProperty('transition');
+            } catch(_) {}
+            cellEls.forEach((cell) => {
+              try {
+                cell.style.removeProperty('background-color');
+                cell.style.removeProperty('transition');
+              } catch(_) {}
+            });
+          }, 5000);
+          return true;
+        };
+
+        const tryHighlightRow = (markValue) => {
+          const target = String(markValue || '').trim();
+          const targetDigits = normalizeMark(target);
+          if (!target) return false;
+
+          // Prefer highlighting the visible Tabulator row when Tabulator is active.
+          try {
+            const tab = window.FBP_TABULATOR;
+            if (tab && typeof tab.getRows === 'function') {
+              const findVisibleRow = () => {
+                try {
+                  const rows = tab.getRows() || [];
+                  return rows.find((r) => {
+                    try {
+                      const data = r.getData ? (r.getData() || {}) : {};
+                      return rowMatchesTarget(data, target, targetDigits);
+                    } catch(_) { return false; }
+                  }) || null;
+                } catch(_) { return null; }
+              };
+
+              const highlightVisible = () => {
+                const rowComp = findVisibleRow();
+                if (!rowComp) return false;
+                const tabRowEl = rowComp.getElement ? rowComp.getElement() : null;
+                const ok = applyHighlightStyle(tabRowEl);
+                if (ok) {
+                  try { window.__RC_LAST_HIGHLIGHT_SUCCESS_MARK = target; } catch(_) {}
+                }
+                return ok;
+              };
+
+              if (highlightVisible()) return true;
+
+              // If row is not on current page, locate it in active data and jump to that page.
+              try {
+                const activeData = (typeof tab.getData === 'function') ? (tab.getData('active') || tab.getData() || []) : [];
+                const idx = Array.isArray(activeData)
+                  ? activeData.findIndex((d) => rowMatchesTarget(d || {}, target, targetDigits))
+                  : -1;
+                const pageSize = (typeof tab.getPageSize === 'function') ? (Number(tab.getPageSize()) || 0) : 0;
+                if (idx >= 0 && pageSize > 0 && typeof tab.setPage === 'function') {
+                  const page = Math.floor(idx / pageSize) + 1;
+                  try {
+                    const pageResult = tab.setPage(page);
+                    if (pageResult && typeof pageResult.then === 'function') {
+                      pageResult.then(() => {
+                        setTimeout(() => { highlightVisible(); }, 90);
+                        setTimeout(() => { highlightVisible(); }, 260);
+                      }).catch(() => {});
+                    }
+                  } catch(_) {}
+                  setTimeout(() => { highlightVisible(); }, 180);
+                  setTimeout(() => { highlightVisible(); }, 480);
+                  return true;
+                }
+              } catch(_) {}
+
+              if (highlightVisible()) return true;
+            }
+          } catch(_) {}
+
+          let row = null;
+          try {
+            const cb = document.querySelector(`#summary-container input[name="delete_mark"][value="${CSS.escape(target)}"]`);
+            if (cb) row = cb.closest('tr');
+          } catch(_) {}
+          if (!row && targetDigits) {
+            const cbs = Array.from(document.querySelectorAll('#summary-container input[name="delete_mark"]'));
+            const cb2 = cbs.find(el => normalizeMark(el.value) === targetDigits);
+            if (cb2) row = cb2.closest('tr');
+          }
+          if (!row) {
+            const rows = Array.from(document.querySelectorAll('#summary-container tr'));
+            row = rows.find(r => {
+              const txt = String(r.textContent || '');
+              if (txt.includes(target)) return true;
+              return !!(targetDigits && normalizeMark(txt).includes(targetDigits));
+            }) || null;
+          }
+          if (!row) return false;
+          const ok = applyHighlightStyle(row);
+          if (ok) {
+            try { window.__RC_LAST_HIGHLIGHT_SUCCESS_MARK = target; } catch(_) {}
+          }
+          return ok;
+        };
+
+        window.FBP_HIGHLIGHT_ROW_BY_MARK = tryHighlightRow;
+
         try{
           const frag = await fetch('/list/fragment', { method: 'GET', credentials: 'same-origin' });
           if(!frag.ok) return false;
@@ -298,6 +444,36 @@
               if (typeof window.FBP_INIT_TABULATOR === 'function') window.FBP_INIT_TABULATOR({ pageSize: prevPageSize });
               else if (typeof window.FBP_REINIT === 'function') window.FBP_REINIT();
             } catch(_){ }
+            try {
+              if (typeof window.__rcEnsureRepeatUiSync === 'function') window.__rcEnsureRepeatUiSync({ force: true, reason: 'partial-reload' });
+            } catch(_){ }
+            setTimeout(() => { try { if (typeof window.__rcEnsureRepeatUiSync === 'function') window.__rcEnsureRepeatUiSync({ force: true, reason: 'partial-reload-late' }); } catch(_){} }, 130);
+            setTimeout(() => { try { if (typeof window.__rcEnsureRepeatUiSync === 'function') window.__rcEnsureRepeatUiSync({ force: true, reason: 'partial-reload-late2' }); } catch(_){} }, 320);
+            try {
+              if (typeof window.__searchRepeatHintRender === 'function') window.__searchRepeatHintRender();
+            } catch(_){ }
+            try {
+              const markToHighlight = String((j && j.highlight_mark) || highlightMark || '').trim();
+              if (markToHighlight) {
+                try { window.__RC_PENDING_LIST_HIGHLIGHT_MARK = markToHighlight; } catch(_) {}
+                tryHighlightRow(markToHighlight);
+                setTimeout(() => { tryHighlightRow(markToHighlight); }, 220);
+                setTimeout(() => { tryHighlightRow(markToHighlight); }, 700);
+                setTimeout(() => { tryHighlightRow(markToHighlight); }, 1300);
+                setTimeout(() => { tryHighlightRow(markToHighlight); }, 2300);
+                setTimeout(() => { tryHighlightRow(markToHighlight); }, 3600);
+                setTimeout(() => {
+                  try {
+                    const lastOk = String(window.__RC_LAST_HIGHLIGHT_SUCCESS_MARK || '').trim();
+                    if (String(window.__RC_PENDING_LIST_HIGHLIGHT_MARK || '').trim() === markToHighlight && lastOk === markToHighlight) {
+                      window.__RC_PENDING_LIST_HIGHLIGHT_MARK = '';
+                    }
+                  } catch(_) {}
+                }, 3600);
+              } else {
+                window.__RC_PENDING_LIST_HIGHLIGHT_MARK = '';
+              }
+            } catch(_) {}
           }, 40);
           return true;
         }catch(_){ return false; }
@@ -2396,6 +2572,26 @@ document.getElementById('epsilonExport')?.addEventListener('click', function(){
 
       // expose tabulator instance for other code
       window.FBP_TABULATOR = tab;
+
+      // If a mark is pending from a recent save, highlight it on the visible Tabulator row.
+      try {
+        const pendingMark = String(window.__RC_PENDING_LIST_HIGHLIGHT_MARK || '').trim();
+        if (pendingMark && typeof window.FBP_HIGHLIGHT_ROW_BY_MARK === 'function') {
+          setTimeout(() => { try { window.FBP_HIGHLIGHT_ROW_BY_MARK(pendingMark); } catch(_) {} }, 80);
+          setTimeout(() => { try { window.FBP_HIGHLIGHT_ROW_BY_MARK(pendingMark); } catch(_) {} }, 260);
+          setTimeout(() => { try { window.FBP_HIGHLIGHT_ROW_BY_MARK(pendingMark); } catch(_) {} }, 700);
+          setTimeout(() => { try { window.FBP_HIGHLIGHT_ROW_BY_MARK(pendingMark); } catch(_) {} }, 1400);
+        }
+      } catch(_) {}
+
+      try {
+        if (typeof window.__rcEnsureRepeatUiSync === 'function') window.__rcEnsureRepeatUiSync({ force: true, reason: 'partial-reload' });
+      } catch(_) {}
+      setTimeout(() => { try { if (typeof window.__rcEnsureRepeatUiSync === 'function') window.__rcEnsureRepeatUiSync({ force: true, reason: 'partial-reload-late' }); } catch(_){} }, 130);
+      setTimeout(() => { try { if (typeof window.__rcEnsureRepeatUiSync === 'function') window.__rcEnsureRepeatUiSync({ force: true, reason: 'partial-reload-late2' }); } catch(_){} }, 320);
+      try {
+        if (typeof window.__searchRepeatHintRender === 'function') window.__searchRepeatHintRender();
+      } catch(_) {}
 
       // Helper to collect selected marks from Tabulator
       window._fbp_collect_marks_from_tabulator = function(){

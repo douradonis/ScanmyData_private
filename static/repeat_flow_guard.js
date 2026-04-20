@@ -9,6 +9,7 @@
  */
 
 (function() {
+  if (window.__RC_USE_CANONICAL_RECEIPT_AUTOCONFIRM === true) return;
   if (window.__REPEAT_FLOW_GUARD_ATTACHED__) return;
   window.__REPEAT_FLOW_GUARD_ATTACHED__ = true;
 

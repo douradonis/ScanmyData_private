@@ -4,6 +4,8 @@ Routes for signup, login, logout, password reset via Firebase
 """
 
 import logging
+import threading
+import time
 from flask import Blueprint, render_template, request, redirect, url_for, flash, jsonify, session, current_app
 from flask_login import login_user, logout_user, current_user, login_required
 from datetime import datetime, timezone
@@ -16,6 +18,46 @@ import secrets
 import utils
 
 logger = logging.getLogger(__name__)
+
+_GROUP_SYNC_LOCK = threading.Lock()
+_GROUP_SYNC_LAST_TS = {}
+_GROUP_SYNC_COOLDOWN_SECONDS = 45.0
+
+
+def _schedule_user_group_sync(user_id: int, uid: str, reason: str = '') -> bool:
+    """Run Firestore->local group sync in background with a short cooldown."""
+    if not user_id or not uid:
+        return False
+
+    now = time.monotonic()
+    key = f"{user_id}:{uid}"
+    with _GROUP_SYNC_LOCK:
+        last_ts = float(_GROUP_SYNC_LAST_TS.get(key, 0.0) or 0.0)
+        if (now - last_ts) < _GROUP_SYNC_COOLDOWN_SECONDS:
+            return False
+        _GROUP_SYNC_LAST_TS[key] = now
+
+    def _worker(target_user_id: int, target_uid: str, target_reason: str):
+        try:
+            firebase_config.sync_user_groups_from_firestore(target_user_id, target_uid)
+            logger.info(
+                'Async Firestore group sync completed user_id=%s uid=%s reason=%s',
+                target_user_id,
+                target_uid,
+                target_reason,
+            )
+        except Exception as exc:
+            logger.warning(
+                'Async Firestore group sync failed user_id=%s uid=%s reason=%s error=%s',
+                target_user_id,
+                target_uid,
+                target_reason,
+                exc,
+            )
+
+    th = threading.Thread(target=_worker, args=(int(user_id), str(uid), reason or ''), daemon=True)
+    th.start()
+    return True
 
 firebase_auth_bp = Blueprint('firebase_auth', __name__, url_prefix='/firebase-auth')
 
@@ -448,14 +490,24 @@ def firebase_login():
         except Exception:
             pass
         
-        # Sync user's groups from Firestore to local DB
-        # This ensures the user's group memberships are up-to-date
+        # Sync groups with a fast-path: block only when local memberships are missing,
+        # otherwise refresh in background to keep login responsive.
         try:
-            firebase_config.sync_user_groups_from_firestore(user.id, uid)
-            logger.info('User %s groups synced from Firestore on login', uid)
-        except Exception as e:
-            logger.error('Failed to sync groups from Firestore for user %s: %s', uid, e)
-            # Continue anyway - syncing is not critical
+            local_group_count = len(list(getattr(user, 'groups', []) or []))
+        except Exception:
+            local_group_count = 0
+
+        if local_group_count == 0:
+            try:
+                firebase_config.sync_user_groups_from_firestore(user.id, uid)
+                logger.info('User %s groups synced from Firestore on login (blocking, no local groups)', uid)
+            except Exception as e:
+                logger.error('Failed blocking group sync for user %s: %s', uid, e)
+        else:
+            try:
+                _schedule_user_group_sync(user.id, uid, reason='firebase_login')
+            except Exception as e:
+                logger.warning('Could not schedule async group sync for user %s: %s', uid, e)
         
         # Log the login with enhanced details
         try:

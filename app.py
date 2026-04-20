@@ -14987,65 +14987,11 @@ def epsilon_preview():
         fiscal_year=fiscal_year,
     )
 
-    # Έλεγχος ασυμφωνίας: εγγραφές στο epsilon json που δεν υπάρχουν στο invoices.xlsx
-    # Normalize MARK values aggressively to avoid false positives (e.g. "... .0" from Excel).
+    # NOTE:
+    # Η προεπισκόπηση epsilon βασίζεται στο epsilon_invoices.json.
+    # Δεν εμφανίζουμε πλέον warning ασυμφωνίας με invoices.xlsx στη σελίδα preview.
     missing_excel_marks: List[str] = []
     missing_excel_rows: List[Dict[str, Any]] = []
-    def _normalize_mark_token(v: Any) -> str:
-        s = str(v or '').strip()
-        if not s:
-            return ''
-        if s.lower() in {'nan', 'none', 'null'}:
-            return ''
-        s = s.replace(',', '').strip()
-        # Excel may expose numeric MARK cells as float-like strings (e.g. 4000... .0)
-        m_float_like = re.fullmatch(r'\d+\.0+', s)
-        if m_float_like:
-            s = s.split('.', 1)[0]
-        # Keep only canonical 15-digit marks when possible.
-        m_digits = re.search(r'\b\d{15}\b', s)
-        if m_digits:
-            return m_digits.group(0)
-        return s
-    try:
-        excel_path = excel_path_for(vat=vat)
-        if os.path.exists(excel_path):
-            df_excel = pd.read_excel(excel_path, engine="openpyxl", dtype=str).fillna("")
-            excel_marks = {
-                _normalize_mark_token(x)
-                for x in df_excel.get("MARK", pd.Series(dtype=str)).astype(str).tolist()
-                if _normalize_mark_token(x)
-            }
-
-            # Compare against raw epsilon cache MARKs (more reliable than transformed preview rows).
-            epsilon_cache = load_epsilon_cache_for_vat(str(vat or '')) or []
-            preview_marks = []
-            for rec in epsilon_cache:
-                if not isinstance(rec, dict):
-                    continue
-                mk = _normalize_mark_token(_get_mark_from_epsilon_item(rec))
-                if mk:
-                    preview_marks.append(mk)
-
-            missing_excel_marks = sorted({m for m in preview_marks if m not in excel_marks})
-            if missing_excel_marks:
-                rows_by_mark: Dict[str, List[Dict[str, Any]]] = {}
-                for r in (rows or []):
-                    mk = _normalize_mark_token(r.get("MARK"))
-                    if not mk:
-                        continue
-                    rows_by_mark.setdefault(mk, []).append(r)
-                for mk in missing_excel_marks:
-                    for rec in rows_by_mark.get(mk, [{}]):
-                        missing_excel_rows.append({
-                            "mark": mk,
-                            "aa": str(rec.get("AA") or "").strip(),
-                            "afm": str(rec.get("AFM_ISSUER") or "").strip(),
-                            "issuer_name": str(rec.get("ISSUER_NAME") or "").strip(),
-                            "date": str(rec.get("DATE") or "").strip(),
-                        })
-    except Exception:
-        current_app.logger.exception("Failed to compare epsilon preview against excel MARK column")
 
     # πέρασέ τα στο template
     return render_template("epsilon_preview.html",
