@@ -10,6 +10,16 @@
 
       {# Flash messages are rendered globally in base.html -> #flashContainer; avoid duplicate rendering here #}
 
+      {% if session_expired %}
+      <div class="mb-4 px-4 py-3 rounded border border-yellow-400 bg-yellow-50 text-yellow-800 text-sm">
+        ⚠️ Η συνεδρία σας έληξε λόγω αδράνειας. Παρακαλώ συνδεθείτε ξανά.
+      </div>
+      {% elif session_conflict %}
+      <div class="mb-4 px-4 py-3 rounded border border-red-400 bg-red-50 text-red-800 text-sm">
+        ⚠️ Εντοπίστηκε σύνδεση από άλλη συσκευή. Παρακαλώ συνδεθείτε ξανά.
+      </div>
+      {% endif %}
+
       <form method="post" action="/firebase-auth/login" class="grid gap-4">
         <label class="block">
           <span class="text-sm font-medium mb-1 block">Email</span>

@@ -497,17 +497,20 @@ def firebase_login():
         except Exception:
             local_group_count = 0
 
+        blocking_sync_attempted = False
         if local_group_count == 0:
+            blocking_sync_attempted = True
             try:
                 firebase_config.sync_user_groups_from_firestore(user.id, uid)
                 logger.info('User %s groups synced from Firestore on login (blocking, no local groups)', uid)
             except Exception as e:
                 logger.error('Failed blocking group sync for user %s: %s', uid, e)
-        else:
-            try:
-                _schedule_user_group_sync(user.id, uid, reason='firebase_login')
-            except Exception as e:
-                logger.warning('Could not schedule async group sync for user %s: %s', uid, e)
+
+        # Always schedule a background reconciliation pass.
+        try:
+            _schedule_user_group_sync(user.id, uid, reason='firebase_login')
+        except Exception as e:
+            logger.warning('Could not schedule async group sync for user %s: %s', uid, e)
         
         # Log the login with enhanced details
         try:
@@ -536,13 +539,27 @@ def firebase_login():
             {'email': firebase_email}
         )
         
-        # Handle active group selection after login
-        # Always check user's groups and set/clear active_group appropriately
-        user_groups = list(getattr(user, 'groups', []) or [])
+        # Handle active group selection after login.
+        # Query memberships directly to avoid stale relationship cache right after sync.
+        try:
+            user_groups = (
+                Group.query
+                .join(UserGroup, UserGroup.group_id == Group.id)
+                .filter(UserGroup.user_id == user.id)
+                .all()
+            )
+        except Exception:
+            try:
+                db.session.expire(user, ['groups'])
+            except Exception:
+                pass
+            user_groups = list(getattr(user, 'groups', []) or [])
         
         if len(user_groups) == 0:
             # No groups: clear active_group and redirect to list
             session.pop('active_group', None)
+            if blocking_sync_attempted:
+                logger.warning('User %s still has 0 local groups after blocking sync; redirecting to group selection.', uid)
             flash('Δεν έχεις ακόμη αντιστοιχιστεί σε ομάδα.', 'warning')
             return redirect(url_for('auth.list_groups'))
         elif len(user_groups) == 1:

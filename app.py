@@ -1395,7 +1395,16 @@ def session_heartbeat():
         from models import db as _db
         # Ignore automatic background polling endpoints; they should not count as user activity.
         path = (request.path or '')
-        if path in ('/api/global_notifications', '/api/fetch_progress', '/api/last_fetch_date'):
+        non_interactive_paths = {
+            '/api/global_notifications',
+            '/api/fetch_progress',
+            '/api/last_fetch_date',
+            '/api/fetch_bulk/progress',
+            '/api/support/ticket/me',
+            '/api/support/events',
+            '/api/sync_progress',
+        }
+        if path in non_interactive_paths:
             return None
         if not getattr(current_user, 'is_authenticated', False):
             return None
@@ -1464,6 +1473,21 @@ def enforce_active_session_claim():
         now = datetime.datetime.utcnow()
         last_active = getattr(current_user, 'last_active_at', None)
         if last_active and (now - last_active).total_seconds() > timeout_seconds:
+            # Timeout path: if admin policy is login/logout sync, schedule push in background.
+            # The worker itself defers while other users in the same group are active.
+            try:
+                import utils as _utils
+                if _utils.firebase_sync_login_logout_enabled():
+                    active_group_name = str(session.get('active_group') or '').strip()
+                    if active_group_name:
+                        from auth import _schedule_timeout_push_for_group
+                        _schedule_timeout_push_for_group(active_group_name, getattr(current_user, 'id', 0))
+            except Exception:
+                try:
+                    current_app.logger.exception('Failed scheduling server-timeout background push')
+                except Exception:
+                    pass
+
             try:
                 from models import db as _db
                 current_user.end_session(sid)
@@ -5646,6 +5670,16 @@ def api_repeat_entry_get_v2():
         resp["afm"] = vat
         resp["vat"] = vat
     return jsonify(resp)
+
+
+@app.route('/api/repeat_entry/status2', methods=['GET'])
+@monitor_resources('api_repeat_entry_status2')
+def api_repeat_entry_status2():
+    """
+    Alias of get_v2 – returns repeat_entry including profile_name.
+    Called by search.html fetchRepeatState() before falling back to /get.
+    """
+    return api_repeat_entry_get_v2()
 
 
 @app.route('/api/repeat_entry/get', methods=['GET'])
@@ -15715,6 +15749,11 @@ def delete_invoices():
 # ---------------- Global error handler ----------------
 @app.errorhandler(Exception)
 def handle_unexpected_error(e):
+    from werkzeug.exceptions import HTTPException
+    # Re-raise HTTP exceptions (404, 405, etc.) so Flask handles them properly.
+    # Without this, every 404 would be converted to a 500 HTML page.
+    if isinstance(e, HTTPException):
+        return e
     tb = traceback.format_exc()
     log.error("Unhandled exception: %s\n%s", str(e), tb)
     debug = os.getenv("FLASK_DEBUG", "0") == "1"

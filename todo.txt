@@ -7,4 +7,6 @@ curl -v \
 
   
 page tour
-search page: πρασινο πλαισιο στο τιμολογιο που μολις μπαινει και κιτρινο πλαισιο στις αποδειξεις
+
+search page fixes, credentials list partial reload completion
+session manager test

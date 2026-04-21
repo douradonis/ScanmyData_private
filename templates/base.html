@@ -32,6 +32,7 @@
   <script src="{{ url_for('static', filename='modal_utils.js') }}"></script>
   <script src="{{ url_for('static', filename='dialogs.js') }}"></script>
   <script>window.IS_LOGGED_IN = {{ 'true' if current_user.is_authenticated else 'false' }};</script>
+  <script>window.SESSION_TIMEOUT_SECONDS = {{ config.SESSION_TIMEOUT_SECONDS|default(900, true) }};</script>
   <script src="{{ url_for('static', filename='session_manager.js') }}"></script>
 
   <style>
@@ -2033,9 +2034,9 @@
             <div class="layout-header__active-group flex items-center gap-2">
               <span class="text-sm text-gray-500">Ενεργή ομάδα:</span>
               {% if active_group %}
-                <a href="{{ url_for('auth.list_groups') }}" class="px-3 py-1 rounded-full text-sm font-medium bg-emerald-600 text-white hover:bg-emerald-700 transition-colors cursor-pointer">{{ active_group }}</a>
+                <a href="{{ url_for('auth.list_groups') }}" onclick="return window.openHeaderGroupSwitcher ? window.openHeaderGroupSwitcher(event) : true;" class="px-3 py-1 rounded-full text-sm font-medium bg-emerald-600 text-white hover:bg-emerald-700 transition-colors cursor-pointer">{{ active_group }}</a>
               {% else %}
-                <a href="{{ url_for('auth.list_groups') }}" class="px-3 py-1 rounded-full text-sm font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 transition-colors cursor-pointer" title="Επιλέξτε ομάδα">—</a>
+                <a href="{{ url_for('auth.list_groups') }}" onclick="return window.openHeaderGroupSwitcher ? window.openHeaderGroupSwitcher(event) : true;" class="px-3 py-1 rounded-full text-sm font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 transition-colors cursor-pointer" title="Επιλέξτε ομάδα">—</a>
               {% endif %}
             </div>
 
@@ -3833,6 +3834,19 @@
           }
         })
         .catch(err => showModalAlert('Σφάλμα', 'Request failed: ' + err));
+      };
+
+      // Keep header group switch consistent with side menu fast flow.
+      window.openHeaderGroupSwitcher = function(evt) {
+        try {
+          if (evt && typeof evt.preventDefault === 'function') {
+            evt.preventDefault();
+          }
+          openMenu();
+          return false;
+        } catch (_) {
+          return true;
+        }
       };
       
       try {

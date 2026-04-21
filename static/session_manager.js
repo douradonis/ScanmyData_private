@@ -10,11 +10,16 @@
 (function() {
   'use strict';
 
+  const serverTimeoutSeconds = Number(window.SESSION_TIMEOUT_SECONDS || 0);
+  const resolvedTimeoutMs = Number.isFinite(serverTimeoutSeconds) && serverTimeoutSeconds > 0
+    ? serverTimeoutSeconds * 1000
+    : 10 * 60 * 1000;
+
   // Configuration
   const CONFIG = {
-    INACTIVITY_TIMEOUT: 10 * 60 * 1000, // 10 minutes in milliseconds
+    INACTIVITY_TIMEOUT: resolvedTimeoutMs,
     CHECK_INTERVAL: 5 * 1000, // Check every 5 seconds
-    LOGOUT_WARNING_TIME: 30 * 1000, // Warn 30 seconds before logout
+    LOGOUT_WARNING_TIME: Math.min(30 * 1000, Math.max(10 * 1000, Math.floor(resolvedTimeoutMs * 0.2))),
     STORAGE_KEY: 'fbp_session_activity',
     STORAGE_KEY_TAB: 'fbp_session_tab_id',
     LOGOUT_ENDPOINT: '/auth/api/logout'
@@ -53,7 +58,7 @@
     // Detect tab/browser close
     attachUnloadListener();
 
-    console.info('SessionManager initialized. Inactivity timeout: 10 minutes');
+    console.info('SessionManager initialized. Inactivity timeout(ms):', CONFIG.INACTIVITY_TIMEOUT);
   }
 
   /**
@@ -272,16 +277,16 @@
 
       if (response.ok) {
         clearTimeout(forceRedirectTimer);
-        window.location.href = redirectTo;
+        window.location.replace(redirectTo + '&refresh=' + Date.now());
       } else {
         console.error('Logout request failed:', response.status);
         clearTimeout(forceRedirectTimer);
-        window.location.href = redirectTo;
+        window.location.replace(redirectTo + '&refresh=' + Date.now());
       }
     } catch (e) {
       console.error('Failed to logout:', e);
       clearTimeout(forceRedirectTimer);
-      window.location.href = redirectTo;
+      window.location.replace(redirectTo + '&refresh=' + Date.now());
     }
   }
 
