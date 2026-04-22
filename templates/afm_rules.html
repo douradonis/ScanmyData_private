@@ -1,0 +1,571 @@
+{% extends "base.html" %}
+{% block title %}Κανόνες ΑΦΜ{% endblock %}
+
+{% block content %}
+<div id="flashBanners" class="max-w-6xl mx-auto mt-4 px-4"></div>
+
+<style>
+.afm-rule-row.selected {
+  background-color: #e6f7ff !important;
+  border-color: #0ea5e9 !important;
+  box-shadow: 0 0 0 2px rgba(14,165,233,0.18);
+}
+
+[data-theme="dark"] .afm-rule-row.selected {
+  background-color: rgba(14,165,233,0.14) !important;
+  border-color: #0ea5e9 !important;
+  box-shadow: 0 0 0 2px rgba(14,165,233,0.28) !important;
+}
+
+@media (max-width: 768px) {
+  .afm-rules-grid {
+    grid-template-columns: 1fr;
+  }
+}
+</style>
+
+<div class="bg-white rounded shadow p-6">
+  <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between mb-4">
+    <div>
+      <h2 class="text-lg font-semibold">Κανόνες χαρακτηρισμών ανά ΑΦΜ</h2>
+      <p class="text-sm text-gray-600 mt-1">Ορίζεις για τον ενεργό πελάτη ποιος χαρακτηρισμός ανά ΦΠΑ πρέπει να ισχύει για συγκεκριμένο προμηθευτή.</p>
+    </div>
+    <a href="{{ url_for('search', vat=vat) }}" class="inline-flex items-center justify-center gap-1 text-sm px-3 py-2 rounded-md border border-gray-300 hover:border-gray-400 hover:bg-gray-50 transition">
+      Επιστροφή στην αναζήτηση
+    </a>
+  </div>
+
+  <div class="afm-rules-grid grid md:grid-cols-2 gap-6">
+    <div>
+      <h3 class="font-medium mb-2">Δημιουργία / Ενημέρωση</h3>
+      <div class="space-y-3">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label for="ruleSupplierAfm" class="block text-sm font-medium mb-1">ΑΦΜ προμηθευτή</label>
+            <input id="ruleSupplierAfm" class="border rounded px-3 py-2 w-full" placeholder="9 ψηφία" inputmode="numeric" maxlength="15">
+            <div id="ruleSupplierAfmStatus" class="vat-status text-sm mt-1"></div>
+          </div>
+          <div>
+            <label for="ruleSupplierName" class="block text-sm font-medium mb-1">Επωνυμία</label>
+            <input id="ruleSupplierName" class="border rounded px-3 py-2 w-full" placeholder="Προαιρετικό βοηθητικό όνομα">
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 gap-2">
+          <label class="text-sm font-medium">Αντιστοίχιση κατηγοριών</label>
+
+          <div class="flex items-center gap-3">
+            <div class="w-24 text-sm font-medium">0%</div>
+            <select id="kat_fpa_a" class="border rounded px-2 py-1 flex-1" required></select>
+          </div>
+          <div class="flex items-center gap-3">
+            <div class="w-24 text-sm font-medium">6%</div>
+            <select id="kat_fpa_b" class="border rounded px-2 py-1 flex-1" required></select>
+          </div>
+          <div class="flex items-center gap-3">
+            <div class="w-24 text-sm font-medium">13%</div>
+            <select id="kat_fpa_g" class="border rounded px-2 py-1 flex-1" required></select>
+          </div>
+          <div class="flex items-center gap-3">
+            <div class="w-24 text-sm font-medium">17%</div>
+            <select id="kat_fpa_d" class="border rounded px-2 py-1 flex-1" required></select>
+          </div>
+          <div class="flex items-center gap-3">
+            <div class="w-24 text-sm font-medium">24%</div>
+            <select id="kat_fpa_e" class="border rounded px-2 py-1 flex-1" required></select>
+          </div>
+        </div>
+
+        <div id="ruleMtypeSection" class="space-y-2 mt-4 hidden">
+          <label class="text-sm font-medium">Προαιρετικό MTYPE ελέγχου</label>
+          <select id="ruleInvoiceMtype" class="border rounded px-2 py-1 w-full hidden">
+            <option value="">-- επιλέξτε για τιμολόγια --</option>
+          </select>
+          <p class="text-xs text-gray-500">Για πελάτες Γ κατηγορίας μπορείς να προσθέσεις αναμενόμενο MTYPE μόνο για το flow τιμολογίων.</p>
+        </div>
+
+        <div id="ruleMsg" class="text-sm"></div>
+
+        <div class="flex flex-wrap gap-2">
+          <button id="btnSaveRule" class="bg-sky-600 hover:bg-sky-700 text-white px-3 py-2 rounded" type="button">Αποθήκευση</button>
+          <button id="btnNewRule" class="px-3 py-2 rounded border" type="button">Νέος κανόνας</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="space-y-4">
+      <div class="flex items-center justify-between gap-3">
+        <h3 class="font-medium">Αποθηκευμένοι κανόνες</h3>
+        <div class="text-xs text-gray-500">Ενεργός πελάτης: {{ vat }}</div>
+      </div>
+
+      <div class="border border-gray-200 rounded-lg bg-white shadow-sm p-4">
+        <div id="ruleList" class="space-y-3 max-h-96 overflow-y-auto pr-1"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="confirmDeleteRuleModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/40 p-4" data-role="modal-warning">
+  <div class="modal-warning-panel" role="dialog" aria-modal="true" aria-labelledby="deleteRuleTitle">
+    <button type="button" class="modal-warning-close" data-close-modal="confirmDeleteRuleModal">×</button>
+    <div class="modal-warning-title" id="deleteRuleTitle">Διαγραφή κανόνα;</div>
+    <div class="modal-warning-body">Θέλεις σίγουρα να διαγράψεις τον κανόνα για το ΑΦΜ <span id="delRuleAfm" class="font-medium"></span>;</div>
+    <div class="modal-warning-actions">
+      <button id="delRuleCancel" class="modal-warning-btn modal-warning-btn--muted">Άκυρο</button>
+      <button id="delRuleConfirm" class="modal-warning-btn modal-warning-btn--danger">Διαγραφή</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const G_CATEGORY_DATA = (function(){
+  try {
+    return {{ (g_category_data or {}) | tojson | safe }} || null;
+  } catch(e){ return null; }
+})();
+
+(function(){
+  const VAT = "{{ vat or active_credential_vat or '' }}";
+  const listEl = document.getElementById('ruleList');
+  const msgEl = document.getElementById('ruleMsg');
+  const saveBtn = document.getElementById('btnSaveRule');
+  const newBtn = document.getElementById('btnNewRule');
+  const invoiceMtypeEl = document.getElementById('ruleInvoiceMtype');
+  const mtypeSection = document.getElementById('ruleMtypeSection');
+  const HAS_G_CATEGORY = !!(G_CATEGORY_DATA && Array.isArray(G_CATEGORY_DATA.mtype_options) && G_CATEGORY_DATA.mtype_options.length);
+  const CATEGORY_LABELS = (function(){
+    try {
+      return {{ (category_labels or {}) | tojson | safe }} || {};
+    } catch(e){ return {}; }
+  })();
+  let VAT_CONSTRAINTS = (function(){
+    try {
+      return {{ (vat_constraints or {}) | tojson | safe }} || {};
+    } catch(e){ return {}; }
+  })();
+
+  const VAT_KEY_BY_SFX = { a: '0%', b: '6%', g: '13%', d: '17%', e: '24%' };
+  let currentSelectedAfm = null;
+  let vatValidationTimeout = null;
+  let lastValidatedVAT = '';
+  let lastSuccessfulVAT = '';
+  let vatValidationRequestSeq = 0;
+
+  function escapeHtml(unsafe){
+    return String(unsafe || '')
+      .replaceAll('&','&amp;')
+      .replaceAll('<','&lt;')
+      .replaceAll('>','&gt;')
+      .replaceAll('"','&quot;')
+      .replaceAll("'",'&#039;');
+  }
+
+  function showBanner(message, kind='success', ttl=5000){
+    try {
+      if (typeof window.showFlash === 'function') {
+        window.showFlash(String(message || ''), kind === 'danger' ? 'error' : kind, Number(ttl) || 0);
+        return;
+      }
+    } catch(_) {}
+    const container = document.getElementById('flashBanners');
+    if (!container) return;
+    const el = document.createElement('div');
+    el.className = 'flash-banner ' + (kind === 'error' ? 'flash-error' : (kind === 'info' ? 'flash-info' : 'flash-success'));
+    el.innerHTML = '<div class="flash-text">' + escapeHtml(message) + '</div>';
+    container.prepend(el);
+    if (ttl > 0) setTimeout(() => { try { el.remove(); } catch(_) {} }, ttl);
+  }
+
+  function labelForCategory(value){
+    const key = String(value || '').trim();
+    if (!key) return '';
+    return CATEGORY_LABELS[key] || key;
+  }
+
+  function allowedForVat(cat, vatKey){
+    if(!cat) return false;
+    const arr = VAT_CONSTRAINTS[String(cat)] || [];
+    return !arr.length || arr.includes(vatKey);
+  }
+
+  function opt(value){
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = labelForCategory(value);
+    return option;
+  }
+
+  function ensureOption(select, value, vatKey){
+    if(!select || !value) return;
+    if (Array.from(select.options || []).some(item => item.value === value)) return;
+    const extra = opt(value);
+    extra.textContent += vatKey ? ` (μη διαθέσιμο για ${vatKey})` : '';
+    select.appendChild(extra);
+  }
+
+  function categoriesForVat(vatKey, tags){
+    return (tags || []).filter(tag => allowedForVat(tag, vatKey));
+  }
+
+  function normalizeAfm(value){
+    return String(value || '').replace(/\D/g, '').slice(-9);
+  }
+
+  function resetSupplierVatStatus(){
+    const statusIndicator = document.getElementById('ruleSupplierAfmStatus');
+    if (!statusIndicator) return;
+    statusIndicator.textContent = '';
+    statusIndicator.className = 'vat-status text-sm mt-1';
+    statusIndicator.style.color = '';
+  }
+
+  async function validateVAT(vat, nameInput, statusIndicator, requestSeq) {
+    try {
+      if (vat === lastSuccessfulVAT && String(nameInput.value || '').trim()) {
+        return;
+      }
+      statusIndicator.textContent = '🔄 Έλεγχος ΑΦΜ...';
+      statusIndicator.className = 'vat-status text-sm mt-1 text-blue-600';
+
+      const response = await fetch('/api/validate_vat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ vat: vat })
+      });
+
+      const result = await response.json().catch(() => ({}));
+
+      if (requestSeq !== vatValidationRequestSeq) {
+        return;
+      }
+
+      if (result.valid && result.name) {
+        nameInput.value = result.name;
+        nameInput.classList.add('bg-green-50', 'border-green-300');
+        lastSuccessfulVAT = vat;
+
+        statusIndicator.textContent = `✓ Έγκυρο ΑΦΜ: ${result.name}`;
+        statusIndicator.className = 'vat-status text-sm mt-1 text-green-600 font-medium';
+        statusIndicator.style.color = '';
+        if (document.documentElement.getAttribute('data-theme') === 'dark') {
+          statusIndicator.style.color = '#d1fae5';
+        }
+
+        setTimeout(() => {
+          nameInput.classList.remove('bg-green-50', 'border-green-300');
+        }, 3000);
+      } else if (result.error) {
+        if (vat === lastSuccessfulVAT && String(nameInput.value || '').trim()) {
+          statusIndicator.textContent = `✓ Έγκυρο ΑΦΜ: ${nameInput.value}`;
+          statusIndicator.className = 'vat-status text-sm mt-1 text-green-600 font-medium';
+          statusIndicator.style.color = '';
+          if (document.documentElement.getAttribute('data-theme') === 'dark') {
+            statusIndicator.style.color = '#d1fae5';
+          }
+          return;
+        }
+        statusIndicator.textContent = `⚠ ${result.error}`;
+        statusIndicator.className = 'vat-status text-sm mt-1 text-amber-600';
+      } else {
+        if (vat === lastSuccessfulVAT && String(nameInput.value || '').trim()) {
+          statusIndicator.textContent = `✓ Έγκυρο ΑΦΜ: ${nameInput.value}`;
+          statusIndicator.className = 'vat-status text-sm mt-1 text-green-600 font-medium';
+          statusIndicator.style.color = '';
+          if (document.documentElement.getAttribute('data-theme') === 'dark') {
+            statusIndicator.style.color = '#d1fae5';
+          }
+          return;
+        }
+        statusIndicator.textContent = '✗ ΑΦΜ δεν βρέθηκε στη βάση VIES';
+        statusIndicator.className = 'vat-status text-sm mt-1 text-gray-500';
+      }
+    } catch (error) {
+      console.error('VAT validation error:', error);
+      statusIndicator.textContent = '⚠ Σφάλμα επικοινωνίας με την υπηρεσία';
+      statusIndicator.className = 'vat-status text-sm mt-1 text-red-600';
+    }
+  }
+
+  function setupVATValidation(){
+    const vatInput = document.getElementById('ruleSupplierAfm');
+    const nameInput = document.getElementById('ruleSupplierName');
+    const statusIndicator = document.getElementById('ruleSupplierAfmStatus');
+    if (!vatInput || !nameInput || !statusIndicator) return;
+
+    vatInput.addEventListener('input', function(){
+      const vat = normalizeAfm(this.value);
+      if (this.value !== vat) this.value = vat;
+
+      if (vatValidationTimeout) clearTimeout(vatValidationTimeout);
+      const previousSuccessVat = lastSuccessfulVAT;
+      if (previousSuccessVat && vat !== previousSuccessVat) {
+        lastSuccessfulVAT = '';
+      }
+      statusIndicator.textContent = '';
+      statusIndicator.className = 'vat-status text-sm mt-1';
+      statusIndicator.style.color = '';
+
+      if (!vat || vat.length < 9) return;
+      if (vat === lastValidatedVAT) return;
+      if (vat === lastSuccessfulVAT && String(nameInput.value || '').trim()) {
+        statusIndicator.textContent = `✓ Έγκυρο ΑΦΜ: ${nameInput.value}`;
+        statusIndicator.className = 'vat-status text-sm mt-1 text-green-600 font-medium';
+        statusIndicator.style.color = '';
+        if (document.documentElement.getAttribute('data-theme') === 'dark') {
+          statusIndicator.style.color = '#d1fae5';
+        }
+        return;
+      }
+
+      vatValidationTimeout = setTimeout(async () => {
+        const reqSeq = ++vatValidationRequestSeq;
+        await validateVAT(vat, nameInput, statusIndicator, reqSeq);
+        lastValidatedVAT = vat;
+      }, 500);
+    });
+  }
+
+  function buildMapping(){
+    return {
+      kat_fpa_a: document.getElementById('kat_fpa_a').value,
+      kat_fpa_b: document.getElementById('kat_fpa_b').value,
+      kat_fpa_g: document.getElementById('kat_fpa_g').value,
+      kat_fpa_d: document.getElementById('kat_fpa_d').value,
+      kat_fpa_e: document.getElementById('kat_fpa_e').value,
+    };
+  }
+
+  function clearForm(){
+    currentSelectedAfm = null;
+    document.getElementById('ruleSupplierAfm').value = '';
+    document.getElementById('ruleSupplierName').value = '';
+    resetSupplierVatStatus();
+    lastValidatedVAT = '';
+    lastSuccessfulVAT = '';
+    vatValidationRequestSeq += 1;
+    ['a','b','g','d','e'].forEach(sfx => {
+      const select = document.getElementById(`kat_fpa_${sfx}`);
+      if (select) select.value = '';
+    });
+    if (invoiceMtypeEl) invoiceMtypeEl.value = '';
+    listEl.querySelectorAll('.afm-rule-row').forEach(row => row.classList.remove('selected','border-sky-400','ring-2','ring-sky-100','bg-sky-50'));
+    saveBtn.textContent = 'Αποθήκευση';
+    msgEl.textContent = '';
+  }
+
+  function populateMtypes(){
+    if (!mtypeSection) return;
+    if (!HAS_G_CATEGORY) {
+      mtypeSection.classList.add('hidden');
+      return;
+    }
+    mtypeSection.classList.remove('hidden');
+    if (!invoiceMtypeEl) return;
+    invoiceMtypeEl.innerHTML = '<option value="">-- επιλέξτε για τιμολόγια --</option>';
+    G_CATEGORY_DATA.mtype_options.forEach(mt => {
+      const option = document.createElement('option');
+      option.value = mt.value;
+      option.textContent = `${mt.label || ''} (${mt.value})`;
+      invoiceMtypeEl.appendChild(option);
+    });
+    invoiceMtypeEl.classList.remove('hidden');
+  }
+
+  async function fetchData(){
+    const res = await fetch(`/api/afm_rules?vat=${encodeURIComponent(VAT)}`, { credentials: 'same-origin' });
+    return res.json();
+  }
+
+  async function loadData(){
+    const data = await fetchData();
+    const tags = Array.isArray(data.expense_tags) ? data.expense_tags : [];
+    if (data.vat_constraints) VAT_CONSTRAINTS = data.vat_constraints;
+    if (data.category_labels) Object.assign(CATEGORY_LABELS, data.category_labels);
+
+    ['a','b','g','d','e'].forEach(sfx => {
+      const select = document.getElementById(`kat_fpa_${sfx}`);
+      if (!select) return;
+      const previous = select.value;
+      const vatKey = VAT_KEY_BY_SFX[sfx] || '';
+      select.innerHTML = '';
+      select.appendChild(new Option('-επιλέξτε-',''));
+      categoriesForVat(vatKey, tags).forEach(tag => select.appendChild(opt(tag)));
+      if (previous) {
+        ensureOption(select, previous, vatKey);
+        select.value = previous;
+      }
+    });
+
+    listEl.innerHTML = '';
+    (data.rules || []).forEach(rule => {
+      const mapping = rule.mapping || {};
+      const row = document.createElement('div');
+      row.className = 'group afm-rule-row relative border border-gray-200 rounded-md bg-white p-4 pr-12 hover:border-sky-400 hover:shadow-sm transition cursor-pointer';
+      row.dataset.afm = rule.supplier_afm || '';
+      row.dataset.name = rule.supplier_name || '';
+      row.dataset.mapping = JSON.stringify(mapping);
+      row.dataset.invoiceMtype = rule.invoice_mtype || '';
+      const mtypeParts = [];
+      if (rule.invoice_mtype) mtypeParts.push(`<span class="font-semibold text-gray-700">Τιμολόγια</span>: ${escapeHtml(rule.invoice_mtype)}`);
+      row.innerHTML = `
+        <div class="flex flex-col gap-2">
+          <div class="flex flex-wrap items-center gap-2">
+            <div class="font-semibold text-gray-800">${escapeHtml(rule.supplier_name || 'Χωρίς επωνυμία')}</div>
+            <div class="text-xs px-2 py-1 rounded-full bg-slate-100 text-slate-600">${escapeHtml(rule.supplier_afm || '')}</div>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-xs text-gray-600">
+            <div><span class="font-semibold text-gray-700">0%</span>: ${escapeHtml(labelForCategory(mapping.kat_fpa_a) || '-')}</div>
+            <div><span class="font-semibold text-gray-700">6%</span>: ${escapeHtml(labelForCategory(mapping.kat_fpa_b) || '-')}</div>
+            <div><span class="font-semibold text-gray-700">13%</span>: ${escapeHtml(labelForCategory(mapping.kat_fpa_g) || '-')}</div>
+            <div><span class="font-semibold text-gray-700">17%</span>: ${escapeHtml(labelForCategory(mapping.kat_fpa_d) || '-')}</div>
+            <div class="sm:col-span-2"><span class="font-semibold text-gray-700">24%</span>: ${escapeHtml(labelForCategory(mapping.kat_fpa_e) || '-')}</div>
+          </div>
+          ${mtypeParts.length ? `<div class="text-xs text-gray-500 pt-1">${mtypeParts.join('<br>')}</div>` : ''}
+        </div>
+        <button class="deleteRuleBtn absolute top-3 right-3 opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto inline-flex items-center gap-1 px-2 py-1 rounded-md border border-red-200 bg-red-50 text-xs font-semibold text-red-700 transition hover:bg-red-600 hover:text-white hover:border-red-600" data-act="del" data-afm="${escapeHtml(rule.supplier_afm || '')}" title="Διαγραφή">✖</button>
+      `;
+      listEl.appendChild(row);
+    });
+  }
+
+  listEl.addEventListener('click', function(ev){
+    const delBtn = ev.target.closest('button[data-act="del"]');
+    if (delBtn) {
+      openDeleteModal(delBtn.dataset.afm);
+      return;
+    }
+    const row = ev.target.closest('.afm-rule-row');
+    if (!row) return;
+    currentSelectedAfm = row.dataset.afm || '';
+    listEl.querySelectorAll('.afm-rule-row').forEach(node => node.classList.remove('selected','border-sky-400','ring-2','ring-sky-100','bg-sky-50'));
+    row.classList.add('selected','border-sky-400','ring-2','ring-sky-100','bg-sky-50');
+    document.getElementById('ruleSupplierAfm').value = row.dataset.afm || '';
+    document.getElementById('ruleSupplierName').value = row.dataset.name || '';
+    resetSupplierVatStatus();
+    lastValidatedVAT = normalizeAfm(row.dataset.afm || '');
+    lastSuccessfulVAT = normalizeAfm(row.dataset.afm || '');
+    vatValidationRequestSeq += 1;
+    const mapping = JSON.parse(row.dataset.mapping || '{}');
+    ['a','b','g','d','e'].forEach(sfx => {
+      const select = document.getElementById(`kat_fpa_${sfx}`);
+      const vatKey = VAT_KEY_BY_SFX[sfx] || '';
+      const key = `kat_fpa_${sfx}`;
+      if (!select) return;
+      ensureOption(select, mapping[key] || '', vatKey);
+      select.value = mapping[key] || '';
+    });
+    if (invoiceMtypeEl) invoiceMtypeEl.value = row.dataset.invoiceMtype || '';
+    saveBtn.textContent = 'Ενημέρωση';
+  });
+
+  const deleteModal = document.getElementById('confirmDeleteRuleModal');
+  const deleteAfmEl = document.getElementById('delRuleAfm');
+  const deleteCancel = document.getElementById('delRuleCancel');
+  const deleteConfirm = document.getElementById('delRuleConfirm');
+  let pendingDeleteAfm = '';
+
+  function openDeleteModal(afm){
+    pendingDeleteAfm = String(afm || '').trim();
+    deleteAfmEl.textContent = pendingDeleteAfm;
+    deleteModal.classList.remove('hidden');
+    deleteModal.classList.add('flex');
+  }
+
+  function closeDeleteModal(){
+    pendingDeleteAfm = '';
+    deleteModal.classList.add('hidden');
+    deleteModal.classList.remove('flex');
+  }
+
+  deleteCancel.addEventListener('click', closeDeleteModal);
+  deleteModal.addEventListener('click', function(ev){ if (ev.target === deleteModal) closeDeleteModal(); });
+  deleteConfirm.addEventListener('click', async function(){
+    if (!pendingDeleteAfm) return;
+    try {
+      const res = await fetch('/api/afm_rules/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ vat: VAT, supplier_afm: pendingDeleteAfm })
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data || !data.ok) {
+        showBanner((data && data.error) || 'Αποτυχία διαγραφής.', 'error', 7000);
+        return;
+      }
+      closeDeleteModal();
+      if (currentSelectedAfm === pendingDeleteAfm) clearForm();
+      await loadData();
+      showBanner('Ο κανόνας διαγράφηκε.', 'success', 4000);
+    } catch (err) {
+      showBanner('Αποτυχία διαγραφής.', 'error', 7000);
+    }
+  });
+
+  newBtn.addEventListener('click', clearForm);
+
+  saveBtn.addEventListener('click', async function(){
+    const supplierAfm = normalizeAfm(document.getElementById('ruleSupplierAfm').value);
+    const supplierName = String(document.getElementById('ruleSupplierName').value || '').trim();
+    const mapping = buildMapping();
+    if (!supplierAfm || supplierAfm.length !== 9) {
+      msgEl.className = 'text-sm text-red-600';
+      msgEl.textContent = 'Συμπλήρωσε έγκυρο 9ψήφιο ΑΦΜ.';
+      return;
+    }
+    if (!mapping.kat_fpa_a || !mapping.kat_fpa_b || !mapping.kat_fpa_g || !mapping.kat_fpa_d || !mapping.kat_fpa_e) {
+      msgEl.className = 'text-sm text-red-600';
+      msgEl.textContent = 'Συμπλήρωσε όλες τις αντιστοιχίσεις ΦΠΑ.';
+      return;
+    }
+    const invalid = [];
+    Object.entries({
+      '0%': mapping.kat_fpa_a,
+      '6%': mapping.kat_fpa_b,
+      '13%': mapping.kat_fpa_g,
+      '17%': mapping.kat_fpa_d,
+      '24%': mapping.kat_fpa_e,
+    }).forEach(([vatKey, cat]) => {
+      if (cat && !allowedForVat(cat, vatKey)) invalid.push(`${labelForCategory(cat)} → ${vatKey}`);
+    });
+    if (invalid.length) {
+      msgEl.className = 'text-sm text-red-600';
+      msgEl.textContent = 'Μη έγκυρες αντιστοιχίσεις: ' + invalid.join(', ');
+      return;
+    }
+    try {
+      const res = await fetch('/api/afm_rules/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          vat: VAT,
+          supplier_afm: supplierAfm,
+          supplier_name: supplierName,
+          mapping,
+          invoice_mtype: invoiceMtypeEl ? (invoiceMtypeEl.value || '') : '',
+        })
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data || !data.ok) {
+        showBanner((data && data.error) || 'Σφάλμα αποθήκευσης.', 'error', 7000);
+        return;
+      }
+      showBanner('Ο κανόνας αποθηκεύτηκε.', 'success', 5000);
+      clearForm();
+      await loadData();
+    } catch (err) {
+      showBanner('Σφάλμα αποθήκευσης.', 'error', 7000);
+    }
+  });
+
+  populateMtypes();
+  setupVATValidation();
+  loadData();
+})();
+</script>
+{% endblock %}

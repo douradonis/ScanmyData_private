@@ -255,9 +255,9 @@
     isLoggingOut = true;
 
     console.info('Performing logout. Reason: ' + reason);
-    const redirectTo = reason === 'inactivity'
-      ? '/auth/login?session_expired=true'
-      : '/auth/login';
+      const redirectTo = reason === 'inactivity'
+        ? '/login?session_expired=true'
+        : '/login';
 
     // Absolute fallback: never stay logged in if logout request hangs/fails.
     const forceRedirectTimer = setTimeout(() => {

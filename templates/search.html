@@ -103,6 +103,9 @@
         <!-- New button for editing receipt classification (shown only when
              receipts+analysis+repeat are active) -->
         <button type="button" id="editReceiptClassBtn" class="ml-2 px-2 py-1 border rounded text-sm hidden">Επεξεργασία Χαρακτηρισμού</button>
+           {% if user_role == 'admin' and vat %}
+           <a id="manageAfmRulesBtn" href="{{ url_for('afm_rules_page', vat=vat) }}" class="ml-2 px-2 py-1 border rounded text-sm">Κανόνες ΑΦΜ</a>
+           {% endif %}
         </div>
 
         <!-- Toggle switch for receipts scrape -->
@@ -115,7 +118,7 @@
 {# --- Yellow box αν υπάρχει MARK ήδη στο Excel --- #}
 {% if allow_edit_existing and not request.args.get('force_edit') %}
 <div class="mt-4 p-4 bg-yellow-50 rounded border border-yellow-300 text-yellow-800" id="existingBanner">
-    Το MARK <strong>{{ mark }}</strong> υπάρχει ήδη στο Excel. Θέλεις να τροποποιήσεις τον χαρακτηρισμό;
+  Το MARK <strong>{{ mark }}</strong> υπάρχει ήδη στο Epsilon. Θέλεις να τροποποιήσεις τον χαρακτηρισμό;
     <div class="mt-2 flex gap-2">
         <button id="forceEditBtn" type="button" class="bg-yellow-600 text-white px-3 py-2 rounded hover:bg-yellow-700">
             Επιβεβαίωση
@@ -333,12 +336,12 @@
 
 {% block scripts %}
 
-<script src="/static/loop_hard_guard.js"></script>
+<script src="/static/loop_hard_guard.js?v=20260422a"></script>
 <script>
   // Canonical receipt pipeline switch must be set before external flow scripts load.
   window.__RC_USE_CANONICAL_RECEIPT_AUTOCONFIRM = true;
 </script>
-<script src="{{ url_for('static', filename='repeat_flow_guard.js') }}"></script>
+<script src="{{ url_for('static', filename='repeat_flow_guard.js') }}?v=20260422a"></script>
 <script>
 // Loading overlay helpers
 function showLoadingOverlay(title, message){
@@ -369,6 +372,304 @@ async function fetchWithOverlay(url, opts, title, message){
   }catch(err){
     hideLoadingOverlay();
     throw err;
+  }
+}
+
+function afmRuleExtractVatKeyFromLine(line){
+  try {
+    if (!line || typeof line !== 'object') return '';
+    const vatCategory = String(line.vatCategory || line.vat_category || line.vatCat || line.vat_cat || '').trim();
+    if (vatCategory) {
+      const mPct = vatCategory.match(/(\d+)\s*%/);
+      if (mPct) return mPct[1] + '%';
+      const mNum = vatCategory.match(/(\d+)/);
+      if (mNum) return mNum[1] + '%';
+    }
+    const vatRate = String(line.vat || line.vatRate || line.vat_rate || '').trim().replace(',', '.');
+    if (vatRate) {
+      const m = vatRate.match(/(\d+)/);
+      if (m) return m[1] + '%';
+    }
+  } catch (_) {}
+  return '';
+}
+
+function afmRuleApplyExpectedCategories(summary, validation){
+  try {
+    if (!summary || typeof summary !== 'object') return false;
+    const lines = Array.isArray(summary.lines) ? summary.lines : [];
+    const mismatches = Array.isArray((validation || {}).category_mismatches)
+      ? (validation || {}).category_mismatches
+      : [];
+    if (!lines.length || !mismatches.length) return false;
+
+    const expectedByVat = {};
+    for (const item of mismatches) {
+      const vatKey = String((item && item.vat_key) || '').trim();
+      const expected = String((item && item.expected) || '').trim();
+      if (!vatKey || !expected) continue;
+      expectedByVat[vatKey] = expected;
+    }
+
+    let changed = false;
+    for (const ln of lines) {
+      if (!ln || typeof ln !== 'object') continue;
+      const vatKey = afmRuleExtractVatKeyFromLine(ln);
+      const expected = expectedByVat[vatKey];
+      if (!expected) continue;
+      if (String(ln.category || '').trim() === expected) continue;
+      ln.category = expected;
+      changed = true;
+    }
+    return changed;
+  } catch (_) {
+    return false;
+  }
+}
+
+function afmRuleApplyButtonLabel(validation){
+  try {
+    const mismatches = Array.isArray((validation || {}).category_mismatches)
+      ? (validation || {}).category_mismatches
+      : [];
+    const expectedValues = Array.from(new Set(mismatches
+      .map(item => String((item && item.expected_label) || (item && item.expected) || '').trim())
+      .filter(Boolean)));
+    if (expectedValues.length === 1) {
+      return `Εφαρμογή '${expectedValues[0]}'`;
+    }
+  } catch (_) {}
+  return 'Εφαρμογή κανόνα';
+}
+
+function afmRuleInferReceipt(summary){
+  try {
+    if (!summary || typeof summary !== 'object') return false;
+    const docType = String(summary.docType || summary.doc_type || '').trim().toLowerCase();
+    const type = String(summary.type || '').trim().toLowerCase();
+    const typeName = String(summary.type_name || '').trim().toLowerCase();
+    const category = String(summary.category || summary.characteristic || summary['χαρακτηρισμός'] || '').trim().toLowerCase();
+    if (docType.startsWith('invoice')) return false;
+    if (docType.startsWith('receipt')) return true;
+    if (type === '8.4' || type === '8.5' || type === '11.5') return true;
+    return !!(summary.is_receipt === true || type.includes('receipt') || typeName.includes('receipt') || typeName.includes('αποδειξ') || typeName.includes('λιαν') || category === 'αποδειξακια');
+  } catch (_) {
+    return false;
+  }
+}
+
+function afmRuleSummarySignature(summary){
+  try {
+    const lines = Array.isArray(summary && summary.lines) ? summary.lines : [];
+    return JSON.stringify({
+      mark: String((summary && (summary.mark || summary.MARK || summary.id || '')) || '').trim(),
+      mtype: String((summary && (summary.invoice_mtype || summary.mtype || '')) || '').trim(),
+      lines: lines.map(line => ({
+        id: String((line && (line.id || line.line_id || '')) || '').trim(),
+        vat: afmRuleExtractVatKeyFromLine(line),
+        category: String((line && line.category) || '').trim()
+      }))
+    });
+  } catch (_) {
+    return '';
+  }
+}
+
+function afmRuleSyncSummaryToUi(summary){
+  try {
+    window.__AFM_RULE_SUPPRESS_MANUAL_CHECK = true;
+    const input = document.getElementById('summaryJsonInput');
+    if (input) input.value = JSON.stringify(summary || {});
+    if (typeof window.renderSummaryLinesFromObject === 'function') {
+      try { window.renderSummaryLinesFromObject(summary || {}); } catch(_) {}
+    } else if (window.RC_forcePopulateSummaryModal) {
+      try { window.RC_forcePopulateSummaryModal(); } catch(_) {}
+    } else if (typeof prefillSummaryModal === 'function') {
+      try { prefillSummaryModal(); } catch(_) {}
+    }
+  } finally {
+    setTimeout(() => {
+      try { window.__AFM_RULE_SUPPRESS_MANUAL_CHECK = false; } catch(_) {}
+    }, 0);
+  }
+}
+
+async function afmRuleCanAutoSubmitManualSummary(summary){
+  try {
+    if (!summary || typeof summary !== 'object') return false;
+    if (afmRuleInferReceipt(summary)) {
+      return await __rcValidateReceiptAnalysisTotalsBeforeSave();
+    }
+
+    const categorySelects = Array.from(document.querySelectorAll('#summaryLinesContainer select.expense-category[data-line-id]'));
+    if (categorySelects.some(sel => !String(sel.value || '').trim())) {
+      return false;
+    }
+
+    const invoiceSelectEl = document.getElementById('invoiceMtypeSelect');
+    const invoiceMtypeContainer = document.getElementById('invoiceMtypeContainer');
+    const fallbackMtypeOptions = invoiceSelectEl ? Array.from(invoiceSelectEl.options).map(o => ({ value: o.value, label: (o.textContent || '').trim() })) : [];
+    const isGCategory = (
+      (window.G_CATEGORY_DATA && window.G_CATEGORY_DATA.mtype_options && window.G_CATEGORY_DATA.mtype_options.length > 0)
+      || (fallbackMtypeOptions.length > 0)
+    );
+    const invoiceMtypeRequired = !!(isGCategory && invoiceMtypeContainer && window.getComputedStyle(invoiceMtypeContainer).display !== 'none');
+    if (invoiceMtypeRequired && !String((invoiceSelectEl && invoiceSelectEl.value) || summary.mtype || summary.invoice_mtype || '').trim()) {
+      return false;
+    }
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function afmRuleAutoSubmitManualSummary(summary){
+  try {
+    const form = document.getElementById('saveSummaryForm');
+    const input = document.getElementById('summaryJsonInput');
+    if (!form || !input) return false;
+    input.value = JSON.stringify(summary || {});
+    if (window.__AFM_RULE_MANUAL_AUTOSAVE_PENDING) return true;
+    window.__AFM_RULE_MANUAL_AUTOSAVE_PENDING = true;
+    setTimeout(() => {
+      try {
+        if (typeof updateSummaryFromDom === 'function') updateSummaryFromDom();
+      } catch (_) {}
+      try {
+        if (typeof form.requestSubmit === 'function') form.requestSubmit();
+        else form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      } finally {
+        setTimeout(() => {
+          try { window.__AFM_RULE_MANUAL_AUTOSAVE_PENDING = false; } catch(_) {}
+        }, 600);
+      }
+    }, 0);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function handleAfmRuleManualCategoryEdit(previousSummary, currentSummary){
+  try {
+    if (window.__AFM_RULE_SUPPRESS_MANUAL_CHECK) return true;
+    if (!currentSummary || typeof currentSummary !== 'object') return true;
+    if (afmRuleInferReceipt(currentSummary)) return true;
+
+    const signature = afmRuleSummarySignature(currentSummary);
+    const now = Date.now();
+    if (signature && window.__AFM_RULE_LAST_MANUAL_SIG === signature && (now - Number(window.__AFM_RULE_LAST_MANUAL_AT || 0)) < 900) {
+      return true;
+    }
+    window.__AFM_RULE_LAST_MANUAL_SIG = signature;
+    window.__AFM_RULE_LAST_MANUAL_AT = now;
+
+    const payload = {
+      summary: currentSummary,
+      is_receipt: false,
+      vat: String((typeof rcResolveActiveVat === 'function' ? rcResolveActiveVat() : '') || '').trim()
+    };
+    const res = await fetch('/api/afm_rules/validate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) return true;
+    const data = await res.json().catch(() => null);
+    if (!data || !data.mismatch || !data.warning) return true;
+
+    const applyLabel = afmRuleApplyButtonLabel(data.validation || {});
+    let choice = 'continue';
+    if (typeof showModalChoice === 'function') {
+      choice = await showModalChoice('Κανόνας ΑΦΜ', String(data.warning), [
+        { key: 'apply', label: applyLabel },
+        { key: 'continue', label: 'Συνέχεια' },
+      ]);
+    } else {
+      const proceed = await showModalConfirm('Κανόνας ΑΦΜ', String(data.warning), 'Συνέχεια', 'Άκυρο');
+      choice = proceed ? 'continue' : null;
+    }
+
+    if (!choice) {
+      afmRuleSyncSummaryToUi(previousSummary || {});
+      return false;
+    }
+
+    if (choice === 'apply') {
+      afmRuleApplyExpectedCategories(currentSummary, data.validation || {});
+      delete currentSummary._afm_rule_force;
+      delete currentSummary.force_afm_rule;
+      afmRuleSyncSummaryToUi(currentSummary);
+      if (await afmRuleCanAutoSubmitManualSummary(currentSummary)) {
+        afmRuleAutoSubmitManualSummary(currentSummary);
+      }
+      return true;
+    }
+
+    currentSummary._afm_rule_force = true;
+    currentSummary.force_afm_rule = true;
+    afmRuleSyncSummaryToUi(currentSummary);
+    if (await afmRuleCanAutoSubmitManualSummary(currentSummary)) {
+      afmRuleAutoSubmitManualSummary(currentSummary);
+    }
+    return true;
+  } catch (err) {
+    console.warn('AFM manual edit validation failed', err);
+    return true;
+  }
+}
+
+async function validateAfmRuleBeforeSave(summary, options){
+  try {
+    if (options && options.isReceipt) return true;
+    const payload = {
+      summary: summary || {},
+      is_receipt: !!(options && options.isReceipt),
+      vat: String((typeof rcResolveActiveVat === 'function' ? rcResolveActiveVat() : '') || '').trim()
+    };
+    const res = await fetch('/api/afm_rules/validate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) return true;
+    const data = await res.json().catch(() => null);
+    if (!data || !data.mismatch || !data.warning) return true;
+
+    const applyLabel = afmRuleApplyButtonLabel(data.validation || {});
+    let choice = 'continue';
+    if (typeof showModalChoice === 'function') {
+      choice = await showModalChoice('Κανόνας ΑΦΜ', String(data.warning), [
+        { key: 'apply', label: applyLabel },
+        { key: 'continue', label: 'Συνέχεια' },
+      ]);
+      if (!choice) return false;
+    } else {
+      const proceed = await showModalConfirm('Κανόνας ΑΦΜ', String(data.warning), 'Συνέχεια', 'Άκυρο');
+      if (!proceed) return false;
+      choice = 'continue';
+    }
+
+    if (choice === 'apply') {
+      const changed = afmRuleApplyExpectedCategories(summary, data.validation || {});
+      if (!changed) {
+        summary._afm_rule_force = true;
+        summary.force_afm_rule = true;
+      } else {
+        delete summary._afm_rule_force;
+        delete summary.force_afm_rule;
+      }
+      return true;
+    }
+
+    summary._afm_rule_force = true;
+    summary.force_afm_rule = true;
+    return true;
+  } catch (err) {
+    console.warn('AFM rule validation failed on client', err);
+    return true;
   }
 }
 
@@ -429,6 +730,21 @@ function isReceiptsOn(){
   const r = document.getElementById('useReceiptsSwitch');
   return !!(r && r.checked);
 }
+
+function updateAfmRulesButtonVisibility(){
+  const btn = document.getElementById('manageAfmRulesBtn');
+  if (!btn) return;
+  btn.classList.toggle('hidden', isReceiptsOn());
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  updateAfmRulesButtonVisibility();
+  const receiptsSwitch = document.getElementById('useReceiptsSwitch');
+  if (receiptsSwitch && receiptsSwitch.dataset.afmRulesBound !== '1') {
+    receiptsSwitch.addEventListener('change', updateAfmRulesButtonVisibility);
+    receiptsSwitch.dataset.afmRulesBound = '1';
+  }
+});
 
 function rcRepeatModalShouldUseReceiptsMode(){
   try {
@@ -5080,6 +5396,11 @@ function prefillSummaryModal(){
   targetRoot.addEventListener('click', function(e){
     const btn = e.target.closest && e.target.closest('.category-btn');
     if(btn && (container ? container.contains(btn) : true)){
+      let previousSummary = {};
+      try {
+        const input = document.getElementById('summaryJsonInput');
+        previousSummary = JSON.parse((input && input.value) || '{}');
+      } catch(_) {}
       // Prevent bubbling to other global handlers that open the receipts-modal
       e.preventDefault();
       e.stopPropagation();
@@ -5114,6 +5435,11 @@ function prefillSummaryModal(){
       }
       // update hidden JSON immediately
       updateSummaryFromDom();
+      try {
+        const input = document.getElementById('summaryJsonInput');
+        const currentSummary = JSON.parse((input && input.value) || '{}');
+        handleAfmRuleManualCategoryEdit(previousSummary, currentSummary);
+      } catch(_) {}
       return;
     }
 
@@ -5130,6 +5456,11 @@ function prefillSummaryModal(){
   (container || document).addEventListener('change', function(e){
     const sel = e.target.closest && e.target.closest('select.expense-category');
     if(sel && (container ? container.contains(sel) : true)){
+      let previousSummary = {};
+      try {
+        const input = document.getElementById('summaryJsonInput');
+        previousSummary = JSON.parse((input && input.value) || '{}');
+      } catch(_) {}
       try { e.stopImmediatePropagation(); } catch(_) {}
       e.stopPropagation();
       try { rcMarkSummaryEditingWindow(4500); } catch(_) {}
@@ -5144,6 +5475,11 @@ function prefillSummaryModal(){
         try { window.__RC_RECEIPT_PROFILE_OVERRIDE = true; } catch(_) {}
       }
       updateSummaryFromDom();
+      try {
+        const input = document.getElementById('summaryJsonInput');
+        const currentSummary = JSON.parse((input && input.value) || '{}');
+        handleAfmRuleManualCategoryEdit(previousSummary, currentSummary);
+      } catch(_) {}
     }
   }, true);
 
@@ -5644,6 +5980,19 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
     try { __rc_debug_repeat_log('repeat_cash_gate_exception', { error: String((err && err.message) || err || '') }); } catch(_) {}
   }
 
+  // Fail-safe AFM-rule validation for invoice repeat autosubmit.
+  try {
+    const currentSummary = JSON.parse(input.value || '{}') || {};
+    const afmRuleOk = await validateAfmRuleBeforeSave(currentSummary, { isReceipt: false });
+    if (!afmRuleOk) {
+      window.__repeat_auto_submitting = false;
+      return false;
+    }
+    input.value = JSON.stringify(currentSummary);
+  } catch(err) {
+    try { __rc_debug_repeat_log('repeat_afm_gate_exception', { error: String((err && err.message) || err || '') }); } catch(_) {}
+  }
+
   const submitThroughValidationFlow = () => {
     if (typeof form.requestSubmit === 'function') {
       form.requestSubmit();
@@ -5901,7 +6250,7 @@ async function applyMappingToSummaryAndSubmitUsingMapping(mapping){
       banner.id = 'existingBanner';
       banner.className = 'mt-4 p-4 bg-yellow-50 rounded border border-yellow-300 text-yellow-800';
       banner.innerHTML =
-        'Το MARK <strong></strong> υπάρχει ήδη στο Excel. Θέλεις να τροποποιήσεις τον χαρακτηρισμό;'
+        'Το MARK <strong></strong> υπάρχει ήδη στο Epsilon. Θέλεις να τροποποιήσεις τον χαρακτηρισμό;'
         + '<div class="mt-2 flex gap-2">'
         + '<button id="forceEditBtn" type="button" class="bg-yellow-600 text-white px-3 py-2 rounded hover:bg-yellow-700">Επιβεβαίωση</button>'
         + '<button id="dismissBannerBtn" type="button" class="px-3 py-2 border rounded hover:bg-gray-50">Άκυρο</button>'
@@ -8145,6 +8494,12 @@ document.getElementById('saveSummaryForm')?.addEventListener('submit', async fun
         console.warn('Payment validation failed:', validationErr);
       }
     }
+
+    const afmRuleOk = await validateAfmRuleBeforeSave(summary, { isReceipt: false });
+    if (!afmRuleOk) {
+      releaseSummarySaveLock();
+      return;
+    }
     
     // Προχώρα στην κανονική server αποθήκευση (AJAX αντί για form submit για partial reload)
     try{ showLoadingOverlay('Αποθήκευση', 'Παρακαλώ περιμένετε - αποστολή στο server...'); }catch(e){}
@@ -8878,6 +9233,11 @@ function readMappingFromUI(){
   document.addEventListener('click', function(ev){
     const btn = ev.target.closest && ev.target.closest('.category-btn');
     if(!btn) return;
+    let previousSummary = {};
+    try {
+      const current = getSummaryData();
+      previousSummary = JSON.parse(JSON.stringify((current && current.data) || {}));
+    } catch(_) {}
     ev.preventDefault();
     // prevent other handlers (the "other modal" that opened)
     try { ev.stopImmediatePropagation(); } catch(e){}
@@ -8910,12 +9270,18 @@ function readMappingFromUI(){
     if(sel) try { sel.value = line.category || ''; } catch(e){}
 
     saveSummaryData(state);
+    handleAfmRuleManualCategoryEdit(previousSummary, state.data);
   }, true);
 
   // change on line-selects
   document.addEventListener('change', function(ev){
     const sel = ev.target;
     if(!sel || !sel.matches || !sel.matches('select.expense-category')) return;
+    let previousSummary = {};
+    try {
+      const current = getSummaryData();
+      previousSummary = JSON.parse(JSON.stringify((current && current.data) || {}));
+    } catch(_) {}
     try { ev.stopImmediatePropagation(); } catch(_) {}
     try { ev.stopPropagation(); } catch(_) {}
     try { rcMarkSummaryEditingWindow(4500); } catch(_) {}
@@ -8936,6 +9302,7 @@ function readMappingFromUI(){
       b.classList.toggle('text-white', (b.dataset.cat === line.category));
     });
     saveSummaryData(state);
+    handleAfmRuleManualCategoryEdit(previousSummary, state.data);
   }, true);
 
   // clear button (if exists)
@@ -12741,6 +13108,34 @@ document.addEventListener('click', function(e){
       window.__RC_SUPPRESS_SUMMARY_MODAL_UNTIL = Date.now() + 5000;
     } catch(_) {}
     try {
+      // Keep summary JSON in sync with current DOM selections before validation/save.
+      try {
+        if (typeof updateSummaryFromDom === 'function') updateSummaryFromDom();
+      } catch(_) {}
+
+      // Hard gate for invoice save: AFM-rule mismatch must show warning modal
+      // and block save when user cancels.
+      try {
+        const summaryInput = document.getElementById('summaryJsonInput');
+        const summaryObj = JSON.parse((summaryInput && summaryInput.value) || '{}') || {};
+        const summaryType = String(summaryObj.type_name || summaryObj.type || '').toLowerCase();
+        const inferredReceipt = !!(
+          summaryObj.is_receipt === true
+          || summaryType.includes('απόδει')
+          || summaryType.includes('receipt')
+          || String(summaryObj.category || summaryObj.characteristic || summaryObj['χαρακτηρισμός'] || '').trim().toLowerCase() === 'αποδειξακια'
+        );
+        const afmRuleOk = await validateAfmRuleBeforeSave(summaryObj, { isReceipt: inferredReceipt });
+        if (!afmRuleOk) {
+          return;
+        }
+        if (summaryInput) {
+          summaryInput.value = JSON.stringify(summaryObj);
+        }
+      } catch (afmGuardErr) {
+        console.warn('forced ajax save AFM gate failed', afmGuardErr);
+      }
+
       const fd = new FormData(form);
       fd.set('ajax', '1');
 

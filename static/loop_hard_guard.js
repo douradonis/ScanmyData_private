@@ -59,6 +59,21 @@
     }catch(_){ return obj; }
   }
 
+  function isReceiptSummaryObject(obj){
+    try{
+      if (!obj || typeof obj !== 'object') return false;
+      if (obj.is_receipt === true) return true;
+      const docType = String(obj.docType || obj.doc_type || '').trim().toLowerCase();
+      if (docType.startsWith('receipt')) return true;
+      if (docType.startsWith('invoice')) return false;
+      const t = String(obj.type || '').trim().toLowerCase();
+      const tn = String(obj.type_name || '').trim().toLowerCase();
+      if (t === '8.4' || t === '8.5' || t === '11.5') return true;
+      if (t.includes('receipt') || tn.includes('receipt') || tn.includes('αποδειξ') || tn.includes('λιαν')) return true;
+      return false;
+    }catch(_){ return false; }
+  }
+
   function getEl(id){ return document.getElementById(id); }
 
   function getSummary(){
@@ -137,7 +152,7 @@
           // If receipts switch is ON, coerce categories for receipts before checking meaningful
           const useReceipts = !!(getEl('useReceiptsSwitch') && getEl('useReceiptsSwitch').checked);
           let data = s.data || {};
-          if (useReceipts){
+          if (useReceipts && isReceiptSummaryObject(data)){
             data = coerceReceiptCategoryOnSummary(data);
             setSummary(data);
           }
@@ -157,7 +172,7 @@
         }
         const useReceipts = !!(getEl('useReceiptsSwitch') && getEl('useReceiptsSwitch').checked);
         let data = s.data || {};
-        if (useReceipts){
+        if (useReceipts && isReceiptSummaryObject(data)){
           data = coerceReceiptCategoryOnSummary(data);
           setSummary(data);
         }

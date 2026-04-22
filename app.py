@@ -870,7 +870,7 @@ def _prime_remote_summary_state(
     if allow_edit_existing and not force_edit_active and mark_text:
         payload["reclassification_banner"] = {
             "visible": True,
-            "text": f"Το MARK {mark_text} υπάρχει ήδη στο Excel. Θέλεις να τροποποιήσεις τον χαρακτηρισμό;",
+            "text": f"Το MARK {mark_text} υπάρχει ήδη στο Epsilon. Θέλεις να τροποποιήσεις τον χαρακτηρισμό;",
         }
 
     warnings: List[Dict[str, Any]] = []
@@ -1672,6 +1672,15 @@ CREDENTIALS_PATH = Path(os.environ.get("CREDENTIALS_PATH", DEFAULT_CRED_PATH))
 
 VAT_KEYS = ["0%", "6%", "13%", "17%", "24%"]
 VAT_RATE_NUMERIC = ["0", "3", "4", "6", "9", "13", "17", "24"]
+AFM_RULE_MAPPING_KEYS = ["kat_fpa_a", "kat_fpa_b", "kat_fpa_g", "kat_fpa_d", "kat_fpa_e"]
+AFM_RULE_KEY_TO_RATE = {
+    "kat_fpa_a": "0%",
+    "kat_fpa_b": "6%",
+    "kat_fpa_g": "13%",
+    "kat_fpa_d": "17%",
+    "kat_fpa_e": "24%",
+}
+AFM_RULE_RATE_TO_KEY = {v: k for k, v in AFM_RULE_KEY_TO_RATE.items()}
 
 
 def _normalize_repeat_mapping(raw: Optional[Dict[str, Any]]) -> Dict[str, str]:
@@ -2680,6 +2689,314 @@ def _is_general_profile(profile: dict) -> bool:
         return True
     normalized = name.casefold()
     return normalized in {"γενικο", "γενικό", "general", "default"}
+
+
+def _normalize_afm_rule(entry: dict) -> Optional[dict]:
+    if not isinstance(entry, dict):
+        return None
+    supplier_afm = _normalize_afm(entry.get("supplier_afm") or entry.get("afm") or entry.get("issuer_afm"))
+    if not supplier_afm:
+        return None
+    mapping_raw = entry.get("mapping") if isinstance(entry.get("mapping"), dict) else {}
+    mapping: Dict[str, str] = {}
+    for key in AFM_RULE_MAPPING_KEYS:
+        legacy_rate_key = AFM_RULE_KEY_TO_RATE.get(key)
+        mapping[key] = str(mapping_raw.get(key) or mapping_raw.get(legacy_rate_key) or "").strip()
+    return {
+        "id": str(entry.get("id") or supplier_afm).strip() or supplier_afm,
+        "supplier_afm": supplier_afm,
+        "supplier_name": str(entry.get("supplier_name") or entry.get("name") or "").strip(),
+        "mapping": mapping,
+        "invoice_mtype": str(entry.get("invoice_mtype") or "").strip(),
+        "receipt_mtype": str(entry.get("receipt_mtype") or "").strip(),
+        "enabled": bool(entry.get("enabled", True)),
+        "updated_at": entry.get("updated_at"),
+    }
+
+
+def _get_afm_rules(creds, vat: str) -> List[dict]:
+    cust, _ = _get_customer(creds, vat, create=False)
+    if not isinstance(cust, dict):
+        return []
+    out: List[dict] = []
+    for entry in cust.get("afm_rules") or []:
+        rule = _normalize_afm_rule(entry)
+        if rule:
+            out.append(rule)
+    return out
+
+
+def _set_afm_rules(creds, vat: str, rules: list):
+    cust, _ = _get_customer(creds, vat, create=True)
+    if not isinstance(cust, dict):
+        return creds
+    normalized: List[dict] = []
+    for entry in rules or []:
+        rule = _normalize_afm_rule(entry)
+        if rule:
+            normalized.append(rule)
+    cust["afm_rules"] = normalized
+    return creds
+
+
+def _find_client_in_group_credentials_files(vat_value: str = "", name_value: str = ""):
+    try:
+        for cand in Path(DATA_DIR).glob('*/credentials.json'):
+            try:
+                with cand.open('r', encoding='utf-8') as f:
+                    arr = json.load(f) or []
+            except Exception:
+                continue
+            found = _find_client(arr, vat=vat_value or None, name=name_value or None)
+            if found:
+                return found, arr, cand
+    except Exception:
+        pass
+    return None, None, None
+
+
+def _first_nonempty_value(*values) -> str:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text and text.lower() not in ("none", "nan"):
+            return text
+    return ""
+
+
+def _extract_vat_percent_from_line(line: dict) -> str:
+    if not isinstance(line, dict):
+        return ""
+    try:
+        vat_category = _first_nonempty_value(
+            line.get("vatCategory"),
+            line.get("vat_category"),
+            line.get("vatCat"),
+            line.get("vat_cat"),
+        )
+        if vat_category:
+            match = re.search(r"(\d+)\s*%", vat_category)
+            if match:
+                return match.group(1) + "%"
+            match = re.search(r"(\d+)", vat_category)
+            if match:
+                return match.group(1) + "%"
+        vat_rate = _first_nonempty_value(line.get("vat"), line.get("vatRate"), line.get("vat_rate"))
+        if vat_rate:
+            match = re.search(r"(\d+)", vat_rate.replace(',', '.'))
+            if match:
+                return match.group(1) + "%"
+    except Exception:
+        return ""
+    return ""
+
+
+def _resolve_supplier_afm_for_rule(summary: Optional[Dict[str, Any]], active_vat: str = "") -> str:
+    if not isinstance(summary, dict):
+        return ""
+    active_norm = _normalize_afm(active_vat)
+    raw = summary.get("raw") if isinstance(summary.get("raw"), dict) else {}
+    candidates = [
+        summary.get("AFM_issuer"),
+        summary.get("issuer_vat"),
+        summary.get("issuer_afm"),
+        summary.get("issuerVat"),
+        summary.get("counterparty_afm"),
+        summary.get("counterpartyAfm"),
+        raw.get("AFM_issuer"),
+        raw.get("issuer_vat"),
+        raw.get("issuer_afm"),
+        raw.get("issuerVat"),
+        raw.get("AFM"),
+        summary.get("AFM"),
+    ]
+    for cand in candidates:
+        normalized = _normalize_afm(cand)
+        if not normalized:
+            continue
+        if active_norm and normalized == active_norm and cand is not summary.get("AFM"):
+            continue
+        if active_norm and normalized == active_norm:
+            continue
+        return normalized
+
+    # Backend fallback: resolve issuer AFM from stored document rows by MARK.
+    # This prevents client-side payload gaps from bypassing AFM-rule enforcement.
+    try:
+        mark = str(
+            summary.get("mark")
+            or summary.get("MARK")
+            or summary.get("invoice_id")
+            or summary.get("id")
+            or ""
+        ).strip()
+        if mark:
+            docs_file = group_path(f"{active_vat}_invoices.json")
+            docs = json_read(docs_file) or []
+            for doc in docs:
+                if not isinstance(doc, dict):
+                    continue
+                doc_mark = str(
+                    doc.get("mark")
+                    or doc.get("MARK")
+                    or doc.get("invoice_id")
+                    or doc.get("id")
+                    or ""
+                ).strip()
+                if doc_mark != mark:
+                    continue
+                for key in (
+                    "AFM_issuer", "issuer_vat", "issuer_afm", "issuerVat",
+                    "counterparty_afm", "counterpartyAfm", "AFM"
+                ):
+                    normalized = _normalize_afm(doc.get(key))
+                    if not normalized:
+                        continue
+                    if active_norm and normalized == active_norm:
+                        continue
+                    return normalized
+    except Exception:
+        log.exception("_resolve_supplier_afm_for_rule: fallback lookup by MARK failed")
+    return ""
+
+
+def _validate_summary_against_afm_rules(
+    client: Optional[Dict[str, Any]],
+    summary: Optional[Dict[str, Any]],
+    *,
+    active_vat: str = "",
+    is_receipt: Optional[bool] = None,
+) -> Dict[str, Any]:
+    base_result: Dict[str, Any] = {
+        "applies": False,
+        "mismatch": False,
+        "rule": None,
+        "supplier_afm": "",
+        "present_rates": [],
+        "category_mismatches": [],
+        "mtype_mismatch": None,
+    }
+    if not isinstance(client, dict) or not isinstance(summary, dict):
+        return base_result
+
+    rules = []
+    for entry in client.get("afm_rules") or []:
+        rule = _normalize_afm_rule(entry)
+        if rule and rule.get("enabled"):
+            rules.append(rule)
+    if not rules:
+        return base_result
+
+    supplier_afm = _resolve_supplier_afm_for_rule(summary, active_vat=active_vat)
+    if not supplier_afm:
+        return base_result
+
+    rule = next((item for item in rules if item.get("supplier_afm") == supplier_afm), None)
+    if not rule:
+        return base_result
+
+    result = dict(base_result)
+    result["applies"] = True
+    result["rule"] = rule
+    result["supplier_afm"] = supplier_afm
+
+    receipt_mode = bool(is_receipt)
+    if is_receipt is None:
+        doc_type = str(summary.get("docType") or summary.get("doc_type") or "").strip().lower()
+        receipt_mode = doc_type.startswith("receipt") or bool(summary.get("is_receipt"))
+
+    actual_categories: Dict[str, set] = {}
+    present_rates: List[str] = []
+    for line in summary.get("lines") or []:
+        if not isinstance(line, dict):
+            continue
+        vat_key = _extract_vat_percent_from_line(line)
+        if not vat_key:
+            continue
+        if vat_key not in present_rates:
+            present_rates.append(vat_key)
+        actual_categories.setdefault(vat_key, set())
+        actual_categories[vat_key].add(str(line.get("category") or "").strip())
+    result["present_rates"] = present_rates
+
+    labels = _category_labels_for_client(client)
+    category_mismatches: List[Dict[str, Any]] = []
+    for vat_key in present_rates:
+        mapping = rule.get("mapping") if isinstance(rule.get("mapping"), dict) else {}
+        expected = str(
+            mapping.get(vat_key)
+            or mapping.get(AFM_RULE_RATE_TO_KEY.get(vat_key, ""))
+            or ""
+        ).strip()
+        if not expected:
+            continue
+        actual_set = {str(v).strip() for v in actual_categories.get(vat_key) or set()}
+        actual_set = {v for v in actual_set if v is not None}
+        if actual_set == {expected}:
+            continue
+        category_mismatches.append({
+            "vat_key": vat_key,
+            "expected": expected,
+            "expected_label": labels.get(expected, expected),
+            "actual": sorted(actual_set),
+            "actual_labels": [labels.get(v, v) if v else "(κενό)" for v in sorted(actual_set)],
+        })
+
+    expected_mtype = str(rule.get("invoice_mtype") or "").strip()
+    selected_mtype = str(summary.get("invoice_mtype") or summary.get("mtype") or "").strip()
+    mtype_mismatch = None
+    if (not receipt_mode) and expected_mtype and expected_mtype != selected_mtype:
+        mtype_mismatch = {
+            "expected": expected_mtype,
+            "actual": selected_mtype,
+        }
+
+    result["category_mismatches"] = category_mismatches
+    result["mtype_mismatch"] = mtype_mismatch
+    result["mismatch"] = bool(category_mismatches or mtype_mismatch)
+    return result
+
+
+def _build_afm_rule_warning_text(client: Optional[Dict[str, Any]], validation: Dict[str, Any], *, is_receipt: bool = False) -> str:
+    rule = (validation or {}).get("rule") or {}
+    supplier_afm = str((validation or {}).get("supplier_afm") or rule.get("supplier_afm") or "").strip()
+    supplier_name = str(rule.get("supplier_name") or "").strip()
+    target = supplier_name + (f" ({supplier_afm})" if supplier_afm else "") if supplier_name else supplier_afm
+    parts: List[str] = []
+    for item in (validation or {}).get("category_mismatches") or []:
+        vat_key = str(item.get("vat_key") or "").strip()
+        expected_label = str(item.get("expected_label") or item.get("expected") or "").strip()
+        actual_labels = [str(v or "(κενό)").strip() for v in (item.get("actual_labels") or [])]
+        actual_text = ", ".join(actual_labels) if actual_labels else "(κενό)"
+        parts.append(f"{vat_key}: αναμένεται '{expected_label}', βρέθηκε '{actual_text}'")
+    mtype_mismatch = (validation or {}).get("mtype_mismatch") or {}
+    if mtype_mismatch:
+        expected_mtype = str(mtype_mismatch.get("expected") or "").strip()
+        actual_mtype = str(mtype_mismatch.get("actual") or "").strip() or "(κενό)"
+        label = "receipt MTYPE" if is_receipt else "invoice MTYPE"
+        parts.append(f"{label}: αναμένεται '{expected_mtype}', βρέθηκε '{actual_mtype}'")
+
+    details = "\n".join(f"- {part}" for part in parts if part)
+    doc_label = "απόδειξη" if is_receipt else "παραστατικό"
+    header_target = target or "το συγκεκριμένο ΑΦΜ"
+    return (
+        f"Υπάρχει αποθηκευμένος κανόνας χαρακτηρισμών για {header_target}.\n\n"
+        f"Το {doc_label} διαφέρει από τον κανόνα στα παρακάτω:\n"
+        f"{details}\n\n"
+        "Θέλεις να συνεχίσεις με τα τρέχοντα στοιχεία;"
+    ).strip()
+
+
+def _afm_rules_apply_for_client(client: Optional[Dict[str, Any]], *, is_receipt: bool = False) -> bool:
+    if is_receipt:
+        return False
+
+    # Keep this helper self-contained. A local _normalize_book_category exists
+    # inside save_summary, so we cannot depend on it at module level.
+    raw = str((client or {}).get("book_category") or "").strip().upper()
+    category = "G" if raw in {"G", "Γ"} else ("B" if raw in {"B", "Β"} else "")
+    return category in ("B", "G")
 
 def _get_repeat_entry(creds, vat: str):
     cust, _ = _get_customer(creds, vat, create=False)
@@ -5227,6 +5544,7 @@ def inject_active_credential():
         active_credential_vat=vat,
         app_settings=settings,
         user_role=user_role,
+        is_group_admin=(user_role == 'admin'),
         active_group=active_group_name,
         active_year=active_year,
         ADMIN_USER_ID=ADMIN_USER_ID if 'ADMIN_USER_ID' in globals() else 0,
@@ -10145,8 +10463,10 @@ def search():
                 if not is_ajax_search:
                     flash(classified_message, "warning")
                 classified_flag = True
+                # Keep reclassification confirmation flow enabled for already-classified entries.
+                allow_edit_existing = True
 
-            # check duplicate in excel
+            # check duplicate in excel OR already-classified entry in epsilon cache
             try:
                 excel_path = excel_path_for(vat=vat)
                 if os.path.exists(excel_path):
@@ -10156,6 +10476,61 @@ def search():
                         marks_in_excel = df_check["MARK"].astype(str).str.strip().tolist()
                         if mark in marks_in_excel:
                             allow_edit_existing = True
+
+                if (not allow_edit_existing) and vat and mark:
+                    try:
+                        eps_cache = load_epsilon_cache_for_vat(vat) or []
+                    except Exception:
+                        eps_cache = []
+
+                    def _epsilon_entry_has_saved_classification(entry):
+                        try:
+                            if not isinstance(entry, dict):
+                                return False
+                            top_level = (
+                                entry.get("classification")
+                                or entry.get("category")
+                                or entry.get("characteristic")
+                                or entry.get("χαρακτηρισμός")
+                                or entry.get("χαρακτηρισμος")
+                            )
+                            if str(top_level or "").strip():
+                                return True
+                            for ln in (entry.get("lines") or []):
+                                if not isinstance(ln, dict):
+                                    continue
+                                cat_val = (
+                                    ln.get("category")
+                                    or ln.get("classification")
+                                    or ln.get("characteristic")
+                                    or ln.get("χαρακτηρισμός")
+                                    or ln.get("χαρακτηρισμος")
+                                )
+                                if str(cat_val or "").strip():
+                                    return True
+                        except Exception:
+                            return False
+                        return False
+
+                    for eps_item in eps_cache:
+                        try:
+                            eps_mark = str(
+                                _first(
+                                    eps_item.get("mark"),
+                                    eps_item.get("MARK"),
+                                    eps_item.get("invoice_id"),
+                                    eps_item.get("Αριθμός Μητρώου"),
+                                    eps_item.get("id"),
+                                )
+                                or ""
+                            ).strip()
+                        except Exception:
+                            eps_mark = ""
+                        if eps_mark != mark:
+                            continue
+                        if _epsilon_entry_has_saved_classification(eps_item):
+                            allow_edit_existing = True
+                            break
             except Exception:
                 log.exception("Could not read Excel to check duplicate MARK")
 
@@ -10187,7 +10562,7 @@ def search():
                     else:
                         flash(not_found_msg, "error")
             else:
-                if not classified_flag:
+                if True:
                     try:
                         # fiscal year check
                         sel_year = None
@@ -10833,6 +11208,62 @@ def profiles_page():
     )
 
 
+@app.get("/afm_rules")
+def afm_rules_page():
+    if not _is_active_group_admin_user():
+        flash("Μόνο ο admin της ενεργής ομάδας μπορεί να διαχειριστεί κανόνες ΑΦΜ.", "error")
+        return redirect(url_for("search"))
+
+    vat = (request.args.get("vat") or "").strip()
+    creds = read_credentials_list()
+    client = None
+    if vat:
+        client = _find_client(creds, vat=vat)
+    if not client:
+        try:
+            active = get_active_credential_from_session() or {}
+        except Exception:
+            active = {}
+        active_vat = str((active or {}).get("vat") or "").strip()
+        if active_vat:
+            client = _find_client(creds, vat=active_vat)
+        if not client and isinstance(active, dict) and active:
+            client = active
+    client = client or {}
+
+    categories = _list_invoice_categories(client, include_receipts=True)
+    labels = _category_labels_for_client(client)
+    constraints = _category_vat_constraints(client)
+    rules = _get_afm_rules(creds, str(client.get("vat") or vat or "").strip())
+
+    g_category_data = None
+    try:
+        from g_category_helpers import (
+            is_g_category_active,
+            get_available_categories_for_g,
+            enrich_categories_with_mtype,
+        )
+
+        if client and is_g_category_active(client):
+            settings = load_settings()
+            if settings:
+                categories = get_available_categories_for_g(settings, categories)
+                g_category_data = enrich_categories_with_mtype(categories, settings)
+    except Exception:
+        log.exception("afm_rules_page: failed to prepare g-category payload")
+
+    return render_template(
+        "afm_rules.html",
+        vat=client.get("vat", "") or vat,
+        rules=rules,
+        expense_tags=categories,
+        category_labels=labels,
+        vat_constraints=constraints,
+        g_category_data=g_category_data,
+        active_page="afm_rules",
+    )
+
+
 @app.route("/custom_categories", methods=["GET"])
 def custom_categories_page():
     vat = (request.args.get("vat") or "").strip()
@@ -11319,6 +11750,243 @@ def api_char_profiles_delete():
         else:
             write_credentials_list(creds)
     return jsonify(ok=True)
+
+
+@app.get("/api/afm_rules")
+def api_afm_rules_get():
+    if not _is_active_group_admin_user():
+        return jsonify(ok=False, error="Απαιτούνται δικαιώματα admin της ενεργής ομάδας."), 403
+
+    vat = request.args.get("vat", "").strip()
+    creds = read_credentials_list()
+    client = _find_client(creds, vat=vat) if vat else None
+    if not client:
+        try:
+            active = get_active_credential_from_session() or {}
+        except Exception:
+            active = {}
+        active_vat = str((active or {}).get("vat") or "").strip()
+        active_name = str((active or {}).get("name") or "").strip()
+        if active_vat:
+            client = _find_client(creds, vat=active_vat)
+        if not client and active_name:
+            client = _find_client(creds, name=active_name)
+        if not client and (vat or active_name):
+            group_client, group_creds, _ = _find_client_in_group_credentials_files(vat, active_name)
+            if group_client:
+                client = group_client
+                if group_creds is not None:
+                    creds = group_creds
+        if not client and isinstance(active, dict) and active:
+            client = active
+    client = client or {}
+    active_vat = str(client.get("vat") or vat or "").strip()
+
+    # Fallback for session-only client objects: resolve the concrete credentials source
+    # to ensure rules come from the same storage as the active customer.
+    if active_vat and not _find_client(creds, vat=active_vat):
+        group_client, group_creds, _ = _find_client_in_group_credentials_files(active_vat, str(client.get("name") or "").strip())
+        if group_client and group_creds is not None:
+            client = group_client
+            creds = group_creds
+
+    return jsonify(
+        ok=True,
+        rules=_get_afm_rules(creds, active_vat),
+        expense_tags=_list_invoice_categories(client, include_receipts=False),
+        category_labels=_category_labels_for_client(client),
+        vat_constraints=_category_vat_constraints(client),
+        vat=active_vat,
+    )
+
+
+@app.post("/api/afm_rules/save")
+def api_afm_rules_save():
+    if not _is_active_group_admin_user():
+        return jsonify(ok=False, error="Απαιτούνται δικαιώματα admin της ενεργής ομάδας."), 403
+
+    data = request.get_json(force=True, silent=True) or {}
+    vat = str(data.get("vat") or "").strip()
+    supplier_afm = _normalize_afm(data.get("supplier_afm") or data.get("afm"))
+    supplier_name = str(data.get("supplier_name") or data.get("name") or "").strip()
+    mapping = data.get("mapping") if isinstance(data.get("mapping"), dict) else {}
+    invoice_mtype = str(data.get("invoice_mtype") or "").strip()
+    if not vat:
+        try:
+            active = get_active_credential_from_session() or {}
+        except Exception:
+            active = {}
+        vat = str((active or {}).get("vat") or "").strip()
+
+    if not vat:
+        return jsonify(ok=False, error="Δεν βρέθηκε ενεργός πελάτης."), 400
+    if not supplier_afm:
+        return jsonify(ok=False, error="Συμπλήρωσε έγκυρο ΑΦΜ προμηθευτή."), 400
+
+    for key in AFM_RULE_MAPPING_KEYS:
+        mapping[key] = str(mapping.get(key) or "").strip()
+    if not all(mapping.get(key) for key in AFM_RULE_MAPPING_KEYS):
+        return jsonify(ok=False, error="Συμπλήρωσε όλες τις αντιστοιχίσεις ΦΠΑ."), 400
+
+    with CREDENTIALS_RW_LOCK:
+        creds = read_credentials_list()
+        save_path = None
+        client = _find_client(creds, vat=vat) if vat else None
+        if not client:
+            try:
+                active = get_active_credential_from_session() or {}
+            except Exception:
+                active = {}
+            active_name = str((active or {}).get("name") or "").strip()
+            if active_name:
+                client = _find_client(creds, name=active_name)
+            if not client and (vat or active_name):
+                group_client, group_creds, group_path = _find_client_in_group_credentials_files(vat, active_name)
+                if group_client is not None and group_creds is not None and group_path is not None:
+                    client = group_client
+                    creds = group_creds
+                    save_path = group_path
+        if not client:
+            return jsonify(ok=False, error="Δεν βρέθηκε πελάτης."), 404
+
+        constraints = _category_vat_constraints(client)
+        labels = _category_labels_for_client(client)
+        vat_by_key = {
+            "kat_fpa_a": "0%",
+            "kat_fpa_b": "6%",
+            "kat_fpa_g": "13%",
+            "kat_fpa_d": "17%",
+            "kat_fpa_e": "24%",
+        }
+        for key, vat_label in vat_by_key.items():
+            value = str(mapping.get(key) or "").strip()
+            allowed = constraints.get(value)
+            if value and allowed is not None and vat_label not in allowed:
+                display = labels.get(value, value)
+                return jsonify(ok=False, error=f"Η κατηγορία '{display}' δεν υποστηρίζει ΦΠΑ {vat_label}."), 400
+
+        rules = _get_afm_rules(creds, vat)
+        hit = None
+        for item in rules:
+            if str(item.get("supplier_afm") or "").strip() == supplier_afm:
+                hit = item
+                break
+        timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        if hit:
+            hit["supplier_name"] = supplier_name
+            hit["mapping"] = mapping
+            hit["invoice_mtype"] = invoice_mtype
+            hit["enabled"] = True
+            hit["updated_at"] = timestamp
+        else:
+            rules.append({
+                "id": supplier_afm,
+                "supplier_afm": supplier_afm,
+                "supplier_name": supplier_name,
+                "mapping": mapping,
+                "invoice_mtype": invoice_mtype,
+                "enabled": True,
+                "updated_at": timestamp,
+            })
+        _set_afm_rules(creds, vat, rules)
+        if save_path is not None:
+            try:
+                with save_path.open('w', encoding='utf-8') as f:
+                    json.dump(creds, f, ensure_ascii=False, indent=2)
+            except Exception:
+                write_credentials_list(creds)
+        else:
+            write_credentials_list(creds)
+
+    return jsonify(ok=True, rule={
+        "supplier_afm": supplier_afm,
+        "supplier_name": supplier_name,
+        "mapping": mapping,
+        "invoice_mtype": invoice_mtype,
+        "enabled": True,
+    })
+
+
+@app.post("/api/afm_rules/delete")
+def api_afm_rules_delete():
+    if not _is_active_group_admin_user():
+        return jsonify(ok=False, error="Απαιτούνται δικαιώματα admin της ενεργής ομάδας."), 403
+
+    data = request.get_json(force=True, silent=True) or {}
+    vat = str(data.get("vat") or "").strip()
+    supplier_afm = _normalize_afm(data.get("supplier_afm") or data.get("afm"))
+    if not vat or not supplier_afm:
+        return jsonify(ok=False, error="Ανεπαρκή στοιχεία διαγραφής."), 400
+
+    with CREDENTIALS_RW_LOCK:
+        creds = read_credentials_list()
+        save_path = None
+        client = _find_client(creds, vat=vat) if vat else None
+        if not client:
+            try:
+                active = get_active_credential_from_session() or {}
+            except Exception:
+                active = {}
+            active_name = str((active or {}).get("name") or "").strip()
+            if active_name:
+                client = _find_client(creds, name=active_name)
+            if not client and (vat or active_name):
+                group_client, group_creds, group_path = _find_client_in_group_credentials_files(vat, active_name)
+                if group_client is not None and group_creds is not None and group_path is not None:
+                    client = group_client
+                    creds = group_creds
+                    save_path = group_path
+        if not client:
+            return jsonify(ok=False, error="Δεν βρέθηκε πελάτης."), 404
+
+        rules = [r for r in _get_afm_rules(creds, vat) if str(r.get("supplier_afm") or "").strip() != supplier_afm]
+        _set_afm_rules(creds, vat, rules)
+        if save_path is not None:
+            try:
+                with save_path.open('w', encoding='utf-8') as f:
+                    json.dump(creds, f, ensure_ascii=False, indent=2)
+            except Exception:
+                write_credentials_list(creds)
+        else:
+            write_credentials_list(creds)
+    return jsonify(ok=True)
+
+
+@app.post("/api/afm_rules/validate")
+def api_afm_rules_validate():
+    data = request.get_json(force=True, silent=True) or {}
+    summary = data.get("summary") if isinstance(data.get("summary"), dict) else data
+    if not isinstance(summary, dict):
+        return jsonify(ok=True, mismatch=False, applies=False)
+
+    active = get_active_credential_from_session() or {}
+    vat = str(data.get("vat") or summary.get("active_vat") or active.get("vat") or "").strip()
+    client = get_cred_by_vat(vat) or active or {}
+    doc_type_norm = str(summary.get("docType") or summary.get("doc_type") or "").strip().lower()
+    type_norm = str(summary.get("type") or "").strip().lower()
+    type_name_norm = str(summary.get("type_name") or "").strip().lower()
+    if doc_type_norm.startswith("invoice"):
+        is_receipt = False
+    elif doc_type_norm.startswith("receipt"):
+        is_receipt = True
+    elif type_norm in {"8.4", "8.5", "11.5"}:
+        is_receipt = True
+    elif any(k in (type_name_norm + " " + type_norm) for k in ("receipt", "αποδειξ", "λιαν", "pos")):
+        is_receipt = True
+    else:
+        is_receipt = bool(data.get("is_receipt") or summary.get("is_receipt"))
+    if not _afm_rules_apply_for_client(client, is_receipt=is_receipt):
+        return jsonify(ok=True, mismatch=False, applies=False, validation={"applies": False, "mismatch": False})
+    validation = _validate_summary_against_afm_rules(client, summary, active_vat=vat, is_receipt=is_receipt)
+    if validation.get("mismatch"):
+        return jsonify(
+            ok=True,
+            mismatch=True,
+            applies=True,
+            warning=_build_afm_rule_warning_text(client, validation, is_receipt=is_receipt),
+            validation=validation,
+        )
+    return jsonify(ok=True, mismatch=False, applies=bool(validation.get("applies")), validation=validation)
 
 @app.get("/profiles", endpoint="char_profiles_ui")
 def char_profiles_ui():
@@ -12384,6 +13052,59 @@ def save_summary():
             conf["receipt_mtype"] = selected_receipt_mtype
     except Exception:
         log.exception("save_summary: failed to persist receipt repeat prefs for VAT=%s", vat)
+
+    # --- AFM classification rule validation ---
+    is_receipt_for_rules = bool(summary.get("is_receipt"))
+    try:
+        # AFM rules are invoice-only. Determine receipt mode for rule gate from
+        # explicit document semantics first (not from loose category fallbacks).
+        doc_type_norm = str(summary.get("docType") or summary.get("doc_type") or "").strip().lower()
+        type_norm = str(summary.get("type") or "").strip().lower()
+        type_name_norm = str(summary.get("type_name") or "").strip().lower()
+        if doc_type_norm.startswith("invoice"):
+            is_receipt_for_rules = False
+        elif doc_type_norm.startswith("receipt"):
+            is_receipt_for_rules = True
+        elif type_norm in {"8.4", "8.5", "11.5"}:
+            is_receipt_for_rules = True
+        elif any(k in (type_name_norm + " " + type_norm) for k in ("receipt", "αποδειξ", "λιαν", "pos")):
+            is_receipt_for_rules = True
+        else:
+            is_receipt_for_rules = bool(summary.get("is_receipt"))
+
+        force_afm_rule = bool(
+            summary.get("_afm_rule_force")
+            or summary.get("force_afm_rule")
+            or request.args.get("force_afm_rule") == "1"
+            or request.form.get("force_afm_rule") in ("1", "true", "True")
+        )
+        active_client = active or get_cred_by_vat(vat) or {}
+        if _afm_rules_apply_for_client(active_client, is_receipt=is_receipt_for_rules):
+            afm_rule_validation = _validate_summary_against_afm_rules(
+                active_client,
+                summary,
+                active_vat=str(vat or ""),
+                is_receipt=is_receipt_for_rules,
+            )
+            if afm_rule_validation.get("mismatch") and not force_afm_rule:
+                warning_text = _build_afm_rule_warning_text(active_client, afm_rule_validation, is_receipt=is_receipt_for_rules)
+                return _save_summary_response(
+                    ok=False,
+                    error=warning_text,
+                    status=409,
+                    warning=warning_text,
+                    afm_rule_conflict=True,
+                    afm_rule_validation=afm_rule_validation,
+                )
+    except Exception:
+        log.exception("save_summary: AFM rule validation failed")
+        if not bool(is_receipt_for_rules):
+            return _save_summary_response(
+                ok=False,
+                error="Αποτυχία ελέγχου κανόνα ΑΦΜ πριν την αποθήκευση.",
+                status=500,
+                afm_rule_conflict=True,
+            )
 
     # --- GUARD: μπλοκάρουμε άδεια/άκυρα summaries ---
     try:

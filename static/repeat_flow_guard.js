@@ -236,7 +236,7 @@
         }
       }
 
-      if (!FORCE_EDIT && repeatOn && (receiptsSwitchOn || isReceiptSummary(obj))) {
+      if (!FORCE_EDIT && repeatOn && isReceiptSummary(obj)) {
         // hide modal if already shown
         if (modal) try { modal.style.display = 'none'; } catch(_){}
         applyReceiptAutoCategoryAndSubmit();

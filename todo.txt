@@ -8,5 +8,6 @@ curl -v \
   
 page tour
 
-search page fixes, credentials list partial reload completion
+credentials list partial reload completion
 session manager test
+
