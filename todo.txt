@@ -9,5 +9,5 @@ curl -v \
 page tour
 
 credentials list partial reload completion
-session manager test
+session manager test--
 
