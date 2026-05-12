@@ -8,9 +8,9 @@
 <div class="bg-white rounded shadow p-6">
     <h2 class="text-lg font-semibold mb-2">Αναζήτηση MARK</h2>
 
-    <form method="post" class="flex gap-2 items-center" id="markSearchForm">
+    <form method="post" class="flex flex-wrap gap-2 items-center" id="markSearchForm">
         <!-- Auto-submit segmented toggle (scoped to client) -->
-        <div class="flex items-center gap-2 ml-4" id="autoSubmitGroup">
+      <div class="control-group flex items-center gap-2 md:ml-4" id="autoSubmitGroup">
             <span class="text-sm">Auto‑submit</span>
             <div class="inline-flex rounded-md overflow-hidden border border-gray-300">
                 <button type="button" id="autoSubmitBtnOff" class="px-2 py-1 text-sm focus:outline-none">Off</button>
@@ -18,7 +18,7 @@
             </div>
         </div>
 
-        <div class="relative w-2/4 min-w-[220px]">
+      <div class="mark-input-wrap relative md:w-2/4 min-w-[220px]">
             <input name="mark" id="markInput" type="text" placeholder="15ψήφιο MARK ή URL" class="p-2 border rounded w-full pr-24" value="{{ mark }}" autocomplete="off">
             <div class="absolute inset-y-0 right-0 flex items-stretch divide-x divide-sky-100 border-l">
                 <button type="button"
@@ -65,8 +65,8 @@
                 Τερματισμός
             </button>
         </div>
-        <button type="submit" class="bg-sky-600 text-white px-3 py-2 rounded">Αναζήτηση</button>
-        <div class="flex items-center gap-2 ml-4" aria-labelledby="receiptsSwitchOff receiptsSwitchOn">
+        <button type="submit" class="search-submit-btn bg-sky-600 text-white px-3 py-2 rounded">Αναζήτηση</button>
+        <div class="control-group flex items-center gap-2 md:ml-4" aria-labelledby="receiptsSwitchOff receiptsSwitchOn">
             <span id="receiptsSwitchOff" class="text-sm">Τιμολόγια</span>
             <label for="useReceiptsSwitch" class="inline-flex items-center">
                 <input type="checkbox"
@@ -94,7 +94,7 @@
 
 
         <!-- Toggle επαναληψιμης εισαγωγής + edit button -->
-        <div class="flex items-center gap-2 ml-4">
+        <div class="control-group flex items-center gap-2 md:ml-4">
             <div id="activeRepeatProfileHint" class="text-xs text-gray-500 mb-1" style="display:none"></div>
 
             <label for="repeatEntrySwitch" class="text-sm">Επαναληψιμη εισαγωγή</label>
@@ -103,9 +103,10 @@
         <!-- New button for editing receipt classification (shown only when
              receipts+analysis+repeat are active) -->
         <button type="button" id="editReceiptClassBtn" class="ml-2 px-2 py-1 border rounded text-sm hidden">Επεξεργασία Χαρακτηρισμού</button>
-           {% if user_role == 'admin' and vat %}
-           <a id="manageAfmRulesBtn" href="{{ url_for('afm_rules_page', vat=vat) }}" class="ml-2 px-2 py-1 border rounded text-sm">Κανόνες ΑΦΜ</a>
-           {% endif %}
+            {% if vat %}
+            <a id="manageAfmRulesBtn" href="{{ url_for('afm_rules_page', vat=vat) }}" class="ml-2 px-2 py-1 border rounded text-sm">Κανόνες ΑΦΜ</a>
+            <button type="button" id="afmRuleModeBtn" class="ml-1 px-2 py-1 border rounded text-sm" title="Συμπεριφορά κανόνα ΑΦΜ στην αποθήκευση">Κανόνες ΑΦΜ: Ερώτηση</button>
+            {% endif %}
         </div>
 
         <!-- Toggle switch for receipts scrape -->
@@ -442,6 +443,65 @@ function afmRuleApplyButtonLabel(validation){
   return 'Εφαρμογή κανόνα';
 }
 
+const AFM_RULE_DECISION_STORAGE_PREFIX = 'scanmydata:afmRuleDecisionMode:v1:';
+
+function afmRuleDecisionStorageKey(){
+  const vat = String((typeof rcResolveActiveVat === 'function' ? rcResolveActiveVat() : '') || '').trim() || 'global';
+  return AFM_RULE_DECISION_STORAGE_PREFIX + vat;
+}
+
+function getAfmRuleDecisionMode(){
+  try {
+    const raw = String(localStorage.getItem(afmRuleDecisionStorageKey()) || '').trim().toLowerCase();
+    return (raw === 'auto') ? 'auto' : 'ask';
+  } catch (_) {
+    return 'ask';
+  }
+}
+
+function setAfmRuleDecisionMode(mode){
+  const normalized = (String(mode || '').trim().toLowerCase() === 'auto') ? 'auto' : 'ask';
+  try { localStorage.setItem(afmRuleDecisionStorageKey(), normalized); } catch (_) {}
+  return normalized;
+}
+
+function renderAfmRuleModeButton(){
+  const btn = document.getElementById('afmRuleModeBtn');
+  if (!btn) return;
+  const mode = getAfmRuleDecisionMode();
+  if (mode === 'auto') {
+    btn.textContent = 'Κανόνες ΑΦΜ: Auto-apply';
+    btn.classList.add('bg-emerald-50');
+  } else {
+    btn.textContent = 'Κανόνες ΑΦΜ: Ερώτηση';
+    btn.classList.remove('bg-emerald-50');
+  }
+}
+
+function initAfmRuleModeButton(){
+  const btn = document.getElementById('afmRuleModeBtn');
+  if (!btn || btn.dataset.bound === '1') {
+    renderAfmRuleModeButton();
+    return;
+  }
+  btn.dataset.bound = '1';
+  renderAfmRuleModeButton();
+  btn.addEventListener('click', function(){
+    const current = getAfmRuleDecisionMode();
+    const next = setAfmRuleDecisionMode(current === 'auto' ? 'ask' : 'auto');
+    renderAfmRuleModeButton();
+    if (typeof showFlash === 'function') {
+      showFlash(
+        next === 'auto'
+          ? 'AFM rules: ενεργό Auto-apply (χωρίς ερώτηση).'
+          : 'AFM rules: ενεργό Ερώτηση (εμφάνιση modal).',
+        'info',
+        2600
+      );
+    }
+  });
+}
+
 function afmRuleInferReceipt(summary){
   try {
     if (!summary || typeof summary !== 'object') return false;
@@ -579,6 +639,17 @@ async function handleAfmRuleManualCategoryEdit(previousSummary, currentSummary){
     const data = await res.json().catch(() => null);
     if (!data || !data.mismatch || !data.warning) return true;
 
+    if (getAfmRuleDecisionMode() === 'auto') {
+      afmRuleApplyExpectedCategories(currentSummary, data.validation || {});
+      delete currentSummary._afm_rule_force;
+      delete currentSummary.force_afm_rule;
+      afmRuleSyncSummaryToUi(currentSummary);
+      if (await afmRuleCanAutoSubmitManualSummary(currentSummary)) {
+        afmRuleAutoSubmitManualSummary(currentSummary);
+      }
+      return true;
+    }
+
     const applyLabel = afmRuleApplyButtonLabel(data.validation || {});
     let choice = 'continue';
     if (typeof showModalChoice === 'function') {
@@ -637,6 +708,18 @@ async function validateAfmRuleBeforeSave(summary, options){
     if (!res.ok) return true;
     const data = await res.json().catch(() => null);
     if (!data || !data.mismatch || !data.warning) return true;
+
+    if (getAfmRuleDecisionMode() === 'auto') {
+      const changed = afmRuleApplyExpectedCategories(summary, data.validation || {});
+      if (!changed) {
+        summary._afm_rule_force = true;
+        summary.force_afm_rule = true;
+      } else {
+        delete summary._afm_rule_force;
+        delete summary.force_afm_rule;
+      }
+      return true;
+    }
 
     const applyLabel = afmRuleApplyButtonLabel(data.validation || {});
     let choice = 'continue';
@@ -698,6 +781,7 @@ function enhanceFlashBanners(root=document){
 }
 
 document.addEventListener('DOMContentLoaded', function(){ enhanceFlashBanners(document); }, { once: true });
+document.addEventListener('DOMContentLoaded', function(){ initAfmRuleModeButton(); }, { once: true });
 
 function normalizeScanValue(raw){
   try {
@@ -10448,6 +10532,64 @@ document.addEventListener('submit', function(ev){
 
       [data-theme="dark"] #receiptsModeMenu .receipt-mode-tick {
         color: #38bdf8;
+      }
+
+      #markSearchForm {
+        row-gap: .6rem;
+      }
+
+      #markSearchForm > * {
+        min-width: 0;
+      }
+
+      #markSearchForm .mark-input-wrap {
+        flex: 1 1 440px;
+      }
+
+      #markSearchForm .search-submit-btn {
+        white-space: nowrap;
+      }
+
+      @media (max-width: 1024px) {
+        #markSearchForm .mark-input-wrap {
+          flex-basis: 100%;
+        }
+
+        #remoteSessionIndicator {
+          margin-left: 0;
+          width: 100%;
+        }
+      }
+
+      @media (max-width: 768px) {
+        #markSearchForm {
+          align-items: stretch;
+        }
+
+        #markSearchForm .control-group {
+          margin-left: 0 !important;
+          width: 100%;
+          flex-wrap: wrap;
+        }
+
+        #markSearchForm .mark-input-wrap {
+          min-width: 0;
+          width: 100%;
+          flex-basis: 100%;
+        }
+
+        #markSearchForm .search-submit-btn {
+          width: 100%;
+        }
+
+        #autoSubmitGroup {
+          justify-content: space-between;
+        }
+
+        #remoteSessionIndicator {
+          margin-left: 0;
+          width: 100%;
+        }
       }
 </style>
 

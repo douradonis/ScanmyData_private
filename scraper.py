@@ -19,7 +19,18 @@ except Exception:
 # so that changes to the environment (including via reloading a .env file)
 # take effect without restarting the interpreter.
 def _use_browser_fallback() -> bool:
-    return os.getenv("MYDATA_USE_BROWSER", "0").lower() in ("1", "true", "yes")
+    if os.getenv("MYDATA_USE_BROWSER", "0").lower() in ("1", "true", "yes"):
+        return True
+    return False
+
+
+def _provider_needs_browser_fallback(url: str) -> bool:
+    """Known providers where the MyData action is often JS-only."""
+    try:
+        domain = (urlparse(str(url)).netloc or "").lower()
+    except Exception:
+        return False
+    return any(d in domain for d in ("e-invoicing.gr", "einvoice.s1ecos.gr", "s1ecos.gr"))
 
 def _normalize_url(url: str) -> str:
     """
@@ -82,7 +93,7 @@ def _resolve_mydatapi_via_browser(url, timeout=20, debug=False):
     controlled by the ``MYDATA_USE_BROWSER`` environment variable; when it is
     false (the default) the function simply returns ``None`` immediately.
     """
-    if not _use_browser_fallback():
+    if not _use_browser_fallback() and not _provider_needs_browser_fallback(url):
         if debug:
             print("browser fallback disabled via MYDATA_USE_BROWSER")
         return None
@@ -235,13 +246,47 @@ def _find_erp_qr_target(soup, base_url):
                 href = a["href"]
                 break
 
-    # 4) Αναζήτηση μέσα σε <script> (hard fallback)
+    # 4) Generic MyData buttons/links (σελίδες χωρίς erpQrBtn)
+    if not href:
+        for a in soup.find_all("a", href=True):
+            a_href = (a.get("href") or "").strip()
+            a_txt = (a.get_text(" ", strip=True) or "").lower()
+            if not a_href:
+                continue
+            if (
+                "mydata" in a_txt
+                or "my data" in a_txt
+                or "timologioqr/qrinfo" in a_href.lower()
+                or ("mydata" in a_href.lower() and "qrinfo" in a_href.lower())
+            ):
+                href = a_href
+                break
+    if not href:
+        for b in soup.find_all("button"):
+            b_txt = (b.get_text(" ", strip=True) or "").lower()
+            if "mydata" not in b_txt and "my data" not in b_txt:
+                continue
+            b_href = (b.get("data-href") or b.get("data-url") or "").strip()
+            if b_href:
+                href = b_href
+                break
+            onclick = (b.get("onclick") or "")
+            m_btn = re.search(r"(?:window\.open|open|location\.href)\(\s*['\"]([^'\"]+)['\"]", onclick)
+            if m_btn:
+                href = m_btn.group(1)
+                break
+
+    # 5) Αναζήτηση μέσα σε <script> (hard fallback)
     if not href:
         for script in soup.find_all("script"):
             sc = (script.string or script.get_text() or "")
             m = re.search(r"https?://mydatapi\.aade\.gr[^\s\"']+", sc)
             if m:
                 href = m.group(0)
+                break
+            m2 = re.search(r"(?:/|https?://[^\s\"']+)TimologioQR/QRInfo\?q=[^\s\"']+", sc, re.I)
+            if m2:
+                href = m2.group(0)
                 break
 
     if not href:
@@ -528,6 +573,24 @@ def scrape_einvoice(url):
         data = _erp_qr_to_mydatapi_from_soup(sess, soup, r.url, timeout=15)
     except Exception:
         data = None
+
+    if not data:
+        # Some S1ECOS pages expose the TimologioQR URL directly in HTML/JS.
+        direct_mydatapi = _extract_mydatapi_url_from_text(r.url, r.url) or _extract_mydatapi_url_from_text(r.text, r.url)
+        if direct_mydatapi:
+            try:
+                data = scrape_mydatapi(direct_mydatapi)
+            except Exception:
+                data = None
+
+    if not data:
+        # JS-only buttons may require a browser to reveal/follow the MyData URL.
+        try:
+            resolved = _resolve_mydatapi_via_browser(r.url, timeout=20)
+            if resolved:
+                data = scrape_mydatapi(resolved)
+        except Exception:
+            data = None
 
     if data:
         mark = (data.get("MARK") or "").strip()
@@ -1239,24 +1302,70 @@ def scrape_vsgr(url):
     """
     sess = requests.Session()
     sess.headers.update(HEADERS)
-    
-    # Προσθέσε ?peppol=true parameter
-    peppol_url = url
-    if "?" not in url:
-        peppol_url = url + "?peppol=true"
-    else:
-        peppol_url = url + "&peppol=true"
-    
-    try:
-        r = sess.get(peppol_url, timeout=15)
-        r.raise_for_status()
-        r.encoding = 'utf-8'
-    except Exception as e:
-        print(f"[RequestError] {e}")
-        return None, None
-    
-    html = r.text
+
+    def _looks_like_retail_receipt(text):
+        if not text:
+            return False
+        return bool(re.search(r"απόδειξ|αποδειξ|λιανικ|receipt|αλπ|11\.1", text, re.I))
+
+    # Προσθέσε ?peppol=true parameter και δοκίμασε και το αρχικό URL.
+    peppol_url = url + ("&" if "?" in url else "?") + "peppol=true"
+    html = None
+    page_url = url
+    last_error = None
+    for candidate in (peppol_url, url):
+        try:
+            r = sess.get(candidate, timeout=15, allow_redirects=True)
+            r.raise_for_status()
+            r.encoding = 'utf-8'
+            html = r.text
+            page_url = r.url
+            # prefer content that actually contains useful labels/myDATA hints
+            if re.search(r"M\.AR\.K|MARK|Αναγνωριστικό\s*ΦΠΑ\s*Αγοραστή|myDATA|TimologioQR|Απόδειξ|Λιαν", html, re.I):
+                break
+        except Exception as e:
+            last_error = e
+
+    if html is None:
+        if last_error:
+            print(f"[RequestError] {last_error}")
+        return [], None
+
     soup = BeautifulSoup(html, "html.parser")
+
+    # 0) Preferred: resolve myDATA URL and delegate to mydatapi parser.
+    mydatapi_url = _extract_mydatapi_url_from_text(html, page_url)
+    if not mydatapi_url:
+        for a in soup.find_all("a", href=True):
+            href = (a.get("href") or "").strip()
+            txt = (a.get_text(" ", strip=True) or "")
+            blob = f"{txt} {href}"
+            if re.search(r"mydata|timologioqr|qrinfo|παραστατικ", blob, re.I):
+                mydatapi_url = _extract_mydatapi_url_from_text(href, page_url) or urljoin(page_url, href)
+                if mydatapi_url:
+                    break
+    if not mydatapi_url:
+        for sc in soup.find_all("script"):
+            sc_text = sc.string or sc.get_text() or ""
+            direct = _extract_mydatapi_url_from_text(sc_text, page_url)
+            if direct:
+                mydatapi_url = direct
+                break
+
+    if not mydatapi_url:
+        mydatapi_url = _resolve_mydatapi_via_browser(page_url, timeout=20, debug=False)
+
+    if mydatapi_url:
+        data = scrape_mydatapi(mydatapi_url, debug=False)
+        mark = (data.get("MARK") or "").strip() if data else ""
+        doc_type = (data.get("Είδος Παραστατικού") or "").strip() if data else ""
+        afm = (data.get("ΑΦΜ Πελάτη") or "").strip() if data else ""
+        afm = re.sub(r"\D", "", afm) if afm and afm != "N/A" else None
+        if _looks_like_retail_receipt(doc_type):
+            afm = None
+        marks = [mark] if mark and mark != "N/A" else []
+        if marks or afm is not None:
+            return marks, afm
     
     # 1) MARK - Αναζήτηση του 15ψήφιου νούμερου
     mark = None
@@ -1308,6 +1417,10 @@ def scrape_vsgr(url):
         if len(all_vats) >= 2:
             # Το πρώτο είναι πωλητής, το δεύτερο πελάτης
             counterpart_vat = all_vats[1]
+
+    # For retail receipts we should not keep counterpart VAT.
+    if _looks_like_retail_receipt(soup.get_text(" ", strip=True)):
+        counterpart_vat = None
     
     marks = [mark] if mark else []
     return marks, counterpart_vat
