@@ -11210,10 +11210,6 @@ def profiles_page():
 
 @app.get("/afm_rules")
 def afm_rules_page():
-    if not _is_active_group_admin_user():
-        flash("Μόνο ο admin της ενεργής ομάδας μπορεί να διαχειριστεί κανόνες ΑΦΜ.", "error")
-        return redirect(url_for("search"))
-
     vat = (request.args.get("vat") or "").strip()
     creds = read_credentials_list()
     client = None
@@ -11754,9 +11750,6 @@ def api_char_profiles_delete():
 
 @app.get("/api/afm_rules")
 def api_afm_rules_get():
-    if not _is_active_group_admin_user():
-        return jsonify(ok=False, error="Απαιτούνται δικαιώματα admin της ενεργής ομάδας."), 403
-
     vat = request.args.get("vat", "").strip()
     creds = read_credentials_list()
     client = _find_client(creds, vat=vat) if vat else None
@@ -11802,9 +11795,6 @@ def api_afm_rules_get():
 
 @app.post("/api/afm_rules/save")
 def api_afm_rules_save():
-    if not _is_active_group_admin_user():
-        return jsonify(ok=False, error="Απαιτούνται δικαιώματα admin της ενεργής ομάδας."), 403
-
     data = request.get_json(force=True, silent=True) or {}
     vat = str(data.get("vat") or "").strip()
     supplier_afm = _normalize_afm(data.get("supplier_afm") or data.get("afm"))
@@ -11909,9 +11899,6 @@ def api_afm_rules_save():
 
 @app.post("/api/afm_rules/delete")
 def api_afm_rules_delete():
-    if not _is_active_group_admin_user():
-        return jsonify(ok=False, error="Απαιτούνται δικαιώματα admin της ενεργής ομάδας."), 403
-
     data = request.get_json(force=True, silent=True) or {}
     vat = str(data.get("vat") or "").strip()
     supplier_afm = _normalize_afm(data.get("supplier_afm") or data.get("afm"))
@@ -12156,6 +12143,17 @@ def api_scrape_receipt():
         mode = str(data.get("mode") or "mixed").strip().lower()
         if mode not in ("analysis", "mixed"):
             mode = "mixed"
+
+        def _normalize_scrape_url(raw_url: str) -> str:
+            if not raw_url:
+                return ""
+            normalized = str(raw_url).strip()
+            normalized = re.sub(r"\s+", "", normalized)
+            normalized = re.sub(r"^(https?):/([^/])", r"\1://\2", normalized)
+            return normalized
+
+        url = _normalize_scrape_url(url)
+
         if not url:
             return jsonify({"ok": False, "error": "Missing 'url' in request"}), 400
 
@@ -12222,6 +12220,18 @@ def api_scrape_receipt():
                     "description": "",
                     "category": ""
                 })
+
+        has_core_data = any(
+            str(x or "").strip()
+            for x in (mark, issue_date, total_amount, issuer_vat, issuer_name, progressive_aa)
+        )
+        if (not has_core_data) and (not receipt_analysis):
+            return jsonify({
+                "ok": False,
+                "error": "Δεν βρέθηκαν δεδομένα για το URL. Έλεγξε ότι είναι πλήρες και σωστό.",
+                "mode": mode,
+                "raw": scraped,
+            }), 422
 
         # If scraper MARK is missing/invalid, assign unique pseudo-MARK for receipts.
         if not re.fullmatch(r"\d{15}", mark or ""):

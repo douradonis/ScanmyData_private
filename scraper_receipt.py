@@ -158,6 +158,7 @@ def _normalize_url(url: str) -> str:
     if not url:
         return url
     url = str(url).strip()
+    url = re.sub(r'\s+', '', url)
     # Διόρθωση λάθους protocol: https:/ → https://
     url = re.sub(r'^(https?):/([^/])', r'\1://\2', url)
     return url
@@ -1183,13 +1184,22 @@ def scrape_epsilon(url, timeout=20, debug=False):
     MARK_RE = re.compile(r"\b\d{15}\b")
     NON_INVOICE_CODES = {"11.1", "11.2", "13.31"}  # όχι τιμολόγια
 
-    # --- ΝΕΟ: Κανονικοποίηση fd → DocViewer ---
+    # --- ΝΕΟ: Κανονικοποίηση fd/FileDocument/Get → DocViewer ---
     def _normalize_epsilon_url_to_docviewer(u: str) -> str:
         try:
             p = urlparse(u)
+            base = f"{p.scheme}://{p.netloc}" if p.scheme and p.netloc else u
             # αν είναι ήδη DocViewer, μην πειράξεις τίποτα
             if "/DocViewer/" in p.path:
                 return u
+            # αποδοχή μορφής .../FileDocument/Get/<uuid>
+            m_doc = re.search(r"/filedocument/get/([0-9a-fA-F\-]{32,36})", p.path or "", flags=re.I)
+            if m_doc:
+                token = m_doc.group(1)
+                hexonly = re.sub(r"[^0-9a-fA-F]", "", token)
+                if len(hexonly) == 32:
+                    docid = f"{hexonly[0:8]}-{hexonly[8:12]}-{hexonly[12:16]}-{hexonly[16:20]}-{hexonly[20:32]}"
+                    return f"{base}/DocViewer/{docid}"
             # πιάσε το token μετά το /fd/
             m = re.search(r"/fd/([^/?#]+)", p.path, flags=re.I)
             if not m:
@@ -1204,7 +1214,7 @@ def scrape_epsilon(url, timeout=20, debug=False):
             # βάλε παύλες: 8-4-4-4-12
             docid = f"{hexonly[0:8]}-{hexonly[8:12]}-{hexonly[12:16]}-{hexonly[16:20]}-{hexonly[20:32]}"
             new_path = f"/DocViewer/{docid}"
-            return f"{p.scheme}://{p.netloc}{new_path}"
+            return f"{base}{new_path}"
         except Exception:
             return u
 
@@ -1966,7 +1976,10 @@ def detect_and_scrape(url, timeout=20, debug=False):
     """
     Convenience wrapper: detect source from URL and call appropriate scraper.
     """
-    domain = urlparse(url).netloc.lower()
+    url = _normalize_url(url)
+    parsed = urlparse(url)
+    domain = (parsed.netloc or "").lower()
+    path_l = (parsed.path or "").lower()
     if "www1.aade.gr" in domain:
         return scrape_www1_aade(url, timeout=timeout, debug=debug)
     if "mydatapi.aade.gr" in domain or "mydata.aade.gr" in domain:
@@ -1981,6 +1994,8 @@ def detect_and_scrape(url, timeout=20, debug=False):
         return scrape_epsilon(url, timeout=timeout, debug=debug)
     if "parochos.gr" in domain:
         return scrape_epsilon(url, timeout=timeout, debug=debug)  # Χρησιμοποιεί το ίδιο API
+    if "/filedocument/get/" in path_l or "/docviewer/" in path_l or "/fd/" in path_l:
+        return scrape_epsilon(url, timeout=timeout, debug=debug)
     if "pegcloud.io" in domain or "pegcloud" in domain:
         return scrape_pegcloud(url, timeout=timeout, debug=debug)
     if "e-invoicing.gr" in domain:
