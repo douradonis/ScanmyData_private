@@ -52,7 +52,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt /app/requirements.txt
 RUN pip install --upgrade pip setuptools wheel \
  && pip install --no-cache-dir -r /app/requirements.txt \
- && python -m playwright install chromium
+ && python -m playwright install chromium \
+ && find /ms-playwright -type f | grep -qi chrome \
+ && echo "Playwright Chromium binary detected"
 
 # Μετά όλος ο κώδικας
 COPY . /app

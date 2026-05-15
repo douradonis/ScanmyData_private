@@ -287,6 +287,17 @@ def _parse_lines(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [{"net": float(net), "vat": float(vat), "vat_rate": vr, "vat_src": src, "category": cat}]
 
 # ----------------------- reason & client DB -----------------------
+def _format_name_with_afm(name: str, afm: str, max_len: int = 128) -> str:
+    """Format 'Name (AFM)' with character limit, keeping AFM complete and truncating name if needed."""
+    if not name or not afm:
+        return ""
+    afm_part = f"({afm})"
+    space_for_name = max_len - len(afm_part) - 1
+    if space_for_name > 0:
+        truncated_name = name[:space_for_name].rstrip()
+        return f"{truncated_name} {afm_part}"
+    return afm_part[:max_len]
+
 def _reason_for_rec_enhanced(rec: Dict[str, Any], is_receipt: bool, client_names: Optional[Dict[str, str]] = None) -> str:
     # Prefer explicit fields directly from the invoice JSON
     name_explicit = (rec.get("Name_issuer") or rec.get("issuerName") or rec.get("issuer_name") or
@@ -298,13 +309,13 @@ def _reason_for_rec_enhanced(rec: Dict[str, Any], is_receipt: bool, client_names
     afm = _norm_afm(afm_explicit)
 
     if is_receipt:
-        # Receipts: "Name (AFM)" when both exist; else whichever exists; else "Απόδειξη AA"
+        # Receipts: "Name_issuer (AFM_issuer)" with 128 char limit
         if nm and afm:
-            return f"{nm} ({afm})"
+            return _format_name_with_afm(nm, afm, max_len=128)
         if nm:
-            return nm
+            return nm[:128]
         if afm:
-            return afm
+            return f"({afm})"[:128]
         return (f"Απόδειξη {aa}").strip() or "—"
 
     # Invoices: try explicit name; else client_db name by AFM; else fallbacks
@@ -657,8 +668,43 @@ def build_preview_rows_for_ui(
             if apod_supplier_id is not None and apod_supplier_id in (client_map["by_id"] or set()):
                 custid_val = apod_supplier_id
             else:
-                issues.append({"code":"apodeixakia_supplier_not_in_client_db","modal":True,
-                               "message": f"Απόδειξη AA={aa}: apodeixakia_supplier={apod_supplier_id} δεν υπάρχει στο client_db."})
+                # Do not hard-block export when supplier setting points to missing CUSTID.
+                # Fallback to issuer AFM mapping (or auto-create supplier) and keep a non-fatal issue.
+                custid_val = client_map["by_afm"].get(afm_norm)
+                if custid_val is None:
+                    if afm_norm in new_suppliers:
+                        custid_val = new_suppliers[afm_norm]["custid"]
+                    else:
+                        custid_val = next_custid
+                        counterpart_name_raw = str(
+                            rec.get("Name_issuer")
+                            or rec.get("issuerName")
+                            or rec.get("issuer_name")
+                            or rec.get("Name")
+                            or rec.get("name")
+                            or f"Συναλλασσόμενος {afm_norm}"
+                        ).strip()
+                        # Apply same formatting as receipts: "Name (AFM)" with 128 char limit
+                        if counterpart_name_raw and not counterpart_name_raw.startswith("Συναλλασσόμενος"):
+                            counterpart_name = _format_name_with_afm(counterpart_name_raw, afm_norm, max_len=128)
+                        else:
+                            counterpart_name = counterpart_name_raw
+                        new_suppliers[afm_norm] = {
+                            "custid": custid_val,
+                            "name": counterpart_name,
+                        }
+                        next_custid += 1
+                        issues.append({
+                            "code": "auto_created_supplier",
+                            "modal": False,
+                            "message": f"Δημιουργήθηκε αυτόματα νέος συναλλασσόμενος: CUSTID={custid_val}, AFM={afm_norm}, NAME={counterpart_name}",
+                        })
+
+                issues.append({
+                    "code":"apodeixakia_supplier_not_in_client_db_fallback",
+                    "modal":False,
+                    "message": f"Απόδειξη AA={aa}: apodeixakia_supplier={apod_supplier_id} δεν υπάρχει στο client_db. Χρησιμοποιήθηκε fallback CUSTID={custid_val}."
+                })
         else:
             custid_val = client_map["by_afm"].get(afm_norm)
             if custid_val is None:
@@ -666,7 +712,7 @@ def build_preview_rows_for_ui(
                     custid_val = new_suppliers[afm_norm]["custid"]
                 else:
                     custid_val = next_custid
-                    counterpart_name = str(
+                    counterpart_name_raw = str(
                         rec.get("Name_issuer")
                         or rec.get("issuerName")
                         or rec.get("issuer_name")
@@ -674,6 +720,11 @@ def build_preview_rows_for_ui(
                         or rec.get("name")
                         or f"Συναλλασσόμενος {afm_norm}"
                     ).strip()
+                    # Apply same formatting as receipts: "Name (AFM)" with 128 char limit
+                    if counterpart_name_raw and not counterpart_name_raw.startswith("Συναλλασσόμενος"):
+                        counterpart_name = _format_name_with_afm(counterpart_name_raw, afm_norm, max_len=128)
+                    else:
+                        counterpart_name = counterpart_name_raw
                     new_suppliers[afm_norm] = {
                         "custid": custid_val,
                         "name": counterpart_name,
@@ -816,7 +867,7 @@ def export_multiclient_strict(
         client_db=client_db,
         base_invoices_dir=base_invoices_dir,
         fiscal_year=fiscal_year)
-    nonfatal_codes = {"filtered_out_by_year", "auto_created_supplier"}
+    nonfatal_codes = {"filtered_out_by_year", "auto_created_supplier", "apodeixakia_supplier_not_in_client_db_fallback"}
     fatals = [i for i in preview["issues"] if str(i.get("code","")) not in nonfatal_codes]
     if fatals:
         return False, "", fatals

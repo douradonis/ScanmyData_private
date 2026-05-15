@@ -22,6 +22,46 @@ try:
 except ImportError:
     _analysis_einvoicing_gr = None
 
+try:
+    from scraper_receipt_analysis import scrape_iview as _analysis_iview
+except ImportError:
+    _analysis_iview = None
+
+try:
+    from scraper_receipt_analysis import scrape_vsgr as _analysis_vsgr
+except ImportError:
+    _analysis_vsgr = None
+
+try:
+    from scraper_receipt_analysis import scrape_primer as _analysis_primer
+except ImportError:
+    _analysis_primer = None
+
+try:
+    from scraper_receipt_analysis import scrape_s1ecos as _analysis_s1ecos
+except ImportError:
+    _analysis_s1ecos = None
+
+try:
+    from scraper_receipt_analysis import scrape_pegcloud as _analysis_pegcloud
+except ImportError:
+    _analysis_pegcloud = None
+
+try:
+    from scraper_receipt_analysis import scrape_simpleinvoicing as _analysis_simpleinvoicing
+except ImportError:
+    _analysis_simpleinvoicing = None
+
+try:
+    from scraper_receipt_analysis import scrape_eskap as _analysis_eskap
+except ImportError:
+    _analysis_eskap = None
+
+try:
+    from scraper_receipt_analysis import detect_and_scrape as _analysis_detect_and_scrape
+except ImportError:
+    _analysis_detect_and_scrape = None
+
 
 def scrape_einvoicing_gr(url, timeout=15, debug=False):
     """Proxy to the analysis variant so that detect_and_scrape in this module
@@ -33,13 +73,139 @@ def scrape_einvoicing_gr(url, timeout=15, debug=False):
     receipt-facing module should operate on the simplified schema.  The
     analysis version returns these for diagnostic purposes only.
     """
-    if not _analysis_einvoicing_gr:
+    if not _analysis_einvoicing_gr and not _analysis_detect_and_scrape:
         raise RuntimeError("scrape_einvoicing_gr implementation not available")
-    res = _analysis_einvoicing_gr(url, timeout=timeout, debug=debug)
+
+    if _analysis_detect_and_scrape:
+        res = _analysis_detect_and_scrape(url, timeout=timeout, debug=debug)
+    else:
+        res = _analysis_einvoicing_gr(url, timeout=timeout, debug=debug)
+
+    def _amount_to_float(raw):
+        if raw is None:
+            return None
+        s = str(raw).strip()
+        if not s:
+            return None
+        s = s.replace("€", "").replace("EUR", "")
+        s = re.sub(r"[^\d\.,\-]", "", s)
+        if not s:
+            return None
+        if "," in s and "." in s:
+            if s.rfind(",") > s.rfind("."):
+                s = s.replace(".", "")
+                s = s.replace(",", ".")
+            else:
+                s = s.replace(",", "")
+        elif "," in s:
+            s = s.replace(",", ".")
+        try:
+            return float(s)
+        except Exception:
+            return None
+
+    def _single_vat_gross(vmap):
+        if not isinstance(vmap, dict):
+            return None
+        rows = [(k, v) for k, v in vmap.items() if k != "__inferred__" and isinstance(v, dict)]
+        if len(rows) != 1:
+            return None
+        return rows[0][1].get("gross_amount")
+
+    if isinstance(res, dict):
+        mk = str(res.get("MARK") or "").strip()
+        m = MARK_RE.search(mk)
+        res["MARK"] = m.group(0) if m else None
+
+        total_v = _amount_to_float(res.get("total_amount"))
+        gross_raw = _single_vat_gross(res.get("vat_analysis"))
+        gross_v = _amount_to_float(gross_raw)
+        if gross_raw and (total_v is None or gross_v is None or abs(total_v - gross_v) > 0.06):
+            res["total_amount"] = str(gross_raw)
+
+        text_blob = " ".join(str(v) for v in res.values() if isinstance(v, str))
+        if re.search(r"τιμολογ|invoice|credit\s*note|πιστωτικ", text_blob, re.I):
+            res["is_invoice"] = True
+        res.pop("vat_analysis", None)
+        res.pop("vat_analysis_inferred", None)
+    return res
+
+
+def _strip_analysis_fields(res):
     if isinstance(res, dict):
         res.pop("vat_analysis", None)
         res.pop("vat_analysis_inferred", None)
     return res
+
+
+def scrape_iview(url, timeout=15, debug=False):
+    if not _analysis_iview and not _analysis_detect_and_scrape:
+        raise RuntimeError("scrape_iview implementation not available")
+    if _analysis_iview:
+        res = _analysis_iview(url, timeout=timeout, debug=debug)
+    else:
+        res = _analysis_detect_and_scrape(url, timeout=timeout, debug=debug)
+    return _strip_analysis_fields(res)
+
+
+def scrape_vsgr(url, timeout=15, debug=False):
+    if not _analysis_vsgr and not _analysis_detect_and_scrape:
+        raise RuntimeError("scrape_vsgr implementation not available")
+    if _analysis_vsgr:
+        res = _analysis_vsgr(url, timeout=timeout, debug=debug)
+    else:
+        res = _analysis_detect_and_scrape(url, timeout=timeout, debug=debug)
+    return _strip_analysis_fields(res)
+
+
+def scrape_primer(url, timeout=15, debug=False):
+    if not _analysis_primer and not _analysis_detect_and_scrape:
+        raise RuntimeError("scrape_primer implementation not available")
+    if _analysis_primer:
+        res = _analysis_primer(url, timeout=timeout, debug=debug)
+    else:
+        res = _analysis_detect_and_scrape(url, timeout=timeout, debug=debug)
+    return _strip_analysis_fields(res)
+
+
+def scrape_s1ecos(url, timeout=15, debug=False):
+    if not _analysis_s1ecos and not _analysis_detect_and_scrape:
+        raise RuntimeError("scrape_s1ecos implementation not available")
+    if _analysis_s1ecos:
+        res = _analysis_s1ecos(url, timeout=timeout, debug=debug)
+    else:
+        res = _analysis_detect_and_scrape(url, timeout=timeout, debug=debug)
+    return _strip_analysis_fields(res)
+
+
+def scrape_pegcloud(url, timeout=15, debug=False):
+    if not _analysis_pegcloud and not _analysis_detect_and_scrape:
+        raise RuntimeError("scrape_pegcloud implementation not available")
+    if _analysis_pegcloud:
+        res = _analysis_pegcloud(url, timeout=timeout, debug=debug)
+    else:
+        res = _analysis_detect_and_scrape(url, timeout=timeout, debug=debug)
+    return _strip_analysis_fields(res)
+
+
+def scrape_simpleinvoicing(url, timeout=15, debug=False):
+    if not _analysis_simpleinvoicing and not _analysis_detect_and_scrape:
+        raise RuntimeError("scrape_simpleinvoicing implementation not available")
+    if _analysis_simpleinvoicing:
+        res = _analysis_simpleinvoicing(url, timeout=timeout, debug=debug)
+    else:
+        res = _analysis_detect_and_scrape(url, timeout=timeout, debug=debug)
+    return _strip_analysis_fields(res)
+
+
+def scrape_eskap(url, timeout=15, debug=False):
+    if not _analysis_eskap and not _analysis_detect_and_scrape:
+        raise RuntimeError("scrape_eskap implementation not available")
+    if _analysis_eskap:
+        res = _analysis_eskap(url, timeout=timeout, debug=debug)
+    else:
+        res = _analysis_detect_and_scrape(url, timeout=timeout, debug=debug)
+    return _strip_analysis_fields(res)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -67,6 +233,7 @@ def _normalize_url(url: str) -> str:
     if not url:
         return url
     url = str(url).strip()
+    url = re.sub(r'\s+', '', url)
     # Διόρθωση λάθους protocol: https:/ → https://
     url = re.sub(r'^(https?):/([^/])', r'\1://\2', url)
     return url
@@ -507,8 +674,6 @@ def scrape_www1_aade(url, timeout=15, debug=False):
             res["progressive_aa"] = val.strip()
         elif re.search(r"Είδος παραστατικού", label, re.I):
             res["doc_type"] = val.strip()
-            if re.search(r"τιμολόγι", val, re.I):
-                res["is_invoice"] = True
         # MARK could be absent; try rows or paragraphs earlier
         if not res["MARK"]:
             m_mark = MARK_RE.search(val)
@@ -523,6 +688,8 @@ def scrape_www1_aade(url, timeout=15, debug=False):
         m = re.search(r"€\s*([0-9\.,]+)", html)
         if m:
             res["total_amount"] = _clean_amount_to_comma(m.group(1))
+    # Hard override for this source.
+    res["is_invoice"] = False
     return res
 
 def scrape_mydatapi(url, timeout=12, debug=False):
@@ -1092,13 +1259,22 @@ def scrape_epsilon(url, timeout=20, debug=False):
     MARK_RE = re.compile(r"\b\d{15}\b")
     NON_INVOICE_CODES = {"11.1", "11.2", "13.31"}  # όχι τιμολόγια
 
-    # --- ΝΕΟ: Κανονικοποίηση fd → DocViewer ---
+    # --- ΝΕΟ: Κανονικοποίηση fd/FileDocument/Get → DocViewer ---
     def _normalize_epsilon_url_to_docviewer(u: str) -> str:
         try:
             p = urlparse(u)
+            base = f"{p.scheme}://{p.netloc}" if p.scheme and p.netloc else u
             # αν είναι ήδη DocViewer, μην πειράξεις τίποτα
             if "/DocViewer/" in p.path:
                 return u
+            # αποδοχή μορφής .../FileDocument/Get/<uuid>
+            m_doc = re.search(r"/filedocument/get/([0-9a-fA-F\-]{32,36})", p.path or "", flags=re.I)
+            if m_doc:
+                token = m_doc.group(1)
+                hexonly = re.sub(r"[^0-9a-fA-F]", "", token)
+                if len(hexonly) == 32:
+                    docid = f"{hexonly[0:8]}-{hexonly[8:12]}-{hexonly[12:16]}-{hexonly[16:20]}-{hexonly[20:32]}"
+                    return f"{base}/DocViewer/{docid}"
             # πιάσε το token μετά το /fd/
             m = re.search(r"/fd/([^/?#]+)", p.path, flags=re.I)
             if not m:
@@ -1113,7 +1289,7 @@ def scrape_epsilon(url, timeout=20, debug=False):
             # βάλε παύλες: 8-4-4-4-12
             docid = f"{hexonly[0:8]}-{hexonly[8:12]}-{hexonly[12:16]}-{hexonly[16:20]}-{hexonly[20:32]}"
             new_path = f"/DocViewer/{docid}"
-            return f"{p.scheme}://{p.netloc}{new_path}"
+            return f"{base}{new_path}"
         except Exception:
             return u
 
@@ -1875,14 +2051,17 @@ def detect_and_scrape(url, timeout=20, debug=False):
     """
     Convenience wrapper: detect source from URL and call appropriate scraper.
     """
-    domain = urlparse(url).netloc.lower()
-    if "www1.aade.gr" in domain:
+    url = _normalize_url(url)
+    parsed = urlparse(url)
+    domain = (parsed.netloc or "").lower()
+    path_l = (parsed.path or "").lower()
+    if "www1.aade.gr" in domain or "www1.gsis.gr" in domain:
         return scrape_www1_aade(url, timeout=timeout, debug=debug)
     if "mydatapi.aade.gr" in domain or "mydata.aade.gr" in domain:
         return scrape_mydatapi(url, timeout=timeout, debug=debug)
     if "wedoconnect" in domain:
         return scrape_wedoconnect(url, timeout=timeout, debug=debug)
-    if "einvoice.s1ecos.gr" in domain:
+    if "einvoice.s1ecos.gr" in domain or "s1ecos.gr" in domain:
         return scrape_s1ecos(url, timeout=timeout, debug=debug)
     if "impact.gr" in domain or "einvoice.impact" in domain:
         return scrape_impact(url, timeout=timeout, debug=debug)
@@ -1890,6 +2069,8 @@ def detect_and_scrape(url, timeout=20, debug=False):
         return scrape_epsilon(url, timeout=timeout, debug=debug)
     if "parochos.gr" in domain:
         return scrape_epsilon(url, timeout=timeout, debug=debug)  # Χρησιμοποιεί το ίδιο API
+    if "/filedocument/get/" in path_l or "/docviewer/" in path_l or "/fd/" in path_l:
+        return scrape_epsilon(url, timeout=timeout, debug=debug)
     if "pegcloud.io" in domain or "pegcloud" in domain:
         return scrape_pegcloud(url, timeout=timeout, debug=debug)
     if "e-invoicing.gr" in domain:
@@ -1898,6 +2079,12 @@ def detect_and_scrape(url, timeout=20, debug=False):
         return scrape_simpleinvoicing(url, timeout=timeout, debug=debug)
     if "eskap.gr" in domain or "eskap" in domain:
         return scrape_eskap(url, timeout=timeout, debug=debug)
+    if "mydata.primer.gr" in domain or "primer.gr" in domain:
+        return scrape_primer(url, timeout=timeout, debug=debug)
+    if "iview.gr" in domain:
+        return scrape_iview(url, timeout=timeout, debug=debug)
+    if "vs.gr" in domain:
+        return scrape_vsgr(url, timeout=timeout, debug=debug)
     if "megasoft" in domain or "invoicelink" in domain:
         try:
             from scraper_receipt_analysis import scrape_megasoft as _scrape_megasoft

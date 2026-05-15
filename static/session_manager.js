@@ -10,11 +10,16 @@
 (function() {
   'use strict';
 
+  const serverTimeoutSeconds = Number(window.SESSION_TIMEOUT_SECONDS || 0);
+  const resolvedTimeoutMs = Number.isFinite(serverTimeoutSeconds) && serverTimeoutSeconds > 0
+    ? serverTimeoutSeconds * 1000
+    : 10 * 60 * 1000;
+
   // Configuration
   const CONFIG = {
-    INACTIVITY_TIMEOUT: 15 * 60 * 1000, // 15 minutes in milliseconds
-    CHECK_INTERVAL: 20 * 1000, // Check every 20 seconds
-    LOGOUT_WARNING_TIME: 2 * 60 * 1000, // Warn 2 minutes before logout
+    INACTIVITY_TIMEOUT: resolvedTimeoutMs,
+    CHECK_INTERVAL: 5 * 1000, // Check every 5 seconds
+    LOGOUT_WARNING_TIME: Math.min(30 * 1000, Math.max(10 * 1000, Math.floor(resolvedTimeoutMs * 0.2))),
     STORAGE_KEY: 'fbp_session_activity',
     STORAGE_KEY_TAB: 'fbp_session_tab_id',
     LOGOUT_ENDPOINT: '/auth/api/logout'
@@ -30,7 +35,14 @@
   /**
    * Initialize session manager
    */
+  const IS_LOGGED_IN = window.IS_LOGGED_IN === true || window.IS_LOGGED_IN === 'true';
+
   function init() {
+    if (!IS_LOGGED_IN) {
+      console.info('SessionManager disabled for unauthenticated users.');
+      return;
+    }
+
     // Generate unique tab ID
     tabId = generateTabId();
     
@@ -46,7 +58,7 @@
     // Detect tab/browser close
     attachUnloadListener();
 
-    console.info('SessionManager initialized. Inactivity timeout: 15 minutes');
+    console.info('SessionManager initialized. Inactivity timeout(ms):', CONFIG.INACTIVITY_TIMEOUT);
   }
 
   /**
@@ -168,7 +180,7 @@
         </div>
         <div class="ml-3">
           <p class="text-sm font-medium text-yellow-800">
-            Θα αποσυνδεθείτε λόγω αδράνειας σε 2 λεπτά.
+            Θα αποσυνδεθείτε λόγω αδράνειας σε περίπου 30 δευτερόλεπτα.
           </p>
           <p class="text-xs text-yellow-700 mt-1">
             Κάντε κάποια ενέργεια για να παραμείνετε συνδεδεμένος.
@@ -243,6 +255,14 @@
     isLoggingOut = true;
 
     console.info('Performing logout. Reason: ' + reason);
+      const redirectTo = reason === 'inactivity'
+        ? '/login?session_expired=true'
+        : '/login';
+
+    // Absolute fallback: never stay logged in if logout request hangs/fails.
+    const forceRedirectTimer = setTimeout(() => {
+      try { window.location.href = redirectTo; } catch(_) {}
+    }, 2500);
 
     try {
       const response = await fetch(CONFIG.LOGOUT_ENDPOINT, {
@@ -256,18 +276,17 @@
       });
 
       if (response.ok) {
-        // Redirect to login page
-        const redirectTo = reason === 'inactivity' 
-          ? '/auth/login?session_expired=true' 
-          : '/auth/login';
-        window.location.href = redirectTo;
+        clearTimeout(forceRedirectTimer);
+        window.location.replace(redirectTo + '&refresh=' + Date.now());
       } else {
         console.error('Logout request failed:', response.status);
+        clearTimeout(forceRedirectTimer);
+        window.location.replace(redirectTo + '&refresh=' + Date.now());
       }
     } catch (e) {
       console.error('Failed to logout:', e);
-      // Force redirect anyway
-      window.location.href = '/auth/login';
+      clearTimeout(forceRedirectTimer);
+      window.location.replace(redirectTo + '&refresh=' + Date.now());
     }
   }
 

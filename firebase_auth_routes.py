@@ -4,6 +4,8 @@ Routes for signup, login, logout, password reset via Firebase
 """
 
 import logging
+import threading
+import time
 from flask import Blueprint, render_template, request, redirect, url_for, flash, jsonify, session, current_app
 from flask_login import login_user, logout_user, current_user, login_required
 from datetime import datetime, timezone
@@ -16,6 +18,46 @@ import secrets
 import utils
 
 logger = logging.getLogger(__name__)
+
+_GROUP_SYNC_LOCK = threading.Lock()
+_GROUP_SYNC_LAST_TS = {}
+_GROUP_SYNC_COOLDOWN_SECONDS = 45.0
+
+
+def _schedule_user_group_sync(user_id: int, uid: str, reason: str = '') -> bool:
+    """Run Firestore->local group sync in background with a short cooldown."""
+    if not user_id or not uid:
+        return False
+
+    now = time.monotonic()
+    key = f"{user_id}:{uid}"
+    with _GROUP_SYNC_LOCK:
+        last_ts = float(_GROUP_SYNC_LAST_TS.get(key, 0.0) or 0.0)
+        if (now - last_ts) < _GROUP_SYNC_COOLDOWN_SECONDS:
+            return False
+        _GROUP_SYNC_LAST_TS[key] = now
+
+    def _worker(target_user_id: int, target_uid: str, target_reason: str):
+        try:
+            firebase_config.sync_user_groups_from_firestore(target_user_id, target_uid)
+            logger.info(
+                'Async Firestore group sync completed user_id=%s uid=%s reason=%s',
+                target_user_id,
+                target_uid,
+                target_reason,
+            )
+        except Exception as exc:
+            logger.warning(
+                'Async Firestore group sync failed user_id=%s uid=%s reason=%s error=%s',
+                target_user_id,
+                target_uid,
+                target_reason,
+                exc,
+            )
+
+    th = threading.Thread(target=_worker, args=(int(user_id), str(uid), reason or ''), daemon=True)
+    th.start()
+    return True
 
 firebase_auth_bp = Blueprint('firebase_auth', __name__, url_prefix='/firebase-auth')
 
@@ -448,14 +490,27 @@ def firebase_login():
         except Exception:
             pass
         
-        # Sync user's groups from Firestore to local DB
-        # This ensures the user's group memberships are up-to-date
+        # Sync groups with a fast-path: block only when local memberships are missing,
+        # otherwise refresh in background to keep login responsive.
         try:
-            firebase_config.sync_user_groups_from_firestore(user.id, uid)
-            logger.info('User %s groups synced from Firestore on login', uid)
+            local_group_count = len(list(getattr(user, 'groups', []) or []))
+        except Exception:
+            local_group_count = 0
+
+        blocking_sync_attempted = False
+        if local_group_count == 0:
+            blocking_sync_attempted = True
+            try:
+                firebase_config.sync_user_groups_from_firestore(user.id, uid)
+                logger.info('User %s groups synced from Firestore on login (blocking, no local groups)', uid)
+            except Exception as e:
+                logger.error('Failed blocking group sync for user %s: %s', uid, e)
+
+        # Always schedule a background reconciliation pass.
+        try:
+            _schedule_user_group_sync(user.id, uid, reason='firebase_login')
         except Exception as e:
-            logger.error('Failed to sync groups from Firestore for user %s: %s', uid, e)
-            # Continue anyway - syncing is not critical
+            logger.warning('Could not schedule async group sync for user %s: %s', uid, e)
         
         # Log the login with enhanced details
         try:
@@ -484,21 +539,37 @@ def firebase_login():
             {'email': firebase_email}
         )
         
-        # Handle active group selection after login
-        # Always check user's groups and set/clear active_group appropriately
-        user_groups = list(getattr(user, 'groups', []) or [])
+        # Handle active group selection after login.
+        # Query memberships directly to avoid stale relationship cache right after sync.
+        try:
+            user_groups = (
+                Group.query
+                .join(UserGroup, UserGroup.group_id == Group.id)
+                .filter(UserGroup.user_id == user.id)
+                .all()
+            )
+        except Exception:
+            try:
+                db.session.expire(user, ['groups'])
+            except Exception:
+                pass
+            user_groups = list(getattr(user, 'groups', []) or [])
         
         if len(user_groups) == 0:
             # No groups: clear active_group and redirect to list
             session.pop('active_group', None)
+            if blocking_sync_attempted:
+                logger.warning('User %s still has 0 local groups after blocking sync; redirecting to group selection.', uid)
             flash('Δεν έχεις ακόμη αντιστοιχιστεί σε ομάδα.', 'warning')
             return redirect(url_for('auth.list_groups'))
         elif len(user_groups) == 1:
             # Exactly one group: auto-set as active and continue
             session['active_group'] = user_groups[0].name
             flash(f'Καλώς ήρθατε!', 'success')
-            # Start lazy-pull via sync page
-            return redirect(url_for('firebase_auth.sync_start_pull', group=session['active_group']))
+            # Optional lazy-pull via sync page (admin-toggleable policy)
+            if utils.firebase_sync_login_logout_enabled():
+                return redirect(url_for('firebase_auth.sync_start_pull', group=session['active_group']))
+            return redirect(url_for('home'))
         else:
             # Multiple groups: redirect to list to select one
             session.pop('active_group', None)  # Clear any stale active_group
@@ -553,11 +624,10 @@ def firebase_logout():
         {'email': email}
     )
     
-    # Instead of doing a blocking sync here, redirect to a small page that
-    # performs the push with a progress modal and then completes logout.
+    # Optional push-on-logout flow (admin-toggleable policy).
     try:
         active_group_name = session.get('active_group')
-        if active_group_name:
+        if active_group_name and utils.firebase_sync_login_logout_enabled():
             # redirect to the sync page which will call the push API and then logout
             return redirect(url_for('firebase_auth.sync_start_push', group=active_group_name))
     except Exception:
@@ -771,7 +841,7 @@ def api_sync_pull():
     if not group:
         return jsonify({'success': False, 'error': 'no_group_provided'}), 400
     try:
-        ok = firebase_config.firebase_pull_group_to_local(group)
+        ok = firebase_config.firebase_pull_group_to_local(group, force=True)
         return jsonify({'success': bool(ok)})
     except Exception as e:
         logger.exception('api_sync_pull failed')

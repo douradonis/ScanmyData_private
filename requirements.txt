@@ -24,18 +24,20 @@ firebase-admin>=6.0
 google-cloud-firestore>=2.14.0
 cryptography>=41.0
 pycryptodome>=3.18
+pyzipper>=0.3.6
 resend>=0.7.0
 zeep>=4.2.1
 
 selenium==4.39.0
 webdriver-manager==4.0.2
-# Headless browser fallback for dynamic invoice providers (SimpleInvoicing, Megasoft)
+# Headless browser fallback for dynamic invoice providers (SimpleInvoicing, Megasoft, e-invoicing.gr fallback)
 playwright==1.58.0
 
 discord.py>=2.5.0
 psutil>=5.9.0
 
-# NOTE: Playwright needs browser binaries and system libraries to run (for JS-based fallback / SimpleInvoicing / Megasoft).
-# After installing Python deps, run:
+# NOTE: requirements.txt installs only the Python package.
+# Playwright browser binaries are installed by Docker build (see Dockerfile).
+# For non-docker installs, run:
 #   python -m playwright install chromium
 #   sudo apt-get install -y libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 libdrm2 libxss1 libgbm1 libnss3 libx11-xcb1 libxcomposite1 libxdamage1 libxrandr2 libgtk-3-0t64 libasound2t64

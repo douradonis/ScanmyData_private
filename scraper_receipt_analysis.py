@@ -3,12 +3,13 @@
 import re
 import json
 import base64
+import html as html_lib
 import requests
 import urllib.request
 import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
 from datetime import datetime
-from urllib.parse import urljoin, urlparse, parse_qs, unquote, quote
+from urllib.parse import urljoin, urlparse, parse_qs, unquote, quote, urlencode
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -34,6 +35,7 @@ def _normalize_url(url: str) -> str:
     if not url:
         return url
     url = str(url).strip()
+    url = re.sub(r'\s+', '', url)
     # Διόρθωση λάθους protocol: https:/ → https://
     url = re.sub(r'^(https?):/([^/])', r'\1://\2', url)
     return url
@@ -464,6 +466,7 @@ def _extract_vat_breakdown_from_xml_root(root):
         return result
     return {}
 
+
 def _extract_vat_breakdown_from_html(soup, html_text=""):
     if soup is None:
         return {}
@@ -494,10 +497,46 @@ def _extract_vat_breakdown_from_html(soup, html_text=""):
         if gross_val is not None:
             row["gross"] += gross_val
 
+    # Explicit PEPPOL BG-23 parsing (BT-116/BT-117/BT-119), common on vs.gr.
+    # This avoids false rates from BT header codes (e.g. BT-50).
+    for table in soup.find_all("table"):
+        table_text = table.get_text(" ", strip=True)
+        if not re.search(r"BG-23|BT-116|BT-117|BT-119", table_text, re.I):
+            continue
+
+        for tr in table.find_all("tr"):
+            cells = [c.get_text(" ", strip=True) for c in tr.find_all(["th", "td"])]
+            if len(cells) < 3:
+                continue
+            row_txt = " ".join(cells)
+
+            # Skip header rows/labels.
+            if re.search(r"BT-116|BT-117|BT-118|BT-119|φορολογητέο|ποσό\s*φόρου|συντελεστής|κωδικός\s*κατηγορίας", row_txt, re.I):
+                continue
+
+            net_val = _amount_to_float(cells[0])
+            vat_val = _amount_to_float(cells[1]) if len(cells) > 1 else None
+            rate_val = _amount_to_float(cells[3]) if len(cells) > 3 else None
+
+            if rate_val is None:
+                m_rate = re.search(r"(\d{1,2}(?:[\.,]\d+)?)\s*%", row_txt)
+                if m_rate:
+                    rate_val = _amount_to_float(m_rate.group(1))
+
+            if net_val is None or vat_val is None or rate_val is None:
+                continue
+            if not (0 <= rate_val <= 100):
+                continue
+
+            _add_row(rate_val, net_val, vat_val, net_val + vat_val)
+
     # Table-based extraction (best effort)
     for tr in soup.find_all("tr"):
         txt = tr.get_text(" ", strip=True)
         if not txt:
+            continue
+        if re.search(r"\bBT-\d+\b", txt, re.I):
+            # Header/code rows in PEPPOL tables can inject fake rates (e.g. BT-50).
             continue
         low = txt.lower()
         if "%" not in txt:
@@ -540,6 +579,8 @@ def _extract_vat_breakdown_from_html(soup, html_text=""):
                 if len(cells) < 2:
                     continue
                 row_txt = " ".join(cells)
+                if re.search(r"\bBT-\d+\b", row_txt, re.I):
+                    continue
                 # skip header-like rows
                 if re.search(r"καθαρ|ποσό|ανάλυση|φ\.?π\.?α\.?|vat", row_txt, re.I) and not re.search(r"\d", row_txt):
                     continue
@@ -726,12 +767,166 @@ def _ensure_vat_analysis(out_dict):
     if isinstance(out_dict, dict) and "vat_analysis_inferred" not in out_dict:
         out_dict["vat_analysis_inferred"] = False
 
+def _reconcile_single_rate_vat_with_total(target):
+    if not isinstance(target, dict):
+        return
+    vmap = target.get("vat_analysis")
+    if not isinstance(vmap, dict) or not vmap:
+        return
+    total_val = _amount_to_float(target.get("total_amount"))
+    if total_val is None or total_val <= 0:
+        return
+
+    rows = [(k, v) for k, v in vmap.items() if k != "__inferred__" and isinstance(v, dict)]
+    if len(rows) != 1:
+        return
+
+    rate_key, row = rows[0]
+    gross_val = _amount_to_float(row.get("gross_amount"))
+    if gross_val is None:
+        net_val = _amount_to_float(row.get("net_amount"))
+        vat_val = _amount_to_float(row.get("vat_amount"))
+        if net_val is not None and vat_val is not None:
+            gross_val = net_val + vat_val
+
+    if gross_val is None:
+        return
+
+    # Reconcile even for small totals: a 1 EUR tolerance is too loose for
+    # low-value invoices/credit notes.
+    if abs(gross_val - total_val) <= max(0.06, total_val * 0.02):
+        return
+
+    try:
+        rate_num = float(str(rate_key).replace(",", "."))
+    except Exception:
+        return
+    if rate_num < 0 or rate_num > 100:
+        return
+
+    denom = 1.0 + (rate_num / 100.0)
+    if denom <= 0:
+        return
+
+    net_new = total_val / denom
+    vat_new = total_val - net_new
+    vmap[rate_key] = {
+        "net_amount": _float_to_comma(net_new),
+        "vat_amount": _float_to_comma(vat_new),
+        "gross_amount": _float_to_comma(total_val),
+    }
+    target["vat_analysis_inferred"] = True
+
+
+def _infer_vat_analysis_from_total(target):
+    """Best-effort fallback when source page has total but no VAT rows.
+
+    This intentionally marks output as inferred.
+    """
+    if not isinstance(target, dict):
+        return
+    if isinstance(target.get("vat_analysis"), dict) and target.get("vat_analysis"):
+        return
+
+    total_val = _amount_to_float(target.get("total_amount"))
+    if total_val is None or total_val <= 0:
+        return
+
+    doc_text = " ".join(
+        str(x or "")
+        for x in (target.get("doc_type"), target.get("source"), target.get("progressive_aa"))
+    )
+
+    # For retail receipt-like docs (e.g. 11.1 / ΑΛΠ) default to 24% as
+    # a practical fallback only when nothing explicit is available.
+    if not re.search(r"\b11\.1\b|αλπ|απόδειξ|αποδειξ|λιανικ|receipt", doc_text, re.I):
+        return
+
+    rate_key = "24"
+    denom = 1.0 + (float(rate_key) / 100.0)
+    net_val = total_val / denom
+    vat_val = total_val - net_val
+
+    target["vat_analysis"] = {
+        rate_key: {
+            "net_amount": _float_to_comma(net_val),
+            "vat_amount": _float_to_comma(vat_val),
+            "gross_amount": _float_to_comma(total_val),
+        }
+    }
+    target["vat_analysis_inferred"] = True
+
+def _normalize_mark_value(value):
+    m = MARK_RE.search(str(value or "").strip())
+    return m.group(0) if m else None
+
+def _normalize_invoice_flag(result):
+    if not isinstance(result, dict):
+        return
+    source_text = str(result.get("source") or "").strip().lower()
+    # AADE/GSIS cash-register verifier pages are retail receipts.
+    if source_text in {"aade_www1", "aade_gsis_www1"}:
+        result["is_invoice"] = False
+        return
+    # Hard rule requested: if "τιμολόγιο" appears anywhere in textual
+    # result fields, always mark as invoice.
+    text_blob = " ".join(str(v) for v in result.values() if isinstance(v, str))
+    if re.search(r"τιμολογ", text_blob, re.I):
+        result["is_invoice"] = True
+        return
+
+    doc_type_text = str(result.get("doc_type") or "")
+    if not doc_type_text:
+        return
+    low = doc_type_text.lower()
+    if re.search(r"απόδειξ|αποδειξ|λιανικ|receipt", low, re.I):
+        result["is_invoice"] = False
+        return
+    if re.search(r"τιμολογ|invoice|credit\s*note|πιστωτικ", low, re.I):
+        result["is_invoice"] = True
+
+def _finalize_detect_result(result):
+    if isinstance(result, dict):
+        _ensure_vat_analysis(result)
+        _reconcile_single_rate_vat_with_total(result)
+        result["MARK"] = _normalize_mark_value(result.get("MARK"))
+        _normalize_invoice_flag(result)
+    return result
+
 def _text_of(el):
     if not el:
         return ""
     if hasattr(el, "get_text"):
         return el.get_text(" ", strip=True)
     return str(el).strip()
+
+def _clean_issuer_name(raw):
+    if raw is None:
+        return None
+    text = re.sub(r"\s+", " ", str(raw)).strip(" \t\r\n:-")
+    if not text:
+        return None
+    low = text.lower()
+    noise_markers = [
+        "ευχαριστούμε που χρησιμοποιείτε τις υπηρεσίες",
+        "αφμ εκδότη",
+        "διεύθυνση εκδότη",
+        "επωνυμία πελάτη",
+        "αφμ πελάτη",
+        "επάγγελμα",
+    ]
+    if sum(marker in low for marker in noise_markers) >= 2:
+        return None
+    if low in {
+        "εκδότη",
+        "επωνυμία",
+        "επωνυμία εκδότη",
+        "supplier",
+        "seller",
+        "issuer",
+    }:
+        return None
+    return text
 
 def _extract_input_or_text(soup, *ids_or_names):
     for key in ids_or_names:
@@ -776,6 +971,47 @@ def _extract_mydatapi_url_from_text(text, base_url=None):
             else:
                 continue
         return candidate
+    return None
+
+def _extract_xml_fragment(text):
+    if not text:
+        return None
+    patterns = [
+        r'(<\?xml[^<]*<InvoicesDoc[\s\S]*?</InvoicesDoc>)',
+        r'(<\?xml[^<]*<invoice[\s\S]*?</invoice>)',
+        r'(<InvoicesDoc[\s\S]*?</InvoicesDoc>)',
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, flags=re.I)
+        if m:
+            return m.group(1)
+    return None
+
+def _extract_vat_from_primer_xml(root, seller_vat=None):
+    candidates = []
+    for el in root.iter():
+        tag = el.tag.split('}')[-1].lower()
+        if tag in ('vatnumber', 'vat', 'afm', 'companyid'):
+            txt = (el.text or '').strip()
+            if txt:
+                m = VAT_RE.search(txt)
+                if m:
+                    candidates.append(m.group(0))
+    if seller_vat:
+        for vat in candidates:
+            if vat != seller_vat:
+                return vat
+    if candidates:
+        return candidates[-1]
+    return None
+
+def _extract_mark_from_primer_xml(root):
+    for el in root.iter():
+        tag = el.tag.split('}')[-1].lower()
+        if tag == 'mark':
+            txt = (el.text or '').strip()
+            if txt and re.fullmatch(r'\d{15}', txt):
+                return txt
     return None
 
 def _extract_from_jsonld(soup):
@@ -906,8 +1142,6 @@ def scrape_www1_aade(url, timeout=15, debug=False):
             res["progressive_aa"] = val.strip()
         elif re.search(r"Είδος παραστατικού", label, re.I):
             res["doc_type"] = val.strip()
-            if re.search(r"τιμολόγι", val, re.I):
-                res["is_invoice"] = True
         # MARK could be absent; try rows or paragraphs earlier
         if not res["MARK"]:
             m_mark = MARK_RE.search(val)
@@ -925,6 +1159,8 @@ def scrape_www1_aade(url, timeout=15, debug=False):
         m = re.search(r"€\s*([0-9\.,]+)", html)
         if m:
             res["total_amount"] = _clean_amount_to_comma(m.group(1))
+    # Hard override for this source.
+    res["is_invoice"] = False
     return res
 
 def scrape_mydatapi(url, timeout=12, debug=False):
@@ -1000,7 +1236,7 @@ def scrape_mydatapi(url, timeout=12, debug=False):
                 nxt = p.find_next(["input","td","span"])
                 if nxt:
                     iname = nxt.get("value") or nxt.get_text(" ", strip=True)
-    out["issuer_name"] = (iname.strip() if iname else None)
+    out["issuer_name"] = _clean_issuer_name(iname)
     # progressive aa
     paa = _extract_input_or_text(soup, "saa", "s_aa", "saa", "saa_input", "s_aa")
     if not paa:
@@ -1037,10 +1273,46 @@ def scrape_mydatapi(url, timeout=12, debug=False):
                     comp = obj.get("seller") or obj.get("provider") or obj.get("sellerOrganization")
                     if isinstance(comp, dict):
                         iname_c = comp.get("name") or comp.get("legalName")
-                        if iname_c: out["issuer_name"] = iname_c
+                        if iname_c:
+                            out["issuer_name"] = _clean_issuer_name(iname_c)
             except Exception:
                 continue
+
+    page_text = soup.get_text(" ", strip=True)
+    if not out["doc_type"]:
+        m_doc = re.search(r"(?:Είδος\s*Παραστατικού|Type|Document|Invoice\s*Type)[\s:]*([^\n<]+)", page_text, re.I)
+        if m_doc:
+            out["doc_type"] = m_doc.group(1).strip()
+    if not out["total_amount"]:
+        m_total = re.search(r"(?:Σύνολο|Συνολική αξία|Συνολικό ποσό|Πληρωτέο ποσό|Amount\s*Due|Total)[\s:]*€?\s*([0-9][0-9\.,]+)", page_text, re.I)
+        if m_total:
+            out["total_amount"] = _clean_amount_to_comma(m_total.group(1))
+    if not out["issue_date"]:
+        m_date = re.search(r"(?:Ημερομηνία.*Έκδοσης|Ημερομηνία|IssueDate|DateIssued|Issue\s*Date)[\s:]*([0-9]{1,2}[\/\-\.][0-9]{1,2}[\/\-\.][0-9]{4}|[0-9]{4}-[0-9]{2}-[0-9]{2})", page_text, re.I)
+        if m_date:
+            out["issue_date"] = _norm_date_to_ddmmyyyy(m_date.group(1))
+    if not out["issuer_vat"]:
+        m_vat = re.search(r"Α\.?Φ\.?Μ\.?[:\s]*([0-9]{9})", page_text, re.I)
+        if m_vat:
+            out["issuer_vat"] = m_vat.group(1)
+    if not out["issuer_name"]:
+        m_name = re.search(r"(?:Επωνυμία|Supplier|Seller|Issuer)[\s:]+([^\n<]+)", page_text, re.I)
+        if m_name:
+            out["issuer_name"] = _clean_issuer_name(m_name.group(1))
+    if not out["progressive_aa"]:
+        m_aa = re.search(r"(?:Αρ\.\?\s*Παραστατικού|Προοδευτικ(?:ός|ο)\s*α\/?α|Invoice\s*No|ΑΑ)[\s:]*([A-Za-z0-9\-_/]+)", page_text, re.I)
+        if m_aa:
+            out["progressive_aa"] = m_aa.group(1).strip()
+    if not out["MARK"]:
+        m_mark = MARK_RE.search(page_text)
+        if m_mark:
+            out["MARK"] = m_mark.group(0)
+
+    out["issuer_name"] = _clean_issuer_name(out.get("issuer_name"))
+
     _merge_vat_analysis(out, _extract_vat_breakdown_from_html(soup, html))
+    _reconcile_single_rate_vat_with_total(out)
+    _infer_vat_analysis_from_total(out)
 
     if out["doc_type"] and re.search(r"τιμολό?γιο|τιμολογιο|τιμολόγιο", out["doc_type"], re.I):
         out["is_invoice"] = True
@@ -1581,13 +1853,22 @@ def scrape_epsilon(url, timeout=20, debug=False):
     MARK_RE = re.compile(r"\b\d{15}\b")
     NON_INVOICE_CODES = {"11.1", "11.2", "13.31"}  # όχι τιμολόγια
 
-    # --- ΝΕΟ: Κανονικοποίηση fd → DocViewer ---
+    # --- ΝΕΟ: Κανονικοποίηση fd/FileDocument/Get → DocViewer ---
     def _normalize_epsilon_url_to_docviewer(u: str) -> str:
         try:
             p = urlparse(u)
+            base = f"{p.scheme}://{p.netloc}" if p.scheme and p.netloc else u
             # αν είναι ήδη DocViewer, μην πειράξεις τίποτα
             if "/DocViewer/" in p.path:
                 return u
+            # αποδοχή μορφής .../FileDocument/Get/<uuid>
+            m_doc = re.search(r"/filedocument/get/([0-9a-fA-F\-]{32,36})", p.path or "", flags=re.I)
+            if m_doc:
+                token = m_doc.group(1)
+                hexonly = re.sub(r"[^0-9a-fA-F]", "", token)
+                if len(hexonly) == 32:
+                    docid = f"{hexonly[0:8]}-{hexonly[8:12]}-{hexonly[12:16]}-{hexonly[16:20]}-{hexonly[20:32]}"
+                    return f"{base}/DocViewer/{docid}"
             # πιάσε το token μετά το /fd/
             m = re.search(r"/fd/([^/?#]+)", p.path, flags=re.I)
             if not m:
@@ -1602,7 +1883,7 @@ def scrape_epsilon(url, timeout=20, debug=False):
             # βάλε παύλες: 8-4-4-4-12
             docid = f"{hexonly[0:8]}-{hexonly[8:12]}-{hexonly[12:16]}-{hexonly[16:20]}-{hexonly[20:32]}"
             new_path = f"/DocViewer/{docid}"
-            return f"{p.scheme}://{p.netloc}{new_path}"
+            return f"{base}{new_path}"
         except Exception:
             return u
 
@@ -1880,21 +2161,67 @@ def scrape_einvoicing_gr(url, timeout=15, debug=False):
         "vat_analysis_inferred": False
     }
 
+    def _clean_mark_candidate(raw_mark):
+        txt = str(raw_mark or "").strip()
+        if not txt:
+            return None
+        m = re.search(r"\b([0-9]{15})\b", txt)
+        if m:
+            return m.group(1)
+        if txt.isdigit() and len(txt) == 15:
+            return txt
+        return None
+
+    def _response_text(resp):
+        raw = resp.content or b""
+        head = raw[:4096].lower()
+        if b"charset=utf-16" in head or b"charset=\"utf-16\"" in head:
+            try:
+                return raw.decode("utf-16")
+            except Exception:
+                pass
+        if b"charset=utf-8" in head or b"charset=\"utf-8\"" in head:
+            try:
+                return raw.decode("utf-8", errors="replace")
+            except Exception:
+                pass
+        try:
+            return resp.text
+        except Exception:
+            try:
+                return raw.decode(resp.apparent_encoding or "utf-8", errors="replace")
+            except Exception:
+                return raw.decode("utf-8", errors="replace")
+
+    def _collect_strings_and_urls(node, strings, urls):
+        if isinstance(node, dict):
+            for v in node.values():
+                _collect_strings_and_urls(v, strings, urls)
+            return
+        if isinstance(node, list):
+            for v in node:
+                _collect_strings_and_urls(v, strings, urls)
+            return
+        if isinstance(node, str):
+            txt = node.strip()
+            if not txt:
+                return
+            strings.append(txt)
+            if re.match(r"^https?://", txt, re.I):
+                urls.append(txt)
+
     # early myDATA probe (page may include direct link or button)
-    # Only apply when the URL does *not* already contain the required
-    # query parameters for the API endpoint.  Otherwise we prefer the
-    # built-in API logic which is more reliable and avoids spurious 404s.
+    # Only apply when the URL does *not* already contain known API schemas.
     parsed = urlparse(url)
     qs = parse_qs(parsed.query)
-    has_params = all(k in qs and qs[k] for k in ("ct", "id", "s", "h"))
-    if not has_params and "/api/GetInvoice" not in parsed.path:
+    afm_hint = None
+    if "/api/GetInvoice" not in parsed.path:
         sess = requests.Session()
         sess.headers.update(HEADERS)
         try:
             r0 = sess.get(url, timeout=timeout, allow_redirects=True)
             r0.raise_for_status()
-            r0.encoding = r0.apparent_encoding or 'utf-8'
-            html0 = r0.text
+            html0 = _response_text(r0)
 
             myd = _extract_mydatapi_url_from_text(html0, r0.url)
             if not myd:
@@ -1909,7 +2236,28 @@ def scrape_einvoicing_gr(url, timeout=15, debug=False):
                             myd = urljoin(r0.url, href)
             if myd:
                 if debug: print("e-invoicing.gr: delegating to mydatapi", myd)
-                return scrape_mydatapi(myd, timeout=timeout, debug=debug)
+                sub = scrape_mydatapi(myd, timeout=timeout, debug=debug)
+                if isinstance(sub, dict):
+                    mk = _clean_mark_candidate(sub.get("MARK"))
+                    if mk:
+                        sub["MARK"] = mk
+                        return sub
+                    afm_hint = (sub.get("issuer_vat") or afm_hint)
+            if not myd:
+                try:
+                    from scraper import _resolve_mydatapi_via_browser
+                    browser_myd = _resolve_mydatapi_via_browser(url, timeout=timeout, debug=debug)
+                except Exception:
+                    browser_myd = None
+                if browser_myd:
+                    if debug: print("e-invoicing.gr: browser-resolved mydatapi", browser_myd)
+                    sub = scrape_mydatapi(browser_myd, timeout=timeout, debug=debug)
+                    if isinstance(sub, dict):
+                        mk = _clean_mark_candidate(sub.get("MARK"))
+                        if mk:
+                            sub["MARK"] = mk
+                            return sub
+                        afm_hint = (sub.get("issuer_vat") or afm_hint)
         except Exception as e:
             if debug: print("e-invoicing.gr early fetch error:", e)
     # continue below with parsed variable
@@ -1920,17 +2268,29 @@ def scrape_einvoicing_gr(url, timeout=15, debug=False):
     else:
         # Μετατροπή ViewInvoice → API endpoint
         qs = parse_qs(parsed.query)
+        base = f"{parsed.scheme}://{parsed.netloc}"
         ct = qs.get("ct", [""])[0]
         doc_id = qs.get("id", [""])[0]
         source = qs.get("s", [""])[0]
         hash_token = qs.get("h", [""])[0]
-        
-        if not all([ct, doc_id, source, hash_token]):
+        vat_hint = qs.get("v", [""])[0]
+        agent_hint = qs.get("ag", [""])[0]
+        off_token = qs.get("c", [""])[0]
+
+        if all([ct, doc_id, source, hash_token]):
+            api_url = f"{base}/api/GetInvoice?contentType={ct}&id={doc_id}&source={source}&isPreview=True&hashToken={hash_token}"
+        elif all([vat_hint, agent_hint, off_token]):
+            params = {
+                "contentType": "PEPPOL",
+                "offTokenTp1": off_token,
+                "vat": vat_hint,
+                "agent": agent_hint,
+                "isPreview": "True",
+            }
+            api_url = f"{base}/api/GetInvoice?{urlencode(params)}"
+        else:
             if debug: print("e-invoicing.gr: missing required parameters")
             return out
-        
-        base = f"{parsed.scheme}://{parsed.netloc}"
-        api_url = f"{base}/api/GetInvoice?contentType={ct}&id={doc_id}&source={source}&isPreview=True&hashToken={hash_token}"
     
     sess = requests.Session()
     sess.headers.update(HEADERS)
@@ -1938,35 +2298,88 @@ def scrape_einvoicing_gr(url, timeout=15, debug=False):
     try:
         r = sess.get(api_url, timeout=timeout)
         r.raise_for_status()
-        r.encoding = 'utf-8'
-        html = r.text
+        html = _response_text(r)
     except Exception as e:
         if debug: print("e-invoicing.gr fetch error:", e)
         return out
+
+    # Some e-invoicing API variants return JSON payloads that contain HTML snippets,
+    # direct myDATA URLs, or plain values. Flatten them before HTML parsing.
+    ctype = (r.headers.get("Content-Type") or "").lower()
+    if "json" in ctype or re.match(r"^\s*[\[{]", html or ""):
+        parsed_json = None
+        try:
+            parsed_json = r.json()
+        except Exception:
+            try:
+                parsed_json = json.loads(html or "")
+            except Exception:
+                parsed_json = None
+
+        if parsed_json is not None:
+            blobs = []
+            urls = []
+            _collect_strings_and_urls(parsed_json, blobs, urls)
+
+            for u in urls:
+                if re.search(r"mydatapi\.aade\.gr|mydata\.aade\.gr", u, re.I):
+                    try:
+                        sub = scrape_mydatapi(u, timeout=timeout, debug=debug)
+                        if isinstance(sub, dict) and any(sub.get(k) for k in ("issuer_vat", "issue_date", "total_amount", "MARK")):
+                            sub["source"] = "e-Invoicing.gr->MyData"
+                            return sub
+                    except Exception:
+                        pass
+
+            html_candidates = [
+                s for s in blobs
+                if re.search(r"<(html|div|table|span|tr|td)\b|M\.AR\.K|MARK|ΑΦΜ|Ημ/νία|ΤΕΛΙΚΟ|ΣΤΟΙΧΕΙΑ", s, re.I)
+            ]
+            if html_candidates:
+                html = "\n".join(html_candidates)
+            elif blobs:
+                html = "\n".join(blobs)
+
+    # Runtime pages may still carry a hidden direct myDATA link.
+    myd_runtime = _extract_mydatapi_url_from_text(html or "", base_url=api_url)
+    if myd_runtime:
+        try:
+            sub = scrape_mydatapi(myd_runtime, timeout=timeout, debug=debug)
+            if isinstance(sub, dict) and any(sub.get(k) for k in ("issuer_vat", "issue_date", "total_amount", "MARK")):
+                sub["source"] = "e-Invoicing.gr->MyData"
+                return sub
+        except Exception:
+            pass
     
     soup = BeautifulSoup(html, "html.parser")
     
     # 1) MARK - Αναζήτηση στο HTML
     mark = None
-    
-    # Pattern 1: Βρες το div με "M.AR.K:" ή "MARK:"
-    for row in soup.find_all("div", class_="row"):
-        row_text = row.get_text(" ", strip=True)
-        if "M.AR.K:" in row_text or "MARK:" in row_text:
-            cols = row.find_all("div", class_=lambda c: c and "col" in c)
-            if len(cols) >= 2:
-                mark_text = cols[-1].get_text(strip=True)
-                m = MARK_RE.search(mark_text)
-                if m:
-                    mark = m.group(0)
-                    break
-    
+
+    # Pattern 1: Label-aware extraction γύρω από M.AR.K block
+    idx = html.find("M.AR.K")
+    if idx < 0:
+        idx = html.upper().find("MARK:")
+    if idx >= 0:
+        mark = _clean_mark_candidate(html[idx:idx + 500])
+
+    # Pattern 1b: DOM-based fallback
+    if not mark:
+        for row in soup.find_all("div", class_="row"):
+            row_text = row.get_text(" ", strip=True)
+            if "M.AR.K:" in row_text or "MARK:" in row_text:
+                cols = row.find_all("div", class_=lambda c: c and "col" in c)
+                if len(cols) >= 2:
+                    mark = _clean_mark_candidate(cols[-1].get_text(strip=True))
+                    if mark:
+                        break
+
     # Pattern 2: Regex fallback για 15ψήφιο
     if not mark:
         m = MARK_RE.search(html)
         if m:
-            mark = m.group(0)
-    
+            mark = _clean_mark_candidate(m.group(0))
+
     out["MARK"] = mark
     
     # 2) ΑΦΜ Πελάτη - Αναζήτηση στο section "ΣΤΟΙΧΕΙΑ ΠΕΛΑΤΗ"
@@ -1997,7 +2410,7 @@ def scrape_einvoicing_gr(url, timeout=15, debug=False):
         elif all_vats:
             counterpart_vat = all_vats[0]
     
-    out["issuer_vat"] = counterpart_vat
+    out["issuer_vat"] = counterpart_vat or afm_hint
     
     # 3) Ημερομηνία - Αναζήτηση "Ημ/νία έκδοσης"
     for div in soup.find_all("div", class_="fontSize8pt"):
@@ -2044,6 +2457,27 @@ def scrape_einvoicing_gr(url, timeout=15, debug=False):
                     out["total_amount"] = cleaned
                     break
     
+    # Prefer explicit payable/final labels when present.
+    # Use last match because e-invoicing pages can contain intermediate totals
+    # before the final payable value.
+    page_text = soup.get_text("\n", strip=True)
+    total_priority_patterns = [
+        r"Πληρωτ[έε]α\s*Αξ[ίι]α",
+        r"Τελικ[όο]\s*Πληρωτ[έε]ο",
+        r"Πληρωτ[έε]ο\s*Ποσ[όο]",
+        r"Τελικ[ήη]\s*Αξ[ίι]α",
+        r"ΤΕΛΙΚΟ\s*ΠΟΣΟ",
+        r"Συνολικ[όή].*ποσ[όo]",
+    ]
+    for label_pat in total_priority_patterns:
+        matches = list(re.finditer(rf"{label_pat}\s*[:\-]?\s*([0-9][0-9\.,]+)", page_text, re.I))
+        if not matches:
+            continue
+        preferred = _clean_amount_to_comma(matches[-1].group(1))
+        if preferred:
+            out["total_amount"] = preferred
+            break
+
     # Fallback για ποσό: ψάξε για pattern με EUR
     if not out["total_amount"]:
         m = re.search(r"([0-9\.,]+)\s*EUR", html)
@@ -2052,6 +2486,162 @@ def scrape_einvoicing_gr(url, timeout=15, debug=False):
 
     _merge_vat_analysis(out, _extract_vat_breakdown_from_html(soup, html))
     
+    return out
+
+
+def scrape_vsgr(url, timeout=15, debug=False):
+    """
+    VS.gr invoice pages (including retail receipt cases).
+    Prioritizes myDATA target discovery and falls back to static PEPPOL parsing.
+    """
+    out = {
+        "issuer_vat": None, "issue_date": None, "issuer_name": None,
+        "progressive_aa": None, "doc_type": None, "total_amount": None,
+        "is_invoice": False, "MARK": None, "source": "VS.gr", "vat_analysis": None,
+        "vat_analysis_inferred": False
+    }
+
+    def _looks_like_retail_receipt(text):
+        if not text:
+            return False
+        return bool(re.search(r"απόδειξ|αποδειξ|λιανικ|receipt|αλπ|\b11\.1\b", str(text), re.I))
+
+    sess = requests.Session()
+    sess.headers.update(HEADERS)
+
+    peppol_url = url + ("&" if "?" in url else "?") + "peppol=true"
+    html = None
+    page_url = url
+    last_error = None
+    for candidate in (peppol_url, url):
+        try:
+            r = sess.get(candidate, timeout=timeout, allow_redirects=True)
+            r.raise_for_status()
+            html_candidate = r.text
+            html = html_candidate
+            page_url = r.url
+            if re.search(r"M\.AR\.K|MARK|Αναγνωριστικό\s*ΦΠΑ\s*Αγοραστή|myDATA|TimologioQR|Απόδειξ|Λιαν", html_candidate, re.I):
+                break
+        except Exception as e:
+            last_error = e
+
+    if html is None:
+        if debug:
+            print("vs.gr fetch error:", last_error)
+        return out
+
+    soup = BeautifulSoup(html, "html.parser")
+    page_text = soup.get_text("\n", strip=True)
+
+    # Preferred: resolve myDATA URL and delegate to scrape_mydatapi.
+    mydatapi_url = _extract_mydatapi_url_from_text(html, page_url)
+    if not mydatapi_url:
+        for a in soup.find_all("a", href=True):
+            href = (a.get("href") or "").strip()
+            txt = (a.get_text(" ", strip=True) or "")
+            blob = f"{txt} {href}"
+            if re.search(r"mydata|timologioqr|qrinfo|παραστατικ", blob, re.I):
+                mydatapi_url = _extract_mydatapi_url_from_text(href, page_url) or urljoin(page_url, href)
+                if mydatapi_url:
+                    break
+    if not mydatapi_url:
+        for sc in soup.find_all("script"):
+            sc_text = sc.string or sc.get_text() or ""
+            direct = _extract_mydatapi_url_from_text(sc_text, page_url)
+            if direct:
+                mydatapi_url = direct
+                break
+
+    if not mydatapi_url:
+        try:
+            from scraper import _resolve_mydatapi_via_browser
+            mydatapi_url = _resolve_mydatapi_via_browser(page_url, timeout=timeout, debug=debug)
+        except Exception:
+            mydatapi_url = None
+
+    if mydatapi_url:
+        mydata_out = scrape_mydatapi(mydatapi_url, timeout=timeout, debug=debug)
+        if isinstance(mydata_out, dict) and any(mydata_out.get(k) for k in ("MARK", "issuer_vat", "issue_date", "total_amount", "vat_analysis")):
+            if _looks_like_retail_receipt(mydata_out.get("doc_type") or mydata_out.get("Είδος Παραστατικού") or ""):
+                mydata_out["issuer_vat"] = None
+                mydata_out["is_invoice"] = False
+            mydata_out["source"] = "VS.gr->MyData"
+            _ensure_vat_analysis(mydata_out)
+            return mydata_out
+
+    # Static fallback
+    m_mark = MARK_RE.search(page_text)
+    if m_mark:
+        out["MARK"] = m_mark.group(0)
+
+    for row in soup.find_all("tr"):
+        row_text = row.get_text(" ", strip=True)
+        if re.search(r"Αναγνωριστικό\s*ΦΠΑ\s*Αγοραστή.*ΒΤ-48", row_text, re.I):
+            spans = row.find_all(["span", "td", "div"])
+            for span in reversed(spans):
+                txt = span.get_text(" ", strip=True)
+                m_vat = re.search(r"(\d{9})", txt)
+                if m_vat:
+                    out["issuer_vat"] = m_vat.group(1)
+                    break
+            if out["issuer_vat"]:
+                break
+
+    if not out["issuer_vat"] and not _looks_like_retail_receipt(page_text):
+        all_vats = re.findall(r"\b(\d{9})\b", page_text)
+        if len(all_vats) >= 2:
+            out["issuer_vat"] = all_vats[1]
+        elif all_vats:
+            out["issuer_vat"] = all_vats[0]
+
+    m_dt = re.search(r"(?:Είδος\s*Παραστατικού|Type|Document|Invoice\s*Type)[\s:]*([^\n<]+)", page_text, re.I)
+    if m_dt:
+        out["doc_type"] = m_dt.group(1).strip()
+    m_date = re.search(r"(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{4})", page_text)
+    if m_date:
+        out["issue_date"] = _norm_date_to_ddmmyyyy(m_date.group(1))
+
+    # Prefer explicit BG-22 totals when present.
+    for tr in soup.find_all("tr"):
+        tr_text = tr.get_text(" ", strip=True)
+        if re.search(r"BT-115|Πληρωτέο\s*ποσό", tr_text, re.I):
+            nums = [
+                _amount_to_float(m.group(1))
+                for m in re.finditer(r"(-?\d{1,3}(?:[\.,]\d{3})*(?:[\.,]\d+)?|\d+(?:[\.,]\d+)?)", tr_text)
+            ]
+            nums = [n for n in nums if n is not None]
+            if nums:
+                out["total_amount"] = _float_to_comma(nums[-1])
+                break
+        if not out.get("total_amount") and re.search(r"BT-112|Συνολικό\s*ποσό\s*τιμολογίου\s*με\s*ΦΠΑ", tr_text, re.I):
+            nums = [
+                _amount_to_float(m.group(1))
+                for m in re.finditer(r"(-?\d{1,3}(?:[\.,]\d{3})*(?:[\.,]\d+)?|\d+(?:[\.,]\d+)?)", tr_text)
+            ]
+            nums = [n for n in nums if n is not None]
+            if nums:
+                out["total_amount"] = _float_to_comma(nums[-1])
+                break
+
+    total_patterns = [
+        r"Πληρωτ[έε]ο\s*Ποσ[όο]\s*[:\-]?\s*([0-9][0-9\.,]+)",
+        r"ΤΕΛΙΚΟ\s*ΠΟΣΟ\s*[:\-]?\s*([0-9][0-9\.,]+)",
+        r"([0-9][0-9\.,]+)\s*EUR",
+    ]
+    for pat in total_patterns:
+        m_total = re.search(pat, page_text, re.I)
+        if m_total:
+            out["total_amount"] = _clean_amount_to_comma(m_total.group(1))
+            if out["total_amount"]:
+                break
+
+    if _looks_like_retail_receipt((out.get("doc_type") or "") + " " + page_text):
+        out["issuer_vat"] = None
+        out["is_invoice"] = False
+    elif re.search(r"τιμολό?γιο|τιμολογιο|invoice", str(out.get("doc_type") or "") + " " + page_text, re.I):
+        out["is_invoice"] = True
+
+    _merge_vat_analysis(out, _extract_vat_breakdown_from_html(soup, html))
     return out
 
 
@@ -2246,289 +2836,6 @@ def scrape_pegcloud(url, timeout=15, debug=False):
 
     _merge_vat_analysis(out, _extract_vat_breakdown_from_html(soup, html))
     
-    return out
-
-
-def scrape_einvoicing_gr(url, timeout=15, debug=False):
-    """
-    e-Invoicing.gr (PEPPOL) scraper για receipts.
-    URLs: https://e-invoicing.gr/edocuments/ViewInvoice?ct=PEPPOL&id=...&s=A&h=...
-    Εξάγει: issuer_vat, issue_date, total_amount, MARK, κλπ.
-    """
-    out = {
-        "issuer_vat": None, "issue_date": None, "issuer_name": None,
-        "progressive_aa": None, "doc_type": None, "total_amount": None,
-        "is_invoice": False, "MARK": None, "source": "e-Invoicing.gr", "vat_analysis": None,
-        "vat_analysis_inferred": False
-    }
-
-    # early delegation: check for myDATA link (AADE button or embedded) before
-    # building API URL.  receipts often come from the button click.  however we
-    # must skip this step if the URL already includes the required query
-    # parameters, in which case the normal API translation is preferred.
-    parsed = urlparse(url)
-    qs = parse_qs(parsed.query)
-    has_params = all(k in qs and qs[k] for k in ("ct", "id", "s", "h"))
-    if not has_params and "/api/GetInvoice" not in parsed.path:
-        sess = requests.Session()
-        sess.headers.update(HEADERS)
-        try:
-            r0 = sess.get(url, timeout=timeout, allow_redirects=True)
-            r0.raise_for_status()
-            r0.encoding = r0.apparent_encoding or "utf-8"
-            html0 = r0.text
-
-            myd = _extract_mydatapi_url_from_text(html0, r0.url)
-            if not myd:
-                soup0 = BeautifulSoup(html0, "html.parser")
-                btn = soup0.find("span", class_=lambda c: c and "btn" in c,
-                                 string=lambda s: s and "Παραστατικό" in s)
-                if btn:
-                    parent = btn.find_parent("a")
-                    if parent:
-                        href = parent.get("href") or ""
-                        if href and href.strip() not in ("#", "javascript:void(0)"):
-                            myd = urljoin(r0.url, href)
-            if myd:
-                if debug: print("e-invoicing.gr: delegating to mydatapi", myd)
-                return scrape_mydatapi(myd, timeout=timeout, debug=debug)
-        except Exception as e:
-            if debug: print("e-invoicing.gr early fetch error:", e)
-    # continue below with parsed variable
-    if "/api/GetInvoice" in parsed.path:
-        api_url = url
-    else:
-        qs = parse_qs(parsed.query)
-        ct = qs.get("ct", [""])[0]
-        doc_id = qs.get("id", [""])[0]
-        source = qs.get("s", [""])[0]
-        hash_token = qs.get("h", [""])[0]
-        if not all([ct, doc_id, source, hash_token]):
-            if debug:
-                print("e-invoicing.gr: missing parameters")
-            return out
-        base = f"{parsed.scheme}://{parsed.netloc}"
-        api_url = f"{base}/api/GetInvoice?contentType={ct}&id={doc_id}&source={source}&isPreview=True&hashToken={hash_token}"
-
-    sess = requests.Session()
-    sess.headers.update(HEADERS)
-    try:
-        r = sess.get(api_url, timeout=timeout, allow_redirects=True)
-        r.raise_for_status()
-        r.encoding = r.apparent_encoding or "utf-8"
-        html = r.text
-    except Exception as e:
-        if debug:
-            print(f"[e-invoicing.gr RequestError] {e}")
-        return out
-
-    soup = BeautifulSoup(html, "html.parser")
-
-    def _extract_amount_by_label(text, label_pattern):
-        if not text:
-            return None
-        m = re.search(rf"{label_pattern}[\s:€]*([0-9][0-9\.,]+)\s*(?:EUR|€)?", text, re.I)
-        return m.group(1) if m else None
-
-    def _parse_payload(target, html_text, soup_obj):
-        page_text = soup_obj.get_text("\n", strip=True)
-
-        if not target.get("MARK"):
-            m_mark = re.search(r'(?:M\.AR\.K|MARK)\s*[:]?\s*([0-9]{15})', page_text, re.I) or MARK_RE.search(page_text)
-            if m_mark:
-                target["MARK"] = m_mark.group(1) if m_mark.lastindex else m_mark.group(0)
-
-        if not target.get("issuer_vat"):
-            m_vat = re.search(r'(?:Α\.?Φ\.?Μ|VAT)\s*[:]?\s*([0-9]{9})', page_text, re.I)
-            if m_vat:
-                target["issuer_vat"] = m_vat.group(1)
-            else:
-                all_vats = VAT_RE.findall(page_text)
-                if all_vats:
-                    target["issuer_vat"] = all_vats[0]
-
-        if not target.get("issue_date"):
-            m_date = (
-                re.search(r"Ημ\/?νία\s*έκδοσης\s*[:]?\s*([0-9]{1,2}[\-/\.][0-9]{1,2}[\-/\.][0-9]{4})", page_text, re.I)
-                or re.search(r"([0-9]{1,2}[\-/\.][0-9]{1,2}[\-/\.][0-9]{4})", page_text)
-            )
-            if m_date:
-                target["issue_date"] = _norm_date_to_ddmmyyyy(m_date.group(1))
-
-        if not target.get("doc_type"):
-            m_doc = re.search(r"(ΑΠΟΔΕΙΞΗ\s+ΛΙΑΝΙΚΗΣ\s+ΠΩΛΗΣΗΣ|ΤΙΜΟΛΟΓΙΟ[^\n]*)", page_text, re.I)
-            if m_doc:
-                target["doc_type"] = re.sub(r"\s+", " ", m_doc.group(1)).strip()
-            else:
-                m_doc2 = re.search(r'(?:Είδος\s*Παραστατικού|Είδος|Type|Document)\s*[:]?\s*([^\n<]+)', page_text, re.I)
-                if m_doc2:
-                    target["doc_type"] = m_doc2.group(1).strip()
-
-        if not target.get("progressive_aa"):
-            m_aa = re.search(r"Αρ\.?\s*Παραστατικ(?:ού|ο)\s*[:]?\s*([0-9A-Za-z\-/\s]+)", page_text, re.I)
-            if m_aa:
-                target["progressive_aa"] = re.sub(r"\s+", " ", m_aa.group(1)).strip()
-
-        if not target.get("issuer_name"):
-            heading_nodes = soup_obj.select(".fontSize12pt, h1, h2, h3")
-            for node in heading_nodes:
-                cand = re.sub(r"\s+", " ", node.get_text(" ", strip=True)).strip()
-                if not cand:
-                    continue
-                if len(cand) < 4 or len(cand) > 140:
-                    continue
-                if re.search(r"Α\.?Φ\.?Μ|DOY|ΔΟΥ|Αρ\.?\s*ΓΕΜΗ|Email|M\.AR\.K|AuthenticationCode|Παραστατικ|Τιμολόγιο|Απόδειξη", cand, re.I):
-                    continue
-                if re.search(r"^[A-Za-z0-9&\-\.,'\(\)/\s]+$", cand):
-                    target["issuer_name"] = cand
-                    break
-
-        if not target.get("issuer_name"):
-            lines = [ln.strip() for ln in page_text.split("\n") if ln and ln.strip()]
-            for ln in lines[:12]:
-                if re.search(r"Α\.?Φ\.?Μ|DOY|ΔΟΥ|Αρ\.?\s*ΓΕΜΗ|Email|Τρίπολεως|Λεωφ|M\.AR\.K|AuthenticationCode", ln, re.I):
-                    continue
-                if re.search(r"(ΑΕ|Α\.?Ε\.?|ΕΠΕ|ΙΚΕ|ΟΕ|ΕΕ|LTD|S\.A\.|ΣΚΛΑΒΕΝΙΤΗΣ)", ln, re.I):
-                    target["issuer_name"] = ln
-                    break
-
-        if not target.get("total_amount"):
-            total_raw = (
-                _extract_amount_by_label(page_text, r"ΤΕΛΙΚΗ\s*ΑΞΙΑ")
-                or _extract_amount_by_label(page_text, r"Ποσ[όο]\s*Πληρωμ[ήη]ς")
-                or _extract_amount_by_label(page_text, r"ΠΛΗΡΩΤΕΟ\s*ΠΟΣΟ")
-            )
-            if not total_raw:
-                m_total = re.search(r"([0-9]+[\.,][0-9]{2})\s*EUR", page_text, re.I)
-                if m_total:
-                    total_raw = m_total.group(1)
-            if total_raw:
-                target["total_amount"] = _clean_amount_to_comma(total_raw)
-
-        # VAT extraction from explicit summary/table blocks
-        explicit_vat = None
-        rate_m = re.search(r"ΑΝΑΛΥΣΗ\s*ΦΠΑ[\s\S]{0,240}?(\d{1,2}(?:[\.,]\d+)?)\s*%", page_text, re.I)
-        net_raw = _extract_amount_by_label(page_text, r"Καθαρ[ήη]\s*Αξ[ίι]α")
-        vat_raw = _extract_amount_by_label(page_text, r"Φ\.?\s*Π\.?\s*Α\.?")
-        gross_raw = _extract_amount_by_label(page_text, r"ΤΕΛΙΚΗ\s*ΑΞΙΑ") or target.get("total_amount")
-        if rate_m:
-            rate_key = _normalize_vat_rate_key(rate_m.group(1))
-            net_v = _amount_to_float(net_raw)
-            vat_v = _amount_to_float(vat_raw)
-            gross_v = _amount_to_float(gross_raw)
-            inferred = False
-            if gross_v is None and net_v is not None and vat_v is not None:
-                gross_v = net_v + vat_v
-            if net_v is None and gross_v is not None and vat_v is not None:
-                net_v = gross_v - vat_v
-            if vat_v is None and gross_v is not None and net_v is not None:
-                vat_v = gross_v - net_v
-            if (net_v is None or vat_v is None) and gross_v is not None and rate_key:
-                try:
-                    rate_num = float(str(rate_key).replace(",", "."))
-                except Exception:
-                    rate_num = None
-                if rate_num is not None and 0 <= rate_num <= 100:
-                    denom = 1.0 + (rate_num / 100.0)
-                    if denom > 0:
-                        net_v = gross_v / denom
-                        vat_v = gross_v - net_v
-                        inferred = True
-            if rate_key and (net_v is not None or vat_v is not None or gross_v is not None):
-                explicit_vat = {
-                    rate_key: {
-                        "net_amount": _float_to_comma(net_v),
-                        "vat_amount": _float_to_comma(vat_v),
-                        "gross_amount": _float_to_comma(gross_v),
-                    },
-                    "__inferred__": inferred,
-                }
-
-        _merge_vat_analysis(target, _extract_vat_breakdown_from_html(soup_obj, html_text))
-        if explicit_vat:
-            _merge_vat_analysis(target, explicit_vat)
-            cleaned = {k: v for k, v in explicit_vat.items() if k != "__inferred__"}
-            target["vat_analysis"] = cleaned
-            target["vat_analysis_inferred"] = bool(explicit_vat.get("__inferred__", False))
-
-        if target.get("doc_type") and re.search(r"τιμολόγιο|invoice|απόδειξη", target["doc_type"], re.I):
-            target["is_invoice"] = True
-        elif re.search(r"τιμολόγιο|invoice|απόδειξη", page_text, re.I):
-            target["is_invoice"] = True
-
-    def _render_with_browser(target_url):
-        try:
-            from playwright.sync_api import sync_playwright
-        except Exception:
-            return None
-        timeout_ms = int(max(timeout, 8) * 1000)
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                context = browser.new_context(ignore_https_errors=True)
-                page = context.new_page()
-                page.goto(target_url, wait_until="domcontentloaded", timeout=timeout_ms)
-                try:
-                    page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 15000))
-                except Exception:
-                    pass
-                page.wait_for_timeout(2000)
-                rendered = page.content()
-                browser.close()
-                return rendered
-        except Exception as e:
-            if debug:
-                print("e-invoicing.gr browser fallback error:", e)
-            return None
-
-    def _extract_mydatapi_url(text, base_url):
-        if not text:
-            return None
-        normalized = str(text).replace('\\/', '/').replace('&amp;', '&')
-        patterns = [
-            r'https?://mydatapi\.aade\.gr/[^\s"\'<>]*TimologioQR/QRInfo\?q=[^\s"\'<>]+',
-            r'https?://mydata\.aade\.gr/[^\s"\'<>]*TimologioQR/QRInfo\?q=[^\s"\'<>]+',
-            r'/(?:myDATA|mydata)/TimologioQR/QRInfo\?q=[^\s"\'<>]+'
-        ]
-        for pat in patterns:
-            m = re.search(pat, normalized, re.I)
-            if not m:
-                continue
-            cand = m.group(0).strip('"\' )>;')
-            if cand.startswith('/'):
-                cand = urljoin(base_url, cand)
-            return cand
-        return None
-
-    _parse_payload(out, html, soup)
-
-    if not all(out.get(k) for k in ("total_amount", "issuer_name", "doc_type", "progressive_aa")):
-        rendered_html = _render_with_browser(api_url)
-        if rendered_html:
-            _parse_payload(out, rendered_html, BeautifulSoup(rendered_html, "html.parser"))
-
-    # Authoritative fallback via embedded myDATA URL (improves doc_type/is_invoice cases)
-    myd_url = _extract_mydatapi_url(html, api_url)
-    if myd_url:
-        try:
-            sub = scrape_mydatapi(myd_url, timeout=timeout, debug=debug)
-        except Exception:
-            sub = None
-        if isinstance(sub, dict):
-            for key in ("doc_type", "issuer_name", "progressive_aa", "issue_date", "issuer_vat", "MARK"):
-                if not out.get(key) and sub.get(key):
-                    out[key] = sub.get(key)
-            if not out.get("total_amount") and sub.get("total_amount"):
-                out["total_amount"] = sub.get("total_amount")
-            if isinstance(sub.get("vat_analysis"), dict):
-                _merge_vat_analysis(out, sub.get("vat_analysis"))
-            if sub.get("is_invoice") is True:
-                out["is_invoice"] = True
-
-    if out.get("doc_type") and re.search(r"τιμολό?γιο|τιμολογιο|invoice|απόδειξη|αποδειξη", str(out["doc_type"]), re.I):
-        out["is_invoice"] = True
-
-    _ensure_vat_analysis(out)
     return out
 
 
@@ -2763,6 +3070,601 @@ def scrape_megasoft(url, timeout=20, debug=False):
     return out
 
 
+def _extract_mydatapi_link_from_page(html, base_url=None):
+    if not html:
+        return None
+    mydatapi_url = _extract_mydatapi_url_from_text(html, base_url=base_url)
+    if mydatapi_url:
+        return mydatapi_url
+    soup = BeautifulSoup(html, "html.parser")
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if "mydatapi.aade.gr" in href and "TimologioQR/QRInfo" in href:
+            return urljoin(base_url or "", href)
+    for btn in soup.find_all("button"):
+        link = btn.find("a", href=True)
+        if link:
+            href = link["href"].strip()
+            if "mydatapi.aade.gr" in href and "TimologioQR/QRInfo" in href:
+                return urljoin(base_url or "", href)
+
+    # dynamic viewers often keep the myDATA link inside onclick/script blocks
+    for el in soup.find_all(True):
+        onclick = str(el.get("onclick") or "")
+        if not onclick:
+            continue
+        direct = _extract_mydatapi_url_from_text(onclick, base_url=base_url)
+        if direct:
+            return direct
+
+    for sc in soup.find_all("script"):
+        txt = sc.string or sc.get_text() or ""
+        direct = _extract_mydatapi_url_from_text(txt, base_url=base_url)
+        if direct:
+            return direct
+    return None
+
+
+def _extract_dynamic_candidate_urls(html, base_url=None):
+    if not html:
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+    candidates = []
+
+    def _add(url_candidate):
+        if not url_candidate:
+            return
+        c = str(url_candidate).strip().strip('"\'')
+        if not c:
+            return
+        if c.startswith("javascript:") or c.startswith("mailto:"):
+            return
+        if c.startswith("/"):
+            if not base_url:
+                return
+            c = urljoin(base_url, c)
+        elif not re.match(r"^https?://", c, flags=re.I):
+            if base_url:
+                c = urljoin(base_url, c)
+            else:
+                return
+        candidates.append(c)
+
+    for a in soup.find_all("a", href=True):
+        href = (a.get("href") or "").strip()
+        txt = (a.get_text(" ", strip=True) or "")
+        blob = f"{href} {txt}".lower()
+        if re.search(r"mydata|timologioqr|qrinfo|requestdocs|xml|print|selection|raw", blob, re.I):
+            _add(href)
+
+    for iframe in soup.find_all("iframe", src=True):
+        _add(iframe.get("src"))
+    for emb in soup.find_all("embed", src=True):
+        _add(emb.get("src"))
+
+    onclick_patterns = [
+        r"printPage\(\s*['\"]([^'\"]+)['\"]\s*\)",
+        r"(?:window\.open|location\.href|window\.location(?:\.href)?)\s*\(?\s*['\"]([^'\"]+)['\"]",
+        r"(?:url|href|src)\s*[:=]\s*['\"]([^'\"]+)['\"]",
+    ]
+    for el in soup.find_all(True):
+        onclick = str(el.get("onclick") or "")
+        if not onclick:
+            continue
+        for pat in onclick_patterns:
+            for m in re.finditer(pat, onclick, re.I):
+                _add(m.group(1))
+
+    for sc in soup.find_all("script"):
+        txt = sc.string or sc.get_text() or ""
+        direct_myd = _extract_mydatapi_url_from_text(txt, base_url=base_url)
+        if direct_myd:
+            _add(direct_myd)
+        for pat in onclick_patterns:
+            for m in re.finditer(pat, txt, re.I):
+                _add(m.group(1))
+
+    seen = set()
+    return [u for u in candidates if u and not (u in seen or seen.add(u))]
+
+
+def _extract_primer_mark_from_url(url):
+    parsed = urlparse(url)
+    segment = parsed.path.rstrip("/").split("/")[-1]
+    if re.fullmatch(r"\d{15}", segment):
+        return segment
+    m = re.search(r"/(\d{15})(?:[/?#]|$)", url)
+    return m.group(1) if m else None
+
+
+def scrape_iview(url, timeout=20, debug=False):
+    out = {
+        "issuer_vat": None, "issue_date": None, "issuer_name": None,
+        "progressive_aa": None, "doc_type": None, "total_amount": None,
+        "is_invoice": False, "MARK": None, "source": "IView", "vat_analysis": None,
+        "vat_analysis_inferred": False
+    }
+    try:
+        html = _fetch_url_text(url, timeout=timeout, debug=debug)
+    except Exception as e:
+        if debug:
+            print("iview fetch error:", e)
+        return out
+
+    mydatapi_url = _extract_mydatapi_link_from_page(html, base_url=url)
+    if mydatapi_url:
+        if debug:
+            print("iview resolved myDATA URL:", mydatapi_url)
+        mydata_out = scrape_mydatapi(mydatapi_url, timeout=timeout, debug=debug)
+        if isinstance(mydata_out, dict):
+            out["MARK"] = _normalize_mark_value(mydata_out.get("MARK"))
+            afm = (mydata_out.get("issuer_vat") or mydata_out.get("ΑΦΜ Πελάτη") or mydata_out.get("ΑΦΜ") or "").strip()
+            out["issuer_vat"] = re.sub(r"\D", "", afm) if afm and afm != "N/A" else None
+            out["doc_type"] = (mydata_out.get("doc_type") or mydata_out.get("Είδος Παραστατικού") or "").strip() or None
+            out["issue_date"] = _norm_date_to_ddmmyyyy(mydata_out.get("issue_date") or mydata_out.get("Ημερομηνία") or mydata_out.get("Ημερομηνία Έκδοσης") or "") if (mydata_out.get("issue_date") or mydata_out.get("Ημερομηνία") or mydata_out.get("Ημερομηνία Έκδοσης")) else None
+            out["total_amount"] = _clean_amount_to_comma(mydata_out.get("total_amount") or mydata_out.get("Συνολική αξία") or mydata_out.get("Συνολικό ποσό") or "") if (mydata_out.get("total_amount") or mydata_out.get("Συνολική αξία") or mydata_out.get("Συνολικό ποσό")) else None
+            out["issuer_name"] = (mydata_out.get("issuer_name") or mydata_out.get("Επωνυμία") or "").strip() or None
+            out["progressive_aa"] = (mydata_out.get("progressive_aa") or mydata_out.get("Α/Α") or mydata_out.get("ΑΑ") or "").strip() or None
+            if isinstance(mydata_out.get("vat_analysis"), dict) and mydata_out.get("vat_analysis"):
+                out["vat_analysis"] = mydata_out.get("vat_analysis")
+                out["vat_analysis_inferred"] = bool(mydata_out.get("vat_analysis_inferred", False))
+            else:
+                _infer_vat_analysis_from_total(out)
+            if out["doc_type"] and re.search(r"τιμολό?γιο|invoice", out["doc_type"], re.I):
+                out["is_invoice"] = True
+            out["source"] = "IView->MyData"
+    _ensure_vat_analysis(out)
+    return out
+
+
+def scrape_primer(url, timeout=20, debug=False):
+    out = {
+        "issuer_vat": None, "issue_date": None, "issuer_name": None,
+        "progressive_aa": None, "doc_type": None, "total_amount": None,
+        "is_invoice": False, "MARK": None, "source": "Primer MyData", "vat_analysis": None,
+        "vat_analysis_inferred": False
+    }
+    mark = _extract_primer_mark_from_url(url)
+    if mark:
+        out["MARK"] = mark
+    try:
+        html = _fetch_url_text(url, timeout=timeout, debug=debug)
+    except Exception as e:
+        if debug:
+            print("primer fetch error:", e)
+        return out
+
+    def _fetch_primer_public_data(identifier):
+        ident = str(identifier or "").strip()
+        if not ident:
+            return {}
+        endpoints = [
+            "https://mydata-backend.primer.gr/api/public/mydatasearch",
+            "https://mydata.primer.gr/api/public/mydatasearch",
+        ]
+        payload = {"identifier": ident}
+        last_err = None
+        for ep in endpoints:
+            try:
+                rr = requests.post(ep, json=payload, timeout=max(10, timeout))
+                rr.raise_for_status()
+                data = rr.json()
+                if str(data.get("status") or "") != "200":
+                    continue
+                return data.get("data") or {}
+            except Exception as e:
+                last_err = e
+                continue
+        if debug and last_err is not None:
+            print("primer public API error:", last_err)
+        return {}
+
+    parsed_url = urlparse(url)
+    last_seg = parsed_url.path.rstrip("/").split("/")[-1] if parsed_url.path else ""
+    primer_identifiers = []
+    if re.fullmatch(r"\d{15}", last_seg):
+        primer_identifiers.append(last_seg)
+    if re.fullmatch(r"[A-Fa-f0-9]{40}", last_seg):
+        primer_identifiers.append(last_seg)
+    if out.get("MARK"):
+        primer_identifiers.append(str(out.get("MARK")))
+    seen_ids = set()
+    primer_identifiers = [x for x in primer_identifiers if x and not (x in seen_ids or seen_ids.add(x))]
+
+    primer_data = {}
+    for ident in primer_identifiers:
+        primer_data = _fetch_primer_public_data(ident)
+        if primer_data:
+            break
+
+    if isinstance(primer_data, dict) and primer_data:
+        mark_val = primer_data.get("mark")
+        normalized_mark = _normalize_mark_value(mark_val)
+        if normalized_mark:
+            out["MARK"] = normalized_mark
+
+        issuer = primer_data.get("issuer") if isinstance(primer_data.get("issuer"), dict) else {}
+        header = primer_data.get("invoiceHeader") if isinstance(primer_data.get("invoiceHeader"), dict) else {}
+        summary = primer_data.get("invoiceSummary") if isinstance(primer_data.get("invoiceSummary"), dict) else {}
+
+        out["issuer_vat"] = out.get("issuer_vat") or re.sub(r"\D", "", str(issuer.get("vatNumber") or "")) or None
+        out["issuer_name"] = out.get("issuer_name") or _clean_issuer_name(issuer.get("companyName") or issuer.get("companySmallName"))
+        out["issue_date"] = out.get("issue_date") or _norm_date_to_ddmmyyyy(header.get("issueDate") or "")
+        out["progressive_aa"] = out.get("progressive_aa") or (str(header.get("aa") or "").strip() or None)
+        out["doc_type"] = out.get("doc_type") or (str(header.get("invoiceType") or "").strip() or None)
+
+        gross_total = summary.get("totalGrossValue")
+        if gross_total is None:
+            gross_total = primer_data.get("total")
+        if gross_total is not None:
+            out["total_amount"] = out.get("total_amount") or _clean_amount_to_comma(gross_total)
+
+        vat_map = {}
+        cat_to_rate = {
+            "1": "24", "2": "13", "3": "6", "4": "17",
+            "5": "9", "6": "4", "7": "0", "8": "0",
+        }
+        for row in (primer_data.get("invoiceDetails") or []):
+            if not isinstance(row, dict):
+                continue
+            rate = row.get("vatPercent") or row.get("vatRate")
+            if rate is None:
+                rate = cat_to_rate.get(str(row.get("vatCategory") or "").strip())
+            rate_key = _normalize_vat_rate_key(rate)
+            if not rate_key:
+                continue
+            net_v = _amount_to_float(row.get("netValue"))
+            vat_v = _amount_to_float(row.get("vatAmount"))
+            gross_v = _amount_to_float(row.get("lineGrossValue"))
+            if gross_v is None and net_v is not None and vat_v is not None:
+                gross_v = net_v + vat_v
+            bucket = vat_map.setdefault(rate_key, {"net": 0.0, "vat": 0.0, "gross": 0.0})
+            if net_v is not None:
+                bucket["net"] += net_v
+            if vat_v is not None:
+                bucket["vat"] += vat_v
+            if gross_v is not None:
+                bucket["gross"] += gross_v
+
+        if vat_map:
+            extracted = {
+                k: {
+                    "net_amount": _float_to_comma(v["net"]),
+                    "vat_amount": _float_to_comma(v["vat"]),
+                    "gross_amount": _float_to_comma(v["gross"]),
+                }
+                for k, v in vat_map.items()
+            }
+            extracted["__inferred__"] = False
+            _merge_vat_analysis(out, extracted)
+            _reconcile_single_rate_vat_with_total(out)
+
+        if out.get("source") == "Primer MyData":
+            out["source"] = "Primer Public API"
+
+    def _render_with_browser(target_url):
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception:
+            return None, None, [], target_url
+
+        timeout_ms = int(max(timeout, 8) * 1000)
+        found = {"url": None}
+        captured_payloads = []
+        final_url = target_url
+
+        def _is_interesting_url(u):
+            return bool(re.search(r"mydata|mydatapi|primer|timologioqr|xml|invoice|/api/", str(u or ""), re.I))
+
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                context = browser.new_context(ignore_https_errors=True)
+                page = context.new_page()
+
+                def _capture_request(req):
+                    ru = req.url
+                    if ("mydatapi.aade.gr" in ru or "mydata.aade.gr" in ru) and "TimologioQR/QRInfo" in ru:
+                        found["url"] = ru
+
+                def _capture_response(resp):
+                    try:
+                        ru = resp.url
+                        if not _is_interesting_url(ru):
+                            return
+                        ctype = (resp.headers.get("content-type") or "").lower()
+                        if not any(tok in ctype for tok in ("xml", "json", "text", "html")):
+                            return
+                        body = resp.text() or ""
+                        if body:
+                            captured_payloads.append(body)
+                        if not found.get("url"):
+                            maybe = _extract_mydatapi_url_from_text(body, base_url=ru)
+                            if maybe:
+                                found["url"] = maybe
+                    except Exception:
+                        return
+
+                page.on("request", _capture_request)
+                page.on("response", _capture_response)
+
+                page.goto(target_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 18000))
+                except Exception:
+                    pass
+                page.wait_for_timeout(3000)
+
+                rendered_html = page.content()
+                final_url = page.url
+                myd_url = _extract_mydatapi_url_from_text(page.url, base_url=page.url) or \
+                          _extract_mydatapi_url_from_text(rendered_html, base_url=page.url) or \
+                          found.get("url")
+
+                if not myd_url:
+                    selectors = [
+                        "a:has-text('MyData')",
+                        "button:has-text('MyData')",
+                        "a:has-text('myDATA')",
+                        "button:has-text('myDATA')",
+                        "a:has-text('Εκτύπωση')",
+                        "button:has-text('Εκτύπωση')",
+                        "a:has-text('Print')",
+                        "button:has-text('Print')",
+                        "a:has-text('XML')",
+                        "button:has-text('XML')",
+                    ]
+                    for sel in selectors:
+                        loc = page.locator(sel)
+                        if loc.count() <= 0:
+                            continue
+                        try:
+                            with page.expect_popup(timeout=3500) as popinfo:
+                                loc.first.click(timeout=3500)
+                            pop = popinfo.value
+                            try:
+                                pop.wait_for_load_state("domcontentloaded", timeout=7000)
+                            except Exception:
+                                pass
+                            pop_html = pop.content()
+                            if pop_html:
+                                captured_payloads.append(pop_html)
+                            maybe = _extract_mydatapi_url_from_text(pop.url, base_url=pop.url) or \
+                                    _extract_mydatapi_url_from_text(pop_html, base_url=pop.url) or \
+                                    found.get("url")
+                            if maybe:
+                                myd_url = maybe
+                                break
+                        except Exception:
+                            try:
+                                loc.first.click(timeout=3500)
+                                page.wait_for_timeout(1500)
+                                rendered_html = page.content()
+                                final_url = page.url
+                                if rendered_html:
+                                    captured_payloads.append(rendered_html)
+                                maybe = _extract_mydatapi_url_from_text(page.url, base_url=page.url) or \
+                                        _extract_mydatapi_url_from_text(rendered_html, base_url=page.url) or \
+                                        found.get("url")
+                                if maybe:
+                                    myd_url = maybe
+                                    break
+                            except Exception:
+                                continue
+
+                browser.close()
+                return rendered_html, myd_url, captured_payloads, final_url
+        except Exception as e:
+            if debug:
+                print("primer browser fallback error:", e)
+        return None, None, captured_payloads, final_url
+
+    def _extract_xml_and_urls(payload):
+        if not payload:
+            return None, []
+        found_urls = []
+        raw = str(payload)
+        variants = [raw]
+        unescaped = html_lib.unescape(str(payload))
+        if unescaped != variants[0]:
+            variants.append(unescaped)
+        slash_unescaped = raw.replace("\\/", "/").replace("\\u002F", "/").replace("\\u003A", ":")
+        if slash_unescaped not in variants:
+            variants.append(slash_unescaped)
+        slash_unescaped2 = unescaped.replace("\\/", "/").replace("\\u002F", "/").replace("\\u003A", ":")
+        if slash_unescaped2 not in variants:
+            variants.append(slash_unescaped2)
+
+        for txt in variants:
+            xml_candidate = _extract_xml_fragment(txt)
+            if xml_candidate:
+                return xml_candidate, []
+            stripped = txt.lstrip()
+            if stripped.startswith("<?xml") and re.search(r"<InvoicesDoc[\s\S]*?</InvoicesDoc>", stripped, re.I):
+                return txt, []
+
+            for m in re.finditer(r"https?://[^\s\"'<>]+", txt):
+                raw_u = m.group(0).strip().strip('"\'(),;')
+                u = raw_u.replace("&amp;", "&")
+                low = u.lower()
+                if "mydata.primer.gr" in low or "mydatapi.aade.gr" in low or "/download" in low or low.endswith(".xml"):
+                    found_urls.append(u)
+
+            # Some dynamic APIs return only UID, not a full URL.
+            for m in re.finditer(r"\b([A-F0-9]{40})\b", txt):
+                uid = m.group(1)
+                found_urls.append(f"https://mydata.primer.gr/{uid}")
+
+        seen_urls = set()
+        return None, [u for u in found_urls if u and not (u in seen_urls or seen_urls.add(u))]
+
+    mydatapi_url = _extract_mydatapi_link_from_page(html, base_url=url)
+
+    # Dynamic Primer viewers can expose useful data only through secondary
+    # "mydata selection" / print / raw-xml endpoints.
+    secondary_payloads = []
+    candidate_urls = _extract_dynamic_candidate_urls(html, base_url=url)
+    sess = requests.Session()
+    sess.headers.update(HEADERS)
+    for cu in candidate_urls:
+        try:
+            rr = sess.get(cu, timeout=timeout, allow_redirects=True)
+            rr.raise_for_status()
+            rr.encoding = rr.apparent_encoding or "utf-8"
+            payload = rr.text or ""
+            secondary_payloads.append(payload)
+
+            if not mydatapi_url:
+                mydatapi_url = _extract_mydatapi_link_from_page(payload, base_url=rr.url) or \
+                              _extract_mydatapi_url_from_text(payload, base_url=rr.url)
+        except Exception:
+            continue
+
+    # JS-only Primer pages may expose myDATA links and XML only after runtime render.
+    rendered_html, browser_myd, browser_payloads, browser_url = _render_with_browser(url)
+    if browser_payloads:
+        secondary_payloads.extend(browser_payloads)
+    if rendered_html:
+        secondary_payloads.append(rendered_html)
+        for cu in _extract_dynamic_candidate_urls(rendered_html, base_url=browser_url or url):
+            try:
+                rr = sess.get(cu, timeout=timeout, allow_redirects=True)
+                rr.raise_for_status()
+                rr.encoding = rr.apparent_encoding or "utf-8"
+                payload = rr.text or ""
+                if payload:
+                    secondary_payloads.append(payload)
+                if not mydatapi_url:
+                    mydatapi_url = _extract_mydatapi_link_from_page(payload, base_url=rr.url) or \
+                                  _extract_mydatapi_url_from_text(payload, base_url=rr.url)
+            except Exception:
+                continue
+    if not mydatapi_url and browser_myd:
+        mydatapi_url = browser_myd
+
+    if mydatapi_url:
+        if debug:
+            print("primer resolved myDATA URL:", mydatapi_url)
+        mydata_out = scrape_mydatapi(mydatapi_url, timeout=timeout, debug=debug)
+        if isinstance(mydata_out, dict):
+            extracted_mark = _normalize_mark_value(mydata_out.get("MARK"))
+            if extracted_mark:
+                out["MARK"] = out["MARK"] or extracted_mark
+            afm = (mydata_out.get("issuer_vat") or mydata_out.get("ΑΦΜ Πελάτη") or mydata_out.get("ΑΦΜ") or "").strip()
+            out["issuer_vat"] = re.sub(r"\D", "", afm) if afm and afm != "N/A" else None
+            out["doc_type"] = (mydata_out.get("doc_type") or mydata_out.get("Είδος Παραστατικού") or "").strip() or None
+            out["issue_date"] = _norm_date_to_ddmmyyyy(mydata_out.get("issue_date") or mydata_out.get("Ημερομηνία") or mydata_out.get("Ημερομηνία Έκδοσης") or "") if (mydata_out.get("issue_date") or mydata_out.get("Ημερομηνία") or mydata_out.get("Ημερομηνία Έκδοσης")) else None
+            out["total_amount"] = _clean_amount_to_comma(mydata_out.get("total_amount") or mydata_out.get("Συνολική αξία") or mydata_out.get("Συνολικό ποσό") or "") if (mydata_out.get("total_amount") or mydata_out.get("Συνολική αξία") or mydata_out.get("Συνολικό ποσό")) else None
+            out["issuer_name"] = (mydata_out.get("issuer_name") or mydata_out.get("Επωνυμία") or "").strip() or None
+            out["progressive_aa"] = (mydata_out.get("progressive_aa") or mydata_out.get("Α/Α") or mydata_out.get("ΑΑ") or "").strip() or None
+            if out["doc_type"] and re.search(r"τιμολό?γιο|invoice", out["doc_type"], re.I):
+                out["is_invoice"] = True
+            if out.get("source") == "Primer MyData":
+                out["source"] = "Primer MyData->MyData"
+
+    xml_fragment = _extract_xml_fragment(html)
+    if not xml_fragment:
+        for payload in secondary_payloads:
+            xml_fragment = _extract_xml_fragment(payload)
+            if xml_fragment:
+                break
+
+    if not xml_fragment:
+        for payload in [html] + secondary_payloads:
+            t = (payload or "").lstrip()
+            if t.startswith("<?xml") or re.search(r"<InvoicesDoc[\s\S]*?</InvoicesDoc>", t, re.I):
+                xml_fragment = payload
+                break
+
+    # Follow dynamic links found inside payloads (e.g. downloadingInvoiceUrl)
+    # and parse XML directly from those endpoints.
+    if not xml_fragment:
+        xml_fetch_urls = []
+        for payload in [html] + secondary_payloads:
+            maybe_xml, urls = _extract_xml_and_urls(payload)
+            if maybe_xml:
+                xml_fragment = maybe_xml
+                break
+            xml_fetch_urls.extend(urls)
+
+        if not xml_fragment and xml_fetch_urls:
+            seen_urls = set()
+            queue = [u for u in xml_fetch_urls if u and not (u in seen_urls or seen_urls.add(u))]
+            for cu in queue[:20]:
+                try:
+                    rr = sess.get(cu, timeout=timeout, allow_redirects=True)
+                    rr.raise_for_status()
+                    rr.encoding = rr.apparent_encoding or "utf-8"
+                    payload = rr.text or ""
+                    if payload:
+                        secondary_payloads.append(payload)
+                    maybe_xml, extra_urls = _extract_xml_and_urls(payload)
+                    if maybe_xml:
+                        xml_fragment = maybe_xml
+                        break
+                    for eu in extra_urls:
+                        if eu not in seen_urls and len(queue) < 40:
+                            seen_urls.add(eu)
+                            queue.append(eu)
+                except Exception:
+                    continue
+
+    if xml_fragment:
+        try:
+            root = ET.fromstring(xml_fragment.encode("utf-8"))
+            extracted = _extract_from_ubl_root(root)
+            for key, value in extracted.items():
+                if value and not out.get(key):
+                    out[key] = value
+            extracted_mark = _extract_mark_from_primer_xml(root)
+            if extracted_mark:
+                out["MARK"] = out["MARK"] or extracted_mark
+
+            seller_vat = None
+            issuer = root.find('.//issuer') or root.find('.//{*}issuer')
+            if issuer is not None:
+                seller_el = issuer.find('.//vatNumber') or issuer.find('.//{*}vatNumber') or issuer.find('.//vatnumber')
+                if seller_el is not None and seller_el.text:
+                    m = VAT_RE.search(seller_el.text.strip())
+                    if m:
+                        seller_vat = m.group(0)
+
+            afm = _extract_vat_from_primer_xml(root, seller_vat=seller_vat)
+            if afm and not out.get("issuer_vat"):
+                out["issuer_vat"] = afm
+
+            # VAT analysis should come from XML invoiceDetails when available.
+            _merge_vat_analysis(out, _extract_vat_breakdown_from_xml_root(root))
+            _reconcile_single_rate_vat_with_total(out)
+        except Exception as e:
+            if debug:
+                print("primer xml parse error:", e)
+
+    if not out.get("issuer_vat"):
+        soup = BeautifulSoup(html, "html.parser")
+        for lbl in soup.find_all(string=re.compile(r"Α\.?Φ\.?Μ\.?", re.I)):
+            parent = getattr(lbl, "parent", None)
+            if not parent:
+                continue
+            text = parent.get_text(" ", strip=True)
+            m = re.search(r"Α\.?Φ\.?Μ\.?[:\s]*([0-9]{9})", text, flags=re.I)
+            if m:
+                out["issuer_vat"] = m.group(1)
+                break
+
+    if not out.get("issuer_vat"):
+        soup = BeautifulSoup(html, "html.parser")
+        page_text = soup.get_text(" ", strip=True)
+        m = re.search(r"\b([0-9]{9})\b", page_text)
+        if m:
+            out["issuer_vat"] = m.group(1)
+
+    out["issuer_name"] = _clean_issuer_name(out.get("issuer_name"))
+    _ensure_vat_analysis(out)
+    return out
+
+
 def scrape_eskap(url, timeout=20, debug=False):
     """
     ESKAP invoice pages.
@@ -2780,14 +3682,52 @@ def scrape_eskap(url, timeout=20, debug=False):
     sess = requests.Session()
     sess.headers.update(HEADERS)
 
+    # Some ESKAP links arrive as type=pdf and return only binary content.
+    # In that case, try equivalent HTML variants before parsing.
+    fetch_urls = [url]
     try:
-        r = sess.get(url, timeout=timeout, allow_redirects=True)
-        r.raise_for_status()
-        r.encoding = r.apparent_encoding or "utf-8"
-        html = r.text
-    except Exception as e:
+        parsed_in = urlparse(url)
+        q = parse_qs(parsed_in.query)
+        t = str(q.get("type", [""])[0]).strip().lower()
+        if t == "pdf":
+            q_html = dict(q)
+            q_html["type"] = ["html"]
+            fetch_urls.append(parsed_in._replace(query=urlencode(q_html, doseq=True)).geturl())
+
+            q_no_type = dict(q)
+            q_no_type.pop("type", None)
+            fetch_urls.append(parsed_in._replace(query=urlencode(q_no_type, doseq=True)).geturl())
+    except Exception:
+        pass
+
+    # Keep order and uniqueness.
+    seen_fetch = set()
+    fetch_urls = [u for u in fetch_urls if u and not (u in seen_fetch or seen_fetch.add(u))]
+
+    r = None
+    html = None
+    last_err = None
+    for candidate_url in fetch_urls:
+        try:
+            rr = sess.get(candidate_url, timeout=timeout, allow_redirects=True)
+            rr.raise_for_status()
+            ctype = (rr.headers.get("Content-Type") or "").lower()
+            rr.encoding = rr.apparent_encoding or "utf-8"
+            text = rr.text or ""
+            if "pdf" in ctype or text.lstrip().startswith("%PDF"):
+                if debug:
+                    print("eskap: non-html payload from", candidate_url, "ctype=", ctype)
+                continue
+            r = rr
+            html = text
+            break
+        except Exception as e:
+            last_err = e
+            continue
+
+    if r is None or html is None:
         if debug:
-            print("eskap fetch error:", e)
+            print("eskap fetch error:", last_err)
         return out
 
     soup = BeautifulSoup(html, "html.parser")
@@ -3459,59 +4399,61 @@ def detect_and_scrape(url, timeout=20, debug=False):
     """
     Convenience wrapper: detect source from URL and call appropriate scraper.
     """
-    domain = urlparse(url).netloc.lower()
-    if "www1.aade.gr" in domain:
+    url = _normalize_url(url)
+    parsed = urlparse(url)
+    domain = (parsed.netloc or "").lower()
+    path_l = (parsed.path or "").lower()
+    if "www1.aade.gr" in domain or "www1.gsis.gr" in domain:
         result = scrape_www1_aade(url, timeout=timeout, debug=debug)
-        _ensure_vat_analysis(result)
-        return result
+        return _finalize_detect_result(result)
     if "mydatapi.aade.gr" in domain or "mydata.aade.gr" in domain:
         result = scrape_mydatapi(url, timeout=timeout, debug=debug)
-        _ensure_vat_analysis(result)
-        return result
+        return _finalize_detect_result(result)
     if "wedoconnect" in domain:
         result = scrape_wedoconnect(url, timeout=timeout, debug=debug)
-        _ensure_vat_analysis(result)
-        return result
-    if "einvoice.s1ecos.gr" in domain:
+        return _finalize_detect_result(result)
+    if "einvoice.s1ecos.gr" in domain or "s1ecos.gr" in domain:
         result = scrape_s1ecos(url, timeout=timeout, debug=debug)
-        _ensure_vat_analysis(result)
-        return result
+        return _finalize_detect_result(result)
     if "impact.gr" in domain or "einvoice.impact" in domain:
         result = scrape_impact(url, timeout=timeout, debug=debug)
-        _ensure_vat_analysis(result)
-        return result
+        return _finalize_detect_result(result)
     if "epsilonnet.gr" in domain or "epsilon" in domain:
         result = scrape_epsilon(url, timeout=timeout, debug=debug)
-        _ensure_vat_analysis(result)
-        return result
+        return _finalize_detect_result(result)
     if "parochos.gr" in domain:
         result = scrape_epsilon(url, timeout=timeout, debug=debug)  # Χρησιμοποιεί το ίδιο API
-        _ensure_vat_analysis(result)
-        return result
+        return _finalize_detect_result(result)
+    if "/filedocument/get/" in path_l or "/docviewer/" in path_l or "/fd/" in path_l:
+        result = scrape_epsilon(url, timeout=timeout, debug=debug)
+        return _finalize_detect_result(result)
+    if "mydata.primer.gr" in domain or "primer.gr" in domain:
+        result = scrape_primer(url, timeout=timeout, debug=debug)
+        return _finalize_detect_result(result)
+    if "iview.gr" in domain:
+        result = scrape_iview(url, timeout=timeout, debug=debug)
+        return _finalize_detect_result(result)
+    if "vs.gr" in domain:
+        result = scrape_vsgr(url, timeout=timeout, debug=debug)
+        return _finalize_detect_result(result)
     if "pegcloud.io" in domain or "pegcloud" in domain:
         result = scrape_pegcloud(url, timeout=timeout, debug=debug)
-        _ensure_vat_analysis(result)
-        return result
+        return _finalize_detect_result(result)
     if "e-invoicing.gr" in domain:
         result = scrape_einvoicing_gr(url, timeout=timeout, debug=debug)
-        _ensure_vat_analysis(result)
-        return result
+        return _finalize_detect_result(result)
     if "megasoft" in domain or "invoicelink" in domain:
         result = scrape_megasoft(url, timeout=timeout, debug=debug)
-        _ensure_vat_analysis(result)
-        return result
+        return _finalize_detect_result(result)
     if "simpleinvoicing.gr" in domain or "simpleinvoicing" in domain:
         result = scrape_simpleinvoicing(url, timeout=timeout, debug=debug)
-        _ensure_vat_analysis(result)
-        return result
+        return _finalize_detect_result(result)
     if "eskap.gr" in domain or "eskap" in domain:
         result = scrape_eskap(url, timeout=timeout, debug=debug)
-        _ensure_vat_analysis(result)
-        return result
+        return _finalize_detect_result(result)
     # fallback: attempt generic wedoconnect-like scraping then page scanning
     result = scrape_wedoconnect(url, timeout=timeout, debug=debug)
-    _ensure_vat_analysis(result)
-    return result
+    return _finalize_detect_result(result)
 
 # if run as script, quick demo input
 if __name__ == "__main__":

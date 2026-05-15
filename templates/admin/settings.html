@@ -38,7 +38,7 @@
                     </small>
                 </div>
                 
-                <div class="form-group" id="railway_proxy_url_group" style="display: none;">
+                <div class="form-group d-none" id="railway_proxy_url_group">
                     <label for="railway_proxy_url">Railway Proxy URL</label>
                     <input type="url" name="railway_proxy_url" id="railway_proxy_url" class="form-control" 
                            value="{{ settings.get('railway_proxy_url', '') }}" 
@@ -49,10 +49,35 @@
                 </div>
                 
                 <hr>
+
+                <h5 class="mt-3">Firebase Backup Sync</h5>
+                <div class="form-group">
+                    <label for="firebase_backup_sync_mode">Sync Mode</label>
+                    <select name="firebase_backup_sync_mode" id="firebase_backup_sync_mode" class="form-control">
+                        <option value="login_logout" {% if settings.get('firebase_backup_sync_mode', 'login_logout') == 'login_logout' %}selected{% endif %}>
+                            Login/Logout (pull στο login, push στο logout)
+                        </option>
+                        <option value="scheduled" {% if settings.get('firebase_backup_sync_mode') == 'scheduled' %}selected{% endif %}>
+                            Scheduled (χρονοπρογραμματισμένο push/pull)
+                        </option>
+                    </select>
+                    <small class="form-text text-muted">
+                        Επιλέξτε αν ο συγχρονισμός backup με Firebase θα γίνεται στα login/logout events ή με scheduler.
+                    </small>
+                </div>
+
+                <div class="form-group d-none" id="firebase_schedule_group">
+                    <label for="firebase_backup_schedule_minutes">Schedule Interval (minutes)</label>
+                    <input type="number" min="5" step="1" name="firebase_backup_schedule_minutes" id="firebase_backup_schedule_minutes" class="form-control"
+                           value="{{ settings.get('firebase_backup_schedule_minutes', 30) }}">
+                    <small class="form-text text-muted">
+                        Σε mode Scheduled, ο server θα εκτελεί περιοδικά push και pull για κάθε ομάδα που έχει ενεργό scheduled mode.
+                    </small>
+                </div>
                 
                 <div class="form-group">
-                    <label>Site Title</label>
-                    <input name="site_title" class="form-control" value="{{ settings.get('site_title', '') }}" />
+                    <label for="site_title">Site Title</label>
+                    <input id="site_title" name="site_title" class="form-control" value="{{ settings.get('site_title', '') }}" />
                 </div>
                 
                 <button type="submit" class="btn btn-primary">Save Settings</button>
@@ -102,20 +127,33 @@ SENDER_EMAIL=your-verified-sender@yourdomain.com</pre>
 document.addEventListener('DOMContentLoaded', function() {
     const emailProviderSelect = document.getElementById('email_provider');
     const railwayProxyUrlGroup = document.getElementById('railway_proxy_url_group');
+    const firebaseSyncModeSelect = document.getElementById('firebase_backup_sync_mode');
+    const firebaseScheduleGroup = document.getElementById('firebase_schedule_group');
     
     function toggleRailwayProxyUrl() {
         if (emailProviderSelect.value === 'railway_proxy') {
-            railwayProxyUrlGroup.style.display = 'block';
+            railwayProxyUrlGroup.classList.remove('d-none');
         } else {
-            railwayProxyUrlGroup.style.display = 'none';
+            railwayProxyUrlGroup.classList.add('d-none');
+        }
+    }
+
+    function toggleFirebaseScheduleFields(){
+        if (!firebaseSyncModeSelect || !firebaseScheduleGroup) return;
+        if (firebaseSyncModeSelect.value === 'scheduled') {
+            firebaseScheduleGroup.classList.remove('d-none');
+        } else {
+            firebaseScheduleGroup.classList.add('d-none');
         }
     }
     
     // Initial state
     toggleRailwayProxyUrl();
+    toggleFirebaseScheduleFields();
     
     // On change
     emailProviderSelect.addEventListener('change', toggleRailwayProxyUrl);
+    if (firebaseSyncModeSelect) firebaseSyncModeSelect.addEventListener('change', toggleFirebaseScheduleFields);
 });
 </script>
 {% endblock %}

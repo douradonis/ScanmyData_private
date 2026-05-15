@@ -6,11 +6,8 @@ curl -v \
 
 
   
- page tour
-στα email να εμφανιζεται το λογοτυπο
+page tour
 
-τσεκαρισμα αποδειξεων με σειριακο ταμειακης
-reason size limit 128 (fix), χρωματα dark mode modal summary
-test
-
+credentials list partial reload completion
+session manager test--
 

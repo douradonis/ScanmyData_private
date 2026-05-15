@@ -8,6 +8,7 @@
  * NO USER BUTTON - automatically activates when repeat mode enabled
  */
 (function(){
+  if (window.__RC_USE_CANONICAL_RECEIPT_AUTOCONFIRM === true) return;
   if (window.__FAST_FLOW_ATTACHED__) return;
   window.__FAST_FLOW_ATTACHED__ = true;
 
@@ -68,53 +69,15 @@
   }
 
   function showExistingBanner(mark) {
-    // Shows (or creates) the yellow "already exists" banner and hides modal
-    let banner = $id('existingBanner');
-
-    if (!banner) {
-      const form = $id('markSearchForm');
-      const host = form && form.parentNode ? form.parentNode : document.body;
-      banner = document.createElement('div');
-      banner.id = 'existingBanner';
-      banner.className = 'mt-4 p-4 bg-yellow-50 rounded border border-yellow-300 text-yellow-800';
-      banner.innerHTML = `
-        Το MARK <strong></strong> υπάρχει ήδη στο Excel. Θέλεις να τροποποιήσεις τον χαρακτηρισμό;
-        <div class="mt-2 flex gap-2">
-          <button id="forceEditBtn" type="button" class="bg-yellow-600 text-white px-3 py-2 rounded hover:bg-yellow-700">Επιβεβαίωση</button>
-          <button id="dismissBannerBtn" type="button" class="px-3 py-2 border rounded hover:bg-gray-50">Άκυρο</button>
-        </div>
-      `;
-      if (form && form.parentNode) host.insertBefore(banner, form.nextSibling);
-      else host.prepend(banner);
+    // Shows the yellow "already exists" banner and hides modal
+    const banner = $id('existingBanner');
+    if (banner) {
+      banner.style.display = 'block';
+      const modal = $id('summaryModal');
+      if (modal) modal.style.display = 'none';
+      return true;
     }
-
-    const strong = banner.querySelector('strong');
-    if (strong) strong.textContent = String(mark || '').trim() || '?';
-
-    const dismissBtn = banner.querySelector('#dismissBannerBtn');
-    if (dismissBtn) {
-      dismissBtn.onclick = function() {
-        banner.style.display = 'none';
-      };
-    }
-
-    const forceBtn = banner.querySelector('#forceEditBtn');
-    if (forceBtn) {
-      forceBtn.onclick = function() {
-        const markRaw = String(mark || $id('markInput')?.value || '').trim();
-        if (!markRaw) return;
-        if (typeof window.activateReclassificationWithoutReload === 'function' && window.activateReclassificationWithoutReload(markRaw)) {
-          return;
-        }
-        const base = (window.SEARCH_BASE_URL || '/search');
-        window.location = base + '?mark=' + encodeURIComponent(markRaw) + '&force_edit=1';
-      };
-    }
-
-    banner.style.display = 'block';
-    const modal = $id('summaryModal');
-    if (modal) modal.style.display = 'none';
-    return true;
+    return false;
   }
 
   function getModalElement() {
@@ -251,69 +214,90 @@
       // debug: ensure payload.mtype present when user selected one
       try { console.debug('[fast-flow] submitting summary.mtype=', payload.mtype || payload.receipt_mtype || payload.invoice_mtype || ''); } catch(_){}
 
+      // Guard: if a visible MTYPE selector exists in modal, require selection before autosave.
+      try {
+        const invCont = document.getElementById('invoiceMtypeContainer');
+        const invSel = document.getElementById('invoiceMtypeSelect');
+        const recCont = document.getElementById('receiptMtypeContainerSummary');
+        const recSel = document.getElementById('receiptMtypeSelectSummary');
+        const invVisible = !!(invCont && window.getComputedStyle(invCont).display !== 'none');
+        const recVisible = !!(recCont && window.getComputedStyle(recCont).display !== 'none');
+        const invMissing = invVisible && (!invSel || !String(invSel.value || '').trim());
+        const recMissing = recVisible && (!recSel || !String(recSel.value || '').trim());
+        if (invMissing || recMissing) {
+          hideLoadingOverlay();
+          const msg = invMissing
+            ? 'Συμπλήρωσε το Είδος Κίνησης (MTYPE) πριν την αποθήκευση.'
+            : 'Συμπλήρωσε το Είδος Κίνησης για τις αποδείξεις πριν την αποθήκευση.';
+          if (typeof window.showModalAlert === 'function') await window.showModalAlert('Ελλιπή πεδία', msg);
+          else showFlash(msg, 'warning', 3500);
+          return false;
+        }
+      } catch(_) {}
+
       formData.append('summary_json', JSON.stringify(payload));
+      formData.append('ajax', '1'); // Force JSON response; prevents server redirect
 
       const res = await fetch('/save_summary', {
         method: 'POST',
         body: formData,
-        credentials: 'same-origin'
+        credentials: 'same-origin',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' }
       });
-
-      // Server may return:
-      // - 302 redirect if existing MARK (Location header points to /search?allow_edit_existing=1)
-      // - 200 if success
-      // - Other status if error
 
       hideLoadingOverlay();
 
-      // Check if server redirected (existing MARK / reclassification required)
-      if (res.redirected || res.status === 302 || res.url.includes('allow_edit_existing')) {
-        // Show the existing banner instead of error
-        const mark = receipt.mark || receipt.MARK || '?';
-        showFlash('Το MARK ' + mark + ' υπάρχει ήδη στο Excel', 'warning', 4000);
-        showExistingBanner(mark);
+      const j = await res.json().catch(() => null);
+      if (!res.ok || !j || !j.ok) {
+        const errMsg = (j && (j.error || j.message)) ? String(j.error || j.message) : ('Σφάλμα αποθήκευσης (HTTP ' + res.status + ')');
+        showFlash('❌ ' + errMsg, 'error', 5000);
         return false;
       }
 
-      // When fetch followed redirect, backend returns full HTML (search page).
-      // Detect a rendered yellow banner in that HTML and preserve reclassification flow.
-      const contentType = (res.headers.get('content-type') || '').toLowerCase();
-      if (contentType.includes('text/html')) {
-        const html = await res.text().catch(() => '');
-        if (html && html.indexOf('id="existingBanner"') !== -1) {
-          let markFromHtml = (receipt && (receipt.mark || receipt.MARK)) || '';
-          try {
-            const parsed = new DOMParser().parseFromString(html, 'text/html');
-            const strong = parsed.querySelector('#existingBanner strong');
-            if (strong && strong.textContent) markFromHtml = strong.textContent.trim();
-          } catch(_) {}
-          showFlash('Το MARK ' + (markFromHtml || '?') + ' υπάρχει ήδη στο Excel', 'warning', 4000);
-          showExistingBanner(markFromHtml || '?');
-          return false;
-        }
-      }
+      // Success: clear search inputs/cache and refresh table fragment.
+      try { window.__RC_CLEAR_MARK_AFTER_SAVE = true; } catch(_) {}
 
-      if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        throw new Error(`Save failed: ${res.status}`);
-      }
-
-      // Success - update table optimistically
       const urlInput = $id('scrapeUrlInput');
-      if (urlInput) urlInput.value = '';
+      if (urlInput) {
+        urlInput.value = '';
+        try { urlInput.dispatchEvent(new Event('input', { bubbles: true })); } catch(_) {}
+      }
 
       const markInput = $id('markInput');
-      if (markInput) markInput.value = '';
+      if (markInput) {
+        markInput.value = '';
+        try { markInput.dispatchEvent(new Event('input', { bubbles: true })); } catch(_) {}
+      }
 
-      showFlash('✓ Αποθηκεύτηκε η απόδειξη', 'success', 2500);
+      try { if (typeof window.clearSearchInputs === 'function') window.clearSearchInputs(); } catch(_) {}
+      try { if (typeof window.clearReceiptSearchCacheOnClose === 'function') window.clearReceiptSearchCacheOnClose(); } catch(_) {}
+
       hideModal();
 
-      // Refresh table fragment without full page reload.
+      let reloaded = false;
       if (typeof window.partiallyReloadInvoiceTable === 'function') {
-        setTimeout(() => {
-          try { window.partiallyReloadInvoiceTable(); } catch(_) {}
-        }, 120);
+        try { reloaded = !!(await window.partiallyReloadInvoiceTable()); } catch(_) { reloaded = false; }
       }
+
+      // Fallback for repeat mode: force-refresh table fragment even if helper returns false.
+      if (!reloaded) {
+        try {
+          const tableRes = await fetch('/list/fragment', { method: 'GET', credentials: 'same-origin' });
+          if (tableRes.ok) {
+            const data = await tableRes.json().catch(() => null);
+            const container = document.getElementById('summary-container');
+            if (data && data.ok && data.table_html && container) {
+              container.innerHTML = data.table_html;
+              if (typeof window.FBP_INIT_TABULATOR === 'function') window.FBP_INIT_TABULATOR();
+              else if (typeof window.FBP_INIT_TABLE === 'function') window.FBP_INIT_TABLE();
+              reloaded = true;
+            }
+          }
+        } catch(_) {}
+      }
+
+      if (reloaded) showFlash('✓ Αποθηκεύτηκε η απόδειξη', 'success', 2500);
+      else showFlash('Η αποθήκευση ολοκληρώθηκε, αλλά δεν έγινε ανανέωση πίνακα. Πάτησε αναζήτηση ή ανανέωση λίστας.', 'warning', 4500);
 
       return true;
     } catch (err) {

@@ -1,5 +1,6 @@
 /* receipts_autosubmit_strict.js — Receipts-only, URL-only, deterministic auto-submit */
 (function(){
+  if (window.__RC_USE_CANONICAL_RECEIPT_AUTOCONFIRM === true) return;
   if (window.__rc_receipts_strict__) return;
   window.__rc_receipts_strict__ = true;
 

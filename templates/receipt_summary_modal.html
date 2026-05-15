@@ -71,6 +71,8 @@
 
 <script>
 (function(){
+    // Skip if guard explicitly disables this, or if already bound.
+    if (window.__RC_DISABLE_EARLY_MODAL_AJAX_SAVE) return;
     if (window.__RC_EARLY_MODAL_AJAX_SAVE_BOUND) return;
     window.__RC_EARLY_MODAL_AJAX_SAVE_BOUND = true;
 
@@ -88,6 +90,13 @@
             const fd = new FormData(form);
             fd.set('ajax', '1');
 
+            let markBeforeSave = '';
+            try {
+                const raw = String(fd.get('summary_json') || '').trim();
+                const parsed = raw ? JSON.parse(raw) : null;
+                markBeforeSave = String((parsed && (parsed.mark || parsed.MARK || parsed.number)) || fd.get('mark') || '').trim();
+            } catch(_) {}
+
             const res = await fetch(form.getAttribute('action') || '/save_summary', {
                 method: 'POST',
                 credentials: 'same-origin',
@@ -98,7 +107,14 @@
             if (!res.ok || (j && j.ok === false)) {
                 const msg = (j && (j.error || j.message)) ? (j.error || j.message) : ('Αποτυχία αποθήκευσης (HTTP ' + res.status + ')');
                 if (typeof showFlash === 'function') showFlash(String(msg), 'error', 5000);
+                try { if (typeof clearSearchInputs === 'function') clearSearchInputs(); } catch(_) {}
+                try { if (typeof clearReceiptSearchCacheOnClose === 'function') clearReceiptSearchCacheOnClose(); } catch(_) {}
                 return;
+            }
+
+            const savedMark = String((j && (j.saved_mark || j.mark || j.MARK || j.number)) || markBeforeSave || '').trim();
+            if (savedMark) {
+                try { window.__RC_PENDING_LIST_HIGHLIGHT_MARK = savedMark; } catch(_) {}
             }
 
             try {
@@ -119,10 +135,11 @@
             try {
                 let reloaded = false;
                 if (typeof partiallyReloadInvoiceTable === 'function') {
-                    reloaded = !!(await partiallyReloadInvoiceTable());
+                    reloaded = !!(await partiallyReloadInvoiceTable({ highlightMark: savedMark }));
                 }
                 if (!reloaded) {
-                    const tableRes = await fetch('/list/fragment', { method: 'GET', credentials: 'same-origin' });
+                    const query = savedMark ? ('?highlight_mark=' + encodeURIComponent(savedMark)) : '';
+                    const tableRes = await fetch('/list/fragment' + query, { method: 'GET', credentials: 'same-origin' });
                     if (tableRes.ok) {
                         const data = await tableRes.json().catch(() => null);
                         const container = document.getElementById('summary-container');
@@ -130,6 +147,12 @@
                             container.innerHTML = data.table_html;
                             if (typeof window.FBP_INIT_TABULATOR === 'function') window.FBP_INIT_TABULATOR();
                             else if (typeof window.FBP_INIT_TABLE === 'function') window.FBP_INIT_TABLE();
+                            try {
+                                if (savedMark && typeof window.FBP_HIGHLIGHT_ROW_BY_MARK === 'function') {
+                                    setTimeout(function(){ try { window.FBP_HIGHLIGHT_ROW_BY_MARK(savedMark); } catch(_) {} }, 80);
+                                    setTimeout(function(){ try { window.FBP_HIGHLIGHT_ROW_BY_MARK(savedMark); } catch(_) {} }, 260);
+                                }
+                            } catch(_) {}
                         }
                     }
                 }
@@ -147,10 +170,11 @@
                 } catch(_) {}
             }, 5200);
 
-            // Clear search input + cache after successful save
+            // Clear search input + cache after successful save.
+            // Set the flag first so mark-input watchers don't restore MARK from URL/history.
+            try { window.__RC_CLEAR_MARK_AFTER_SAVE = true; } catch(_) {}
             try { if (typeof clearSearchInputs === 'function') clearSearchInputs(); } catch(_) {}
             try { if (typeof clearReceiptSearchCacheOnClose === 'function') clearReceiptSearchCacheOnClose(); } catch(_) {}
-            try { window.__RC_CLEAR_MARK_AFTER_SAVE = true; } catch(_) {}
             // second pass to catch any late autofill that runs after save
             setTimeout(() => { try { if (typeof clearSearchInputs === 'function') clearSearchInputs(); } catch(_) {} }, 120);
         } catch (err) {
@@ -185,6 +209,7 @@
     document.addEventListener('click', function(e){
         const trigger = e.target && e.target.closest ? e.target.closest('#saveSummaryBtn, #saveSummaryForm button[type="submit"]') : null;
         if (!trigger) return;
+        if ((window.__RC_BLOCK_SUMMARY_SAVE_UNTIL || 0) > Date.now()) return;
         const form = document.getElementById('saveSummaryForm');
         if (!form) return;
         e.preventDefault();
@@ -195,10 +220,68 @@
     document.addEventListener('submit', function(e){
         const form = e && e.target && e.target.id === 'saveSummaryForm' ? e.target : null;
         if (!form) return;
+        if ((window.__RC_BLOCK_SUMMARY_SAVE_UNTIL || 0) > Date.now()) {
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+        }
         e.preventDefault();
         e.stopPropagation();
         void forceAjaxSave(form);
     }, true);
+})();
+
+// ===== mtype guard: disable save button when invoiceMtypeContainer is visible but no mtype selected =====
+(function setupMtypeGuard() {
+    function updateSaveBtnState() {
+        try {
+            const btn = document.getElementById('saveSummaryBtn');
+            if (!btn) return;
+            const invContainer = document.getElementById('invoiceMtypeContainer');
+            const invSelect = document.getElementById('invoiceMtypeSelect');
+            const recContainer = document.getElementById('receiptMtypeContainerSummary');
+            const recSelect = document.getElementById('receiptMtypeSelectSummary');
+            const invVisible = invContainer && window.getComputedStyle(invContainer).display !== 'none';
+            const recVisible = recContainer && window.getComputedStyle(recContainer).display !== 'none';
+            const invMissing = invVisible && (!invSelect || !String(invSelect.value || '').trim());
+            const recMissing = recVisible && (!recSelect || !String(recSelect.value || '').trim());
+            if (invMissing || recMissing) {
+                btn.disabled = true;
+                btn.title = 'Επίλεξε Είδος Κίνησης (MTYPE) για να ενεργοποιηθεί η αποθήκευση';
+                btn.classList.add('opacity-50', 'cursor-not-allowed');
+            } else {
+                btn.disabled = false;
+                btn.title = '';
+                btn.classList.remove('opacity-50', 'cursor-not-allowed');
+            }
+        } catch(_) {}
+    }
+
+    // Update on mtype select change
+    document.addEventListener('change', function(e) {
+        if (!e.target) return;
+        if (e.target.id === 'invoiceMtypeSelect' || e.target.id === 'receiptMtypeSelectSummary') updateSaveBtnState();
+    });
+
+    // Update whenever summaryModal or invoiceMtypeContainer visibility changes
+    function observeVisibility() {
+        try {
+            const obs = new MutationObserver(function() { updateSaveBtnState(); });
+            const modal = document.getElementById('summaryModal');
+            if (modal) obs.observe(modal, { attributes: true, attributeFilter: ['style'] });
+            const cont = document.getElementById('invoiceMtypeContainer');
+            if (cont) obs.observe(cont, { attributes: true, attributeFilter: ['style'] });
+            const recCont = document.getElementById('receiptMtypeContainerSummary');
+            if (recCont) obs.observe(recCont, { attributes: true, attributeFilter: ['style'] });
+        } catch(_) {}
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function() { observeVisibility(); updateSaveBtnState(); });
+    } else {
+        observeVisibility();
+        updateSaveBtnState();
+    }
 })();
 </script>
 

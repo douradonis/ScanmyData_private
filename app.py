@@ -25,6 +25,8 @@ import json
 import traceback
 import base64
 import re
+import time
+import errno
 from urllib.parse import urlsplit, urlparse, urlunparse
 from logging.handlers import RotatingFileHandler
 import datetime
@@ -127,6 +129,7 @@ except Exception:
 
 from flask import current_app
 from epsilon_bridge_multiclient_strict import build_preview_rows_for_ui
+import utils as utils
 from utils import decode_qr_from_file, decode_qr_payloads, extract_mark
 
 # Firebase & Admin imports
@@ -162,6 +165,66 @@ def float_from_comma(value):
         return float(s)
     except Exception:
         return 0.0
+
+
+INVOICE_TYPE_LABELS = {
+    "1.1": "Τιμολόγιο Πώλησης",
+    "1.2": "Τιμολόγιο Πώλησης / Ενδοκοινοτικές Παραδόσεις",
+    "1.3": "Τιμολόγιο Πώλησης / Παραδόσεις Τρίτων Χωρών",
+    "1.4": "Τιμολόγιο Πώλησης / Πώληση για Λογαριασμό Τρίτων",
+    "1.5": "Τιμολόγιο Πώλησης / Εκκαθάριση Πωλήσεων Τρίτων",
+    "1.6": "Τιμολόγιο Πώλησης / Συμπληρωματικό Παραστατικό",
+    "2.1": "Τιμολόγιο Παροχής Υπηρεσιών",
+    "2.2": "Τιμολόγιο Παροχής / Ενδοκοινοτική Παροχή Υπηρεσιών",
+    "2.3": "Τιμολόγιο Παροχής / Παροχή Υπηρεσιών σε λήπτη Τρίτης Χώρας",
+    "2.4": "Τιμολόγιο Παροχής / Συμπληρωματικό Παραστατικό",
+    "3.1": "Τίτλος Κτήσης (μη υπόχρεος Εκδότης)",
+    "3.2": "Τίτλος Κτήσης (άρνηση έκδοσης από υπόχρεο Εκδότη)",
+    "5.1": "Πιστωτικό Τιμολόγιο / Συσχετιζόμενο",
+    "5.2": "Πιστωτικό Τιμολόγιο / Μη Συσχετιζόμενο",
+    "6.1": "Στοιχείο Αυτοπαράδοσης",
+    "6.2": "Στοιχείο Ιδιοχρησιμοποίησης",
+    "7.1": "Συμβόλαιο - Έσοδο",
+    "8.1": "Ενοίκια - Έσοδο",
+    "8.2": "Τέλος ανθεκτικότητας κλιματικής κρίσης",
+    "8.4": "Απόδειξη Είσπραξης POS",
+    "8.5": "Απόδειξη Επιστροφής POS",
+    "8.6": "Δελτίο Παραγγελίας Εστίασης",
+    "9.3": "Δελτίο Αποστολής",
+    "11.1": "ΑΛΠ",
+    "11.2": "ΑΠΥ",
+    "11.3": "Απλοποιημένο Τιμολόγιο",
+    "11.4": "Πιστωτικό Στοιχείο Λιανικής",
+    "11.5": "Απόδειξη Λιανικής Πώλησης για Λογαριασμό Τρίτων",
+    "13.1": "Έξοδα - Αγορές Λιανικών Συναλλαγών ημεδαπής / αλλοδαπής",
+    "13.2": "Παροχή Λιανικών Συναλλαγών ημεδαπής / αλλοδαπής",
+    "13.3": "Κοινόχρηστα",
+    "13.4": "Συνδρομές",
+    "13.30": "Παραστατικά Οντότητας ως Αναγράφονται από την ίδια",
+    "13.31": "Πιστωτικό Στοιχείο Λιανικής ημεδαπής / αλλοδαπής",
+    "14.1": "Τιμολόγιο / Ενδοκοινοτικές Αποκτήσεις",
+    "14.2": "Τιμολόγιο / Αποκτήσεις Τρίτων Χωρών",
+    "14.3": "Τιμολόγιο / Ενδοκοινοτική Λήψη Υπηρεσιών",
+    "14.4": "Τιμολόγιο / Λήψη Υπηρεσιών Τρίτων Χωρών",
+    "14.5": "ΕΦΚΑ και λοιποί Ασφαλιστικοί Οργανισμοί",
+    "14.30": "Παραστατικά Οντότητας ως Αναγράφονται από την ίδια",
+    "14.31": "Πιστωτικό ημεδαπής / αλλοδαπής",
+    "15.1": "Συμβόλαιο - Έξοδο",
+    "16.1": "Ενοίκιο Έξοδο",
+    "17.1": "Μισθοδοσία",
+    "17.2": "Αποσβέσεις",
+    "17.3": "Λοιπές Εγγραφές Τακτοποίησης Εσόδων - Λογιστική Βάση",
+    "17.4": "Λοιπές Εγγραφές Τακτοποίησης Εσόδων - Φορολογική Βάση",
+    "17.5": "Λοιπές Εγγραφές Τακτοποίησης Εξόδων - Λογιστική Βάση",
+    "17.6": "Λοιπές Εγγραφές Τακτοποίησης Εξόδων - Φορολογική Βάση",
+}
+
+
+def map_invoice_type_label(value: Any) -> str:
+    code = str(value or "").strip()
+    if not code:
+        return ""
+    return INVOICE_TYPE_LABELS.get(code, code)
 
 # --- Compatibility shim: unify invoice-scraper vs receipt-scraper usage ---
 # Αυτό το snippet προσπαθεί να χρησιμοποιήσει:
@@ -807,7 +870,7 @@ def _prime_remote_summary_state(
     if allow_edit_existing and not force_edit_active and mark_text:
         payload["reclassification_banner"] = {
             "visible": True,
-            "text": f"Το MARK {mark_text} υπάρχει ήδη στο Excel. Θέλεις να τροποποιήσεις τον χαρακτηρισμό;",
+            "text": f"Το MARK {mark_text} υπάρχει ήδη στο Epsilon. Θέλεις να τροποποιήσεις τον χαρακτηρισμό;",
         }
 
     warnings: List[Dict[str, Any]] = []
@@ -850,9 +913,11 @@ def _prime_remote_summary_state(
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 
 DATA_DIR = os.path.join(BASE_DIR, "data")
+ADMIN_SYSTEM_DIR = os.path.join(DATA_DIR, 'system')
 UPLOADS_DIR = os.path.join(BASE_DIR, "uploads")
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
 os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(ADMIN_SYSTEM_DIR, exist_ok=True)
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 
 CACHE_FILE = os.path.join(DATA_DIR, "invoices_cache.json")
@@ -875,6 +940,8 @@ ALLOWED_CLIENT_EXT = {'.xlsx', '.xls', '.csv'}
 app = Flask(__name__, template_folder=TEMPLATES_DIR)
 app.secret_key = os.getenv("FLASK_SECRET", "douradonis1997")
 app.config["UPLOAD_FOLDER"] = UPLOADS_DIR
+# Keep backend inactivity timeout aligned with frontend timeout.
+app.config.setdefault('SESSION_TIMEOUT_SECONDS', int(os.getenv('SESSION_TIMEOUT_SECONDS', '900')))
 
 # --- Initialize Logger ---
 logger = logging.getLogger(__name__)
@@ -1069,14 +1136,6 @@ def get_group_base_dir():
 
     if grp and getattr(grp, 'data_folder', None):
         base = os.path.join(BASE_DIR, 'data', grp.data_folder)
-
-        # If folder doesn't exist, attempt lazy-pull from Firebase before creating empty folder
-        if not os.path.exists(base):
-            try:
-                import firebase_config
-                firebase_config.ensure_group_data_local(grp.data_folder)
-            except Exception as e:
-                current_app.logger.debug(f"Lazy-pull failed for group {grp.data_folder}: {e}")
     else:
         base = DATA_DIR
 
@@ -1334,6 +1393,19 @@ def session_heartbeat():
         from flask_login import current_user
         from flask import session as _session
         from models import db as _db
+        # Ignore automatic background polling endpoints; they should not count as user activity.
+        path = (request.path or '')
+        non_interactive_paths = {
+            '/api/global_notifications',
+            '/api/fetch_progress',
+            '/api/last_fetch_date',
+            '/api/fetch_bulk/progress',
+            '/api/support/ticket/me',
+            '/api/support/events',
+            '/api/sync_progress',
+        }
+        if path in non_interactive_paths:
+            return None
         if not getattr(current_user, 'is_authenticated', False):
             return None
         sid = _session.get('session_id')
@@ -1401,6 +1473,21 @@ def enforce_active_session_claim():
         now = datetime.datetime.utcnow()
         last_active = getattr(current_user, 'last_active_at', None)
         if last_active and (now - last_active).total_seconds() > timeout_seconds:
+            # Timeout path: if admin policy is login/logout sync, schedule push in background.
+            # The worker itself defers while other users in the same group are active.
+            try:
+                import utils as _utils
+                if _utils.firebase_sync_login_logout_enabled():
+                    active_group_name = str(session.get('active_group') or '').strip()
+                    if active_group_name:
+                        from auth import _schedule_timeout_push_for_group
+                        _schedule_timeout_push_for_group(active_group_name, getattr(current_user, 'id', 0))
+            except Exception:
+                try:
+                    current_app.logger.exception('Failed scheduling server-timeout background push')
+                except Exception:
+                    pass
+
             try:
                 from models import db as _db
                 current_user.end_session(sid)
@@ -1527,15 +1614,26 @@ if not log.handlers:
     fh.setFormatter(GreeceTZFormatter(fmt=fmt, datefmt=datefmt, tz=GREECE_TZ))
     log.addHandler(fh)
 
-# (προαιρετικά) συντόνισε και τον werkzeug logger να γράφει με το ίδιο formatter
+# (προαιρετικά) συντόνισε και τον werkzeug logger να γράφει με ασφαλή formatter.
+# Σε ορισμένα περιβάλλοντα (π.χ. Python 3.14) ο default handler chain μπορεί
+# να πετάει logging-format exceptions σε request logs.
 try:
     wlog = logging.getLogger("werkzeug")
     wlog.setLevel(logging.INFO)
-    if not wlog.handlers:
-        wsh = logging.StreamHandler(sys.stdout)
-        wsh.setLevel(logging.INFO)
-        wsh.setFormatter(GreeceTZFormatter(fmt=fmt, datefmt=datefmt, tz=GREECE_TZ))
-        wlog.addHandler(wsh)
+    wlog.propagate = False
+
+    for existing in list(wlog.handlers):
+        try:
+            wlog.removeHandler(existing)
+        except Exception:
+            pass
+
+    wz_fmt = "%(asctime)s %(levelname)s %(message)s"
+    wz_datefmt = "%Y-%m-%d %H:%M:%S%z"
+    wsh = logging.StreamHandler(sys.stdout)
+    wsh.setLevel(logging.INFO)
+    wsh.setFormatter(GreeceTZFormatter(fmt=wz_fmt, datefmt=wz_datefmt, tz=GREECE_TZ))
+    wlog.addHandler(wsh)
 except Exception:
     pass
 
@@ -1574,6 +1672,15 @@ CREDENTIALS_PATH = Path(os.environ.get("CREDENTIALS_PATH", DEFAULT_CRED_PATH))
 
 VAT_KEYS = ["0%", "6%", "13%", "17%", "24%"]
 VAT_RATE_NUMERIC = ["0", "3", "4", "6", "9", "13", "17", "24"]
+AFM_RULE_MAPPING_KEYS = ["kat_fpa_a", "kat_fpa_b", "kat_fpa_g", "kat_fpa_d", "kat_fpa_e"]
+AFM_RULE_KEY_TO_RATE = {
+    "kat_fpa_a": "0%",
+    "kat_fpa_b": "6%",
+    "kat_fpa_g": "13%",
+    "kat_fpa_d": "17%",
+    "kat_fpa_e": "24%",
+}
+AFM_RULE_RATE_TO_KEY = {v: k for k, v in AFM_RULE_KEY_TO_RATE.items()}
 
 
 def _normalize_repeat_mapping(raw: Optional[Dict[str, Any]]) -> Dict[str, str]:
@@ -2583,6 +2690,314 @@ def _is_general_profile(profile: dict) -> bool:
     normalized = name.casefold()
     return normalized in {"γενικο", "γενικό", "general", "default"}
 
+
+def _normalize_afm_rule(entry: dict) -> Optional[dict]:
+    if not isinstance(entry, dict):
+        return None
+    supplier_afm = _normalize_afm(entry.get("supplier_afm") or entry.get("afm") or entry.get("issuer_afm"))
+    if not supplier_afm:
+        return None
+    mapping_raw = entry.get("mapping") if isinstance(entry.get("mapping"), dict) else {}
+    mapping: Dict[str, str] = {}
+    for key in AFM_RULE_MAPPING_KEYS:
+        legacy_rate_key = AFM_RULE_KEY_TO_RATE.get(key)
+        mapping[key] = str(mapping_raw.get(key) or mapping_raw.get(legacy_rate_key) or "").strip()
+    return {
+        "id": str(entry.get("id") or supplier_afm).strip() or supplier_afm,
+        "supplier_afm": supplier_afm,
+        "supplier_name": str(entry.get("supplier_name") or entry.get("name") or "").strip(),
+        "mapping": mapping,
+        "invoice_mtype": str(entry.get("invoice_mtype") or "").strip(),
+        "receipt_mtype": str(entry.get("receipt_mtype") or "").strip(),
+        "enabled": bool(entry.get("enabled", True)),
+        "updated_at": entry.get("updated_at"),
+    }
+
+
+def _get_afm_rules(creds, vat: str) -> List[dict]:
+    cust, _ = _get_customer(creds, vat, create=False)
+    if not isinstance(cust, dict):
+        return []
+    out: List[dict] = []
+    for entry in cust.get("afm_rules") or []:
+        rule = _normalize_afm_rule(entry)
+        if rule:
+            out.append(rule)
+    return out
+
+
+def _set_afm_rules(creds, vat: str, rules: list):
+    cust, _ = _get_customer(creds, vat, create=True)
+    if not isinstance(cust, dict):
+        return creds
+    normalized: List[dict] = []
+    for entry in rules or []:
+        rule = _normalize_afm_rule(entry)
+        if rule:
+            normalized.append(rule)
+    cust["afm_rules"] = normalized
+    return creds
+
+
+def _find_client_in_group_credentials_files(vat_value: str = "", name_value: str = ""):
+    try:
+        for cand in Path(DATA_DIR).glob('*/credentials.json'):
+            try:
+                with cand.open('r', encoding='utf-8') as f:
+                    arr = json.load(f) or []
+            except Exception:
+                continue
+            found = _find_client(arr, vat=vat_value or None, name=name_value or None)
+            if found:
+                return found, arr, cand
+    except Exception:
+        pass
+    return None, None, None
+
+
+def _first_nonempty_value(*values) -> str:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text and text.lower() not in ("none", "nan"):
+            return text
+    return ""
+
+
+def _extract_vat_percent_from_line(line: dict) -> str:
+    if not isinstance(line, dict):
+        return ""
+    try:
+        vat_category = _first_nonempty_value(
+            line.get("vatCategory"),
+            line.get("vat_category"),
+            line.get("vatCat"),
+            line.get("vat_cat"),
+        )
+        if vat_category:
+            match = re.search(r"(\d+)\s*%", vat_category)
+            if match:
+                return match.group(1) + "%"
+            match = re.search(r"(\d+)", vat_category)
+            if match:
+                return match.group(1) + "%"
+        vat_rate = _first_nonempty_value(line.get("vat"), line.get("vatRate"), line.get("vat_rate"))
+        if vat_rate:
+            match = re.search(r"(\d+)", vat_rate.replace(',', '.'))
+            if match:
+                return match.group(1) + "%"
+    except Exception:
+        return ""
+    return ""
+
+
+def _resolve_supplier_afm_for_rule(summary: Optional[Dict[str, Any]], active_vat: str = "") -> str:
+    if not isinstance(summary, dict):
+        return ""
+    active_norm = _normalize_afm(active_vat)
+    raw = summary.get("raw") if isinstance(summary.get("raw"), dict) else {}
+    candidates = [
+        summary.get("AFM_issuer"),
+        summary.get("issuer_vat"),
+        summary.get("issuer_afm"),
+        summary.get("issuerVat"),
+        summary.get("counterparty_afm"),
+        summary.get("counterpartyAfm"),
+        raw.get("AFM_issuer"),
+        raw.get("issuer_vat"),
+        raw.get("issuer_afm"),
+        raw.get("issuerVat"),
+        raw.get("AFM"),
+        summary.get("AFM"),
+    ]
+    for cand in candidates:
+        normalized = _normalize_afm(cand)
+        if not normalized:
+            continue
+        if active_norm and normalized == active_norm and cand is not summary.get("AFM"):
+            continue
+        if active_norm and normalized == active_norm:
+            continue
+        return normalized
+
+    # Backend fallback: resolve issuer AFM from stored document rows by MARK.
+    # This prevents client-side payload gaps from bypassing AFM-rule enforcement.
+    try:
+        mark = str(
+            summary.get("mark")
+            or summary.get("MARK")
+            or summary.get("invoice_id")
+            or summary.get("id")
+            or ""
+        ).strip()
+        if mark:
+            docs_file = group_path(f"{active_vat}_invoices.json")
+            docs = json_read(docs_file) or []
+            for doc in docs:
+                if not isinstance(doc, dict):
+                    continue
+                doc_mark = str(
+                    doc.get("mark")
+                    or doc.get("MARK")
+                    or doc.get("invoice_id")
+                    or doc.get("id")
+                    or ""
+                ).strip()
+                if doc_mark != mark:
+                    continue
+                for key in (
+                    "AFM_issuer", "issuer_vat", "issuer_afm", "issuerVat",
+                    "counterparty_afm", "counterpartyAfm", "AFM"
+                ):
+                    normalized = _normalize_afm(doc.get(key))
+                    if not normalized:
+                        continue
+                    if active_norm and normalized == active_norm:
+                        continue
+                    return normalized
+    except Exception:
+        log.exception("_resolve_supplier_afm_for_rule: fallback lookup by MARK failed")
+    return ""
+
+
+def _validate_summary_against_afm_rules(
+    client: Optional[Dict[str, Any]],
+    summary: Optional[Dict[str, Any]],
+    *,
+    active_vat: str = "",
+    is_receipt: Optional[bool] = None,
+) -> Dict[str, Any]:
+    base_result: Dict[str, Any] = {
+        "applies": False,
+        "mismatch": False,
+        "rule": None,
+        "supplier_afm": "",
+        "present_rates": [],
+        "category_mismatches": [],
+        "mtype_mismatch": None,
+    }
+    if not isinstance(client, dict) or not isinstance(summary, dict):
+        return base_result
+
+    rules = []
+    for entry in client.get("afm_rules") or []:
+        rule = _normalize_afm_rule(entry)
+        if rule and rule.get("enabled"):
+            rules.append(rule)
+    if not rules:
+        return base_result
+
+    supplier_afm = _resolve_supplier_afm_for_rule(summary, active_vat=active_vat)
+    if not supplier_afm:
+        return base_result
+
+    rule = next((item for item in rules if item.get("supplier_afm") == supplier_afm), None)
+    if not rule:
+        return base_result
+
+    result = dict(base_result)
+    result["applies"] = True
+    result["rule"] = rule
+    result["supplier_afm"] = supplier_afm
+
+    receipt_mode = bool(is_receipt)
+    if is_receipt is None:
+        doc_type = str(summary.get("docType") or summary.get("doc_type") or "").strip().lower()
+        receipt_mode = doc_type.startswith("receipt") or bool(summary.get("is_receipt"))
+
+    actual_categories: Dict[str, set] = {}
+    present_rates: List[str] = []
+    for line in summary.get("lines") or []:
+        if not isinstance(line, dict):
+            continue
+        vat_key = _extract_vat_percent_from_line(line)
+        if not vat_key:
+            continue
+        if vat_key not in present_rates:
+            present_rates.append(vat_key)
+        actual_categories.setdefault(vat_key, set())
+        actual_categories[vat_key].add(str(line.get("category") or "").strip())
+    result["present_rates"] = present_rates
+
+    labels = _category_labels_for_client(client)
+    category_mismatches: List[Dict[str, Any]] = []
+    for vat_key in present_rates:
+        mapping = rule.get("mapping") if isinstance(rule.get("mapping"), dict) else {}
+        expected = str(
+            mapping.get(vat_key)
+            or mapping.get(AFM_RULE_RATE_TO_KEY.get(vat_key, ""))
+            or ""
+        ).strip()
+        if not expected:
+            continue
+        actual_set = {str(v).strip() for v in actual_categories.get(vat_key) or set()}
+        actual_set = {v for v in actual_set if v is not None}
+        if actual_set == {expected}:
+            continue
+        category_mismatches.append({
+            "vat_key": vat_key,
+            "expected": expected,
+            "expected_label": labels.get(expected, expected),
+            "actual": sorted(actual_set),
+            "actual_labels": [labels.get(v, v) if v else "(κενό)" for v in sorted(actual_set)],
+        })
+
+    expected_mtype = str(rule.get("invoice_mtype") or "").strip()
+    selected_mtype = str(summary.get("invoice_mtype") or summary.get("mtype") or "").strip()
+    mtype_mismatch = None
+    if (not receipt_mode) and expected_mtype and expected_mtype != selected_mtype:
+        mtype_mismatch = {
+            "expected": expected_mtype,
+            "actual": selected_mtype,
+        }
+
+    result["category_mismatches"] = category_mismatches
+    result["mtype_mismatch"] = mtype_mismatch
+    result["mismatch"] = bool(category_mismatches or mtype_mismatch)
+    return result
+
+
+def _build_afm_rule_warning_text(client: Optional[Dict[str, Any]], validation: Dict[str, Any], *, is_receipt: bool = False) -> str:
+    rule = (validation or {}).get("rule") or {}
+    supplier_afm = str((validation or {}).get("supplier_afm") or rule.get("supplier_afm") or "").strip()
+    supplier_name = str(rule.get("supplier_name") or "").strip()
+    target = supplier_name + (f" ({supplier_afm})" if supplier_afm else "") if supplier_name else supplier_afm
+    parts: List[str] = []
+    for item in (validation or {}).get("category_mismatches") or []:
+        vat_key = str(item.get("vat_key") or "").strip()
+        expected_label = str(item.get("expected_label") or item.get("expected") or "").strip()
+        actual_labels = [str(v or "(κενό)").strip() for v in (item.get("actual_labels") or [])]
+        actual_text = ", ".join(actual_labels) if actual_labels else "(κενό)"
+        parts.append(f"{vat_key}: αναμένεται '{expected_label}', βρέθηκε '{actual_text}'")
+    mtype_mismatch = (validation or {}).get("mtype_mismatch") or {}
+    if mtype_mismatch:
+        expected_mtype = str(mtype_mismatch.get("expected") or "").strip()
+        actual_mtype = str(mtype_mismatch.get("actual") or "").strip() or "(κενό)"
+        label = "receipt MTYPE" if is_receipt else "invoice MTYPE"
+        parts.append(f"{label}: αναμένεται '{expected_mtype}', βρέθηκε '{actual_mtype}'")
+
+    details = "\n".join(f"- {part}" for part in parts if part)
+    doc_label = "απόδειξη" if is_receipt else "παραστατικό"
+    header_target = target or "το συγκεκριμένο ΑΦΜ"
+    return (
+        f"Υπάρχει αποθηκευμένος κανόνας χαρακτηρισμών για {header_target}.\n\n"
+        f"Το {doc_label} διαφέρει από τον κανόνα στα παρακάτω:\n"
+        f"{details}\n\n"
+        "Θέλεις να συνεχίσεις με τα τρέχοντα στοιχεία;"
+    ).strip()
+
+
+def _afm_rules_apply_for_client(client: Optional[Dict[str, Any]], *, is_receipt: bool = False) -> bool:
+    if is_receipt:
+        return False
+
+    # Keep this helper self-contained. A local _normalize_book_category exists
+    # inside save_summary, so we cannot depend on it at module level.
+    raw = str((client or {}).get("book_category") or "").strip().upper()
+    category = "G" if raw in {"G", "Γ"} else ("B" if raw in {"B", "Β"} else "")
+    return category in ("B", "G")
+
 def _get_repeat_entry(creds, vat: str):
     cust, _ = _get_customer(creds, vat, create=False)
     if not isinstance(cust, dict):
@@ -3398,8 +3813,22 @@ def set_active_fiscal_year(year):
     try:
         p = _fiscal_meta_path()
         os.makedirs(os.path.dirname(p), exist_ok=True)
+
+        # Preserve existing metadata (for example last_fetches) and only update fiscal_year.
+        data = {}
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as fh:
+                    data = json.load(fh) or {}
+            except Exception:
+                data = {}
+
+        if not isinstance(data, dict):
+            data = {}
+        data["fiscal_year"] = int(year)
+
         with open(p, "w", encoding="utf-8") as fh:
-            json.dump({"fiscal_year": int(year)}, fh)
+            json.dump(data, fh)
         try:
             log.info("Set active fiscal year: %s", year)
         except Exception:
@@ -3520,6 +3949,37 @@ def get_last_fetch_date(credential_name: str, only_meta: bool = False) -> Option
                 return None
     except Exception:
         return None
+
+
+def _format_last_fetch_date_for_display(last_date: Optional[str]) -> Optional[str]:
+    """Return last-fetch timestamp formatted for the UI in Europe/Athens time."""
+    if not last_date:
+        return None
+
+    try:
+        try:
+            dt = datetime.datetime.fromisoformat(last_date)
+        except Exception:
+            dt = None
+
+        if dt is None:
+            return last_date
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+
+        try:
+            from zoneinfo import ZoneInfo
+            dt = dt.astimezone(ZoneInfo('Europe/Athens'))
+        except Exception:
+            try:
+                dt = dt.astimezone(datetime.timezone(datetime.timedelta(hours=2)))
+            except Exception:
+                pass
+
+        return dt.strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return last_date
 
 
 def _get_fetch_tracking_key(credential_name: str = '', credential_vat: str = '') -> str:
@@ -4245,8 +4705,25 @@ def json_write(path, obj):
             except Exception:
                 # some file systems may not support fsync; ignore if fails
                 pass
-        # atomic replace
-        os.replace(tmp, path)
+        # atomic replace with Windows-safe retry (handles transient file locks)
+        def _replace_with_retry(src, dst, retries=5, base_delay=0.08):
+            for attempt in range(retries):
+                try:
+                    os.replace(src, dst)
+                    return
+                except PermissionError as e:
+                    if attempt == retries - 1:
+                        raise
+                    time.sleep(base_delay * (2 ** attempt))
+                except OSError as e:
+                    if e.errno in (errno.EBUSY, errno.EACCES, errno.ETXTBSY):
+                        if attempt == retries - 1:
+                            raise
+                        time.sleep(base_delay * (2 ** attempt))
+                    else:
+                        raise
+
+        _replace_with_retry(tmp, path)
         return True
     except Exception as e:
         try:
@@ -4355,6 +4832,29 @@ def save_settings(settings):
             json.dump(settings, f, ensure_ascii=False, indent=2)
     except Exception:
         log.exception('save_settings failed')
+
+
+def load_admin_settings() -> dict:
+    """Load global admin settings from data/system/admin_settings.json (not group-scoped)."""
+    try:
+        p = os.path.join(ADMIN_SYSTEM_DIR, 'admin_settings.json')
+        if os.path.exists(p):
+            with open(p, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception:
+        log.exception('load_admin_settings failed')
+    return {}
+
+
+def save_admin_settings(settings: dict) -> None:
+    """Save global admin settings to data/system/admin_settings.json (not group-scoped)."""
+    try:
+        os.makedirs(ADMIN_SYSTEM_DIR, exist_ok=True)
+        p = os.path.join(ADMIN_SYSTEM_DIR, 'admin_settings.json')
+        with open(p, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
+    except Exception:
+        log.exception('save_admin_settings failed')
 
 def get_active_credential():
     creds = load_credentials()
@@ -4812,12 +5312,53 @@ def _pfloat_any(v) -> float:
         return 0.0
 
 
-def _build_table_rows_from_epsilon(vat: str) -> List[Dict[str, str]]:
+def _build_table_rows_from_epsilon(vat: str, fiscal_year: Optional[int] = None) -> List[Dict[str, str]]:
     rows: List[Dict[str, str]] = []
     eps = load_epsilon_cache_for_vat(str(vat or '')) or []
+    cred = get_cred_by_vat(str(vat or '').strip()) or {}
+    category_labels = _category_labels_for_client(cred)
+
+    def _map_category_label(raw_value: Any) -> str:
+        raw = str(raw_value or '').strip()
+        if not raw:
+            return ''
+        parts = [p.strip() for p in raw.split(',') if str(p or '').strip()]
+        mapped: List[str] = []
+        seen: set[str] = set()
+        for part in parts or [raw]:
+            key = str(part).strip()
+            if not key:
+                continue
+            lbl = category_labels.get(key) or category_labels.get(key.lower()) or key
+            if lbl in seen:
+                continue
+            seen.add(lbl)
+            mapped.append(lbl)
+        return ', '.join(mapped)
+
+    selected_year = None
+    try:
+        if fiscal_year is not None:
+            selected_year = int(fiscal_year)
+    except Exception:
+        selected_year = None
+
     for rec in eps:
         if not isinstance(rec, dict):
             continue
+
+        # Apply active fiscal-year filtering to list rows (same UX as expenses export).
+        if selected_year is not None:
+            issue_date_raw = str(rec.get('issueDate') or rec.get('issue_date') or '').strip()
+            issue_year = parse_year_from_date_string(issue_date_raw)
+            if issue_year is None:
+                try:
+                    issue_year = int(str(rec.get('issue_year') or '').strip())
+                except Exception:
+                    issue_year = None
+            if issue_year != selected_year:
+                continue
+
         lines = rec.get('lines') if isinstance(rec.get('lines'), list) else []
         net = _pfloat_any(rec.get('totalNetValue') or rec.get('net') or rec.get('total_net'))
         vat_val = _pfloat_any(rec.get('totalVatAmount') or rec.get('vat') or rec.get('total_vat'))
@@ -4835,8 +5376,65 @@ def _build_table_rows_from_epsilon(vat: str) -> List[Dict[str, str]]:
 
         mark = str(rec.get('mark') or rec.get('MARK') or '').strip()
         issue_type = str(rec.get('type_name') or rec.get('type') or '').strip()
-        is_receipt = bool(rec.get('is_receipt')) or ('αποδ' in issue_type.lower()) or ('receipt' in issue_type.lower())
-        tipo_excel = 'ΑΠΟΔΕΙΞΗ' if is_receipt else (issue_type or 'ΤΙΜΟΛΟΓΙΟ')
+        issue_type_l = issue_type.lower()
+        is_receipt = bool(rec.get('is_receipt')) or ('αποδ' in issue_type_l) or ('receipt' in issue_type_l)
+
+        mtype = str(rec.get('mtype') or rec.get('invoice_mtype') or rec.get('receipt_mtype') or '').strip()
+        auto_cash_payment = bool(rec.get('_auto_cash_payment'))
+
+        line_categories = set()
+        for ln in lines:
+            if not isinstance(ln, dict):
+                continue
+            cat = str(ln.get('category') or '').strip().lower()
+            if cat:
+                line_categories.add(cat)
+
+        has_supplier_cash_mirror = (
+            ('προμηθευτής_λιανικής' in line_categories and 'ταμείο' in line_categories)
+            or ('προμηθευτης_λιανικης' in line_categories and 'ταμειο' in line_categories)
+        )
+
+        # Hide cash movements from list_inner for both receipts and invoices.
+        is_cash_movement = (
+            auto_cash_payment
+            or has_supplier_cash_mirror
+            or issue_type in {'9.3'}
+            or 'ταμεια' in issue_type_l
+            or 'ταμει' in issue_type_l
+            or mtype == '14'
+        )
+        if is_cash_movement:
+            continue
+        mapped_issue_type = map_invoice_type_label(issue_type)
+        tipo_excel = 'ΑΠΟΔΕΙΞΗ' if is_receipt else (mapped_issue_type or 'ΤΙΜΟΛΟΓΙΟ')
+        characteristic_category = str(
+            rec.get('χαρακτηρισμός')
+            or rec.get('χαρακτηρισμος')
+            or rec.get('characteristic')
+            or rec.get('category')
+            or rec.get('classification')
+            or ''
+        ).strip()
+        characteristic_category = _map_category_label(characteristic_category)
+        if not characteristic_category and lines:
+            line_categories = []
+            for ln in lines:
+                if not isinstance(ln, dict):
+                    continue
+                line_cat = str(
+                    ln.get('category')
+                    or ln.get('χαρακτηρισμός')
+                    or ln.get('χαρακτηρισμος')
+                    or ln.get('characteristic')
+                    or ''
+                ).strip()
+                if not line_cat:
+                    continue
+                mapped_line_cat = _map_category_label(line_cat)
+                if mapped_line_cat and mapped_line_cat not in line_categories:
+                    line_categories.append(mapped_line_cat)
+            characteristic_category = ', '.join(line_categories)
 
         row = {
             'MARK': mark,
@@ -4846,7 +5444,7 @@ def _build_table_rows_from_epsilon(vat: str) -> List[Dict[str, str]]:
             'Αριθμός': str(rec.get('number') or rec.get('AA') or rec.get('aa') or rec.get('progressive_aa') or '').strip(),
             'Ημερομηνία': str(rec.get('issueDate') or rec.get('issue_date') or '').strip(),
             'Είδος': tipo_excel,
-            'ΦΠΑ_ΚΑΤΗΓΟΡΙΑ': str(rec.get('vatCategory') or '').strip(),
+            'Κατηγορία Χαρακτηρισμού': characteristic_category,
             'Καθαρή Αξία': f"{net:.2f}".replace('.', ','),
             'ΦΠΑ': f"{vat_val:.2f}".replace('.', ','),
             'Σύνολο': f"{total:.2f}".replace('.', ','),
@@ -4858,7 +5456,7 @@ def _build_table_rows_from_epsilon(vat: str) -> List[Dict[str, str]]:
 
 def _render_table_html_for_vat(vat: str, with_checkbox_value: bool = True):
     import pandas as pd
-    rows = _build_table_rows_from_epsilon(vat)
+    rows = _build_table_rows_from_epsilon(vat, fiscal_year=get_active_fiscal_year())
     if not rows:
         return "", False, ""
 
@@ -4899,39 +5497,35 @@ def inject_active_credential():
     except Exception:
         log.exception("Could not load settings for context processor")
         settings = {}
-    
+
+    # Resolve active group ONCE to avoid multiple DB hits
+    active_grp = None
+    try:
+        from auth import get_active_group
+        active_grp = get_active_group()
+    except Exception:
+        pass
+
     # Get user role from active group
     user_role = "member"  # default
     try:
-        from auth import get_active_group
         from flask_login import current_user
-        
-        # Έλεγχος αν ο χρήστης είναι authenticated
-        if getattr(current_user, 'is_authenticated', False):
-            grp = get_active_group()
-            if grp:
-                # Πάρε το ρόλο του χρήστη στην ομάδα
-                role = current_user.role_for_group(grp)
-                if role in ('admin', 'member'):
-                    user_role = role
-                else:
-                    # Default if role is something else
-                    user_role = 'member'
-            # else: no active group, keep default 'member'
-        # else: not authenticated, keep default 'member'
+        if getattr(current_user, 'is_authenticated', False) and active_grp:
+            role = current_user.role_for_group(active_grp)
+            if role in ('admin', 'member'):
+                user_role = role
+            else:
+                user_role = 'member'
     except Exception as e:
-        # Log the error for debugging
         log.warning(f"[auth] Failed to determine user_role: {e}")
         user_role = "member"
-    
-    active_group_name = None
+
     try:
-        from auth import get_active_group
-        grp = get_active_group()
-        if grp:
-            active_group_name = getattr(grp, 'name', None)
+        active_year = get_active_fiscal_year()
     except Exception:
-        active_group_name = None
+        active_year = None
+    
+    active_group_name = getattr(active_grp, 'name', None) if active_grp else None
 
     # compute a display-friendly username (strip trailing _<id> appended for uniqueness)
     try:
@@ -4950,7 +5544,9 @@ def inject_active_credential():
         active_credential_vat=vat,
         app_settings=settings,
         user_role=user_role,
+        is_group_admin=(user_role == 'admin'),
         active_group=active_group_name,
+        active_year=active_year,
         ADMIN_USER_ID=ADMIN_USER_ID if 'ADMIN_USER_ID' in globals() else 0,
         display_username=display_username,
     )
@@ -5392,6 +5988,16 @@ def api_repeat_entry_get_v2():
         resp["afm"] = vat
         resp["vat"] = vat
     return jsonify(resp)
+
+
+@app.route('/api/repeat_entry/status2', methods=['GET'])
+@monitor_resources('api_repeat_entry_status2')
+def api_repeat_entry_status2():
+    """
+    Alias of get_v2 – returns repeat_entry including profile_name.
+    Called by search.html fetchRepeatState() before falling back to /get.
+    """
+    return api_repeat_entry_get_v2()
 
 
 @app.route('/api/repeat_entry/get', methods=['GET'])
@@ -6601,25 +7207,43 @@ def _delete_credential_and_related_data(name: str):
 @app.route('/credentials/delete/<name>', methods=['POST'])
 @monitor_resources('credentials_delete_post')
 def credentials_delete_post(name):
+    is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+
     # Only group admin may delete credentials
     try:
         from auth import get_active_group
         from flask_login import current_user
         grp = get_active_group()
         if not grp:
+            if is_ajax:
+                return jsonify({'status': 'error', 'error': 'no active group selected'}), 403
             flash('Δεν έχει επιλεγεί ενεργή ομάδα', 'error')
             return redirect(url_for('credentials'))
         if not getattr(current_user, 'is_authenticated', False) or current_user.role_for_group(grp) != 'admin':
+            if is_ajax:
+                return jsonify({'status': 'error', 'error': 'admin privileges required'}), 403
             flash('Απαιτούνται δικαιώματα διαχειριστή για διαγραφή credentials', 'error')
             return redirect(url_for('credentials'))
     except Exception:
+        if is_ajax:
+            return jsonify({'status': 'error', 'error': 'permission check failed'}), 500
         flash('Αποτυχία ελέγχου δικαιωμάτων', 'error')
         return redirect(url_for('credentials'))
 
     credential, was_active, cleanup = _delete_credential_and_related_data(name)
     if not credential:
+        if is_ajax:
+            return jsonify({'status': 'error', 'error': 'not found'}), 404
         flash(f"Το credential '{name}' δεν βρέθηκε", "error")
         return redirect(url_for('credentials'))
+
+    if is_ajax:
+        return jsonify({
+            'status': 'ok',
+            'deleted': name,
+            'was_active': was_active,
+            'data_files_removed': cleanup,
+        }), 200
 
     suffix = ''
     if cleanup.get('count'):
@@ -7501,43 +8125,18 @@ def api_last_fetch_date():
 
         fetch_key = _get_fetch_tracking_key(credential_name, credential_vat)
         last_date = get_last_fetch_date(fetch_key, only_meta=True) if fetch_key else None
+        if not last_date and fetch_key:
+            # Fallback to activity log when metadata is missing.
+            last_date = get_last_fetch_date(fetch_key, only_meta=False)
         if not last_date and credential_name and fetch_key != credential_name:
             # Backward compatibility: older installs may have written by credential name.
             last_date = get_last_fetch_date(credential_name, only_meta=True)
+        if not last_date and credential_name:
+            last_date = get_last_fetch_date(credential_name, only_meta=False)
         
-        # Format for display if available
-        if last_date:
-            try:
-                # Parse ISO 8601, interpret naive as UTC, then convert to Europe/Athens
-                try:
-                    dt = datetime.datetime.fromisoformat(last_date)
-                except Exception:
-                    dt = None
-
-                if dt is not None:
-                    # Ensure tz-aware: treat naive timestamps as UTC
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=datetime.timezone.utc)
-                    # Convert to Europe/Athens for display
-                    try:
-                        from zoneinfo import ZoneInfo
-                        athens_tz = ZoneInfo('Europe/Athens')
-                        dt = dt.astimezone(athens_tz)
-                    except Exception:
-                        # Fallback: add 2 hours offset (approximate)
-                        try:
-                            dt = dt.astimezone(datetime.timezone(datetime.timedelta(hours=2)))
-                        except Exception:
-                            pass
-                    formatted = dt.strftime("%d/%m/%Y %H:%M")
-                else:
-                    formatted = last_date
-            except Exception:
-                formatted = last_date
-        else:
-            formatted = None
+        formatted = _format_last_fetch_date_for_display(last_date)
         
-        return jsonify({"last_fetch_date": formatted})
+        return jsonify({"last_fetch_date": formatted, "last_fetch_raw": last_date})
     except Exception as e:
         log.exception("api_last_fetch_date error")
         return jsonify({"error": str(e)}), 500
@@ -7672,7 +8271,30 @@ def credentials():
 
     # GET: φορτώνουμε τα credentials και αφήνουμε το context_processor να περάσει το active credential/ΑΦΜ
     creds = load_credentials()
-    return safe_render("credentials_list.html", credentials=creds, active_page="credentials")
+    is_group_admin = False
+    other_creds = []
+    try:
+        from auth import get_active_group
+        grp = get_active_group()
+        if grp and getattr(current_user, 'is_authenticated', False):
+            is_group_admin = current_user.role_for_group(grp) == 'admin'
+    except Exception:
+        is_group_admin = False
+
+    if is_group_admin:
+        other_creds = [
+            {"name": c.get("name", ""), "vat": c.get("vat", "")}
+            for c in creds
+            if c.get("name")
+        ]
+
+    return safe_render(
+        "credentials_list.html",
+        credentials=creds,
+        other_creds=other_creds,
+        is_group_admin=is_group_admin,
+        active_page="credentials"
+    )
 
 
 @app.route("/credentials/edit/<name>", methods=["GET", "POST"])
@@ -7683,7 +8305,21 @@ def credentials_edit(name):
         flash("Το credential δεν βρέθηκε", "error")
         return redirect(url_for("credentials"))
 
+    can_edit_credential = False
+    try:
+        from auth import get_active_group
+        grp = get_active_group()
+        if grp and getattr(current_user, 'is_authenticated', False):
+            can_edit_credential = current_user.role_for_group(grp) == 'admin'
+    except Exception:
+        can_edit_credential = False
+
     if request.method == "POST":
+        if not can_edit_credential:
+            if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+                return jsonify({'ok': False, 'error': 'admin privileges required'}), 403
+            flash("Η επεξεργασία credential επιτρέπεται μόνο σε διαχειριστές της ομάδας.", "error")
+            return redirect(url_for("credentials"))
         new_name = (request.form.get("name") or "").strip()
         user = (request.form.get("user") or "").strip()
         key = (request.form.get("key") or "").strip()
@@ -7748,23 +8384,64 @@ def credentials_edit(name):
 
         save_credentials(creds)
 
-        # Αν το credential που επεξεργάστηκε ήταν ενεργό — ενημέρωσε session
-        if session.get("active_credential") == name:
-            session["active_credential"] = new_name
-            flash(f"Το ενεργό credential ενημερώθηκε σε '{new_name}'", "success")
-        else:
-            flash(f"Το credential '{new_name}' ενημερώθηκε επιτυχώς", "success")
+        # Όταν ο χρήστης αποθηκεύει την επεξεργασία, ορίζουμε το credential ως ενεργό
+        session["active_credential"] = new_name
+        flash(f"Το credential '{new_name}' αποθηκεύτηκε και ορίστηκε ως ενεργό", "success")
 
         return redirect(url_for("credentials"))
 
     # GET -> εμφανίζουμε τη φόρμα επεξεργασίας
     # Προσθέτουμε flash πληροφορία (παραμένει ως έχει)
     flash(f"Επεξεργασία credential: {credential.get('name')}", "info")
+
+    # Ελέγχουμε αν ο χρήστης είναι admin της ενεργής ομάδας
+    _is_group_admin = can_edit_credential
+
+    # Λίστα άλλων credentials (για copy-from feature) — μόνο για admins
+    other_creds = []
+    if _is_group_admin:
+        other_creds = [
+            {"name": c.get("name", ""), "vat": c.get("vat", "")}
+            for c in creds
+            if c.get("name") != name
+        ]
+
     return safe_render(
         "credentials_edit.html",
         credential=credential,
+        other_creds=other_creds,
+        is_group_admin=_is_group_admin,
         active_page="credentials"
     )
+
+
+@app.get("/api/credentials/copy_params/<path:source_name>")
+@login_required
+def credentials_copy_params(source_name):
+    """Return configuration params from another credential — only for group admins."""
+    try:
+        from auth import get_active_group
+        grp = get_active_group()
+        if not grp:
+            return jsonify({'ok': False, 'error': 'no active group'}), 403
+        if current_user.role_for_group(grp) != 'admin':
+            return jsonify({'ok': False, 'error': 'admin privileges required'}), 403
+    except Exception:
+        return jsonify({'ok': False, 'error': 'permission check failed'}), 500
+
+    creds = load_credentials()
+    src = next((c for c in creds if c.get('name') == source_name), None)
+    if not src:
+        return jsonify({'ok': False, 'error': 'credential not found'}), 404
+
+    # Return only configuration fields — never user/key/env/vat (sensitive / unique)
+    COPY_FIELDS = [
+        'book_category', 'fpa_applicable', 'expense_tags',
+        'apodeixakia_type', 'apodeixakia_supplier', 'apodeixakia_other_expenses',
+        'series_settings', 'custom_categories',
+    ]
+    params = {k: src.get(k) for k in COPY_FIELDS}
+    return jsonify({'ok': True, 'params': params})
 
 
 @app.route("/credentials/delete/<name>", methods=["POST"])
@@ -7817,16 +8494,34 @@ def credentials_delete(name):
 # New route: set active credential
 @app.route("/set_active", methods=["POST"])
 def set_active_credential():
+    wants_json = (
+        request.headers.get("X-Requested-With") in {"XMLHttpRequest", "partial-nav"}
+        or "application/json" in (request.headers.get("Accept") or "")
+    )
     name = request.form.get("active_name")
     if not name:
-        flash("Δεν έχει επιλεγεί credential", "error")
+        msg = "Δεν έχει επιλεγεί credential"
+        if wants_json:
+            return jsonify({"ok": False, "error": msg}), 400
+        flash(msg, "error")
     else:
         cred = get_cred_by_name(name)
         if not cred:
-            flash("Το credential δεν βρέθηκε", "error")
+            msg = "Το credential δεν βρέθηκε"
+            if wants_json:
+                return jsonify({"ok": False, "error": msg}), 404
+            flash(msg, "error")
         else:
             session["active_credential"] = name
-            flash(f"Το ενεργό credential ορίστηκε σε {name}", "success")
+            msg = f"Το ενεργό credential ορίστηκε σε {name}"
+            if wants_json:
+                return jsonify({
+                    "ok": True,
+                    "message": msg,
+                    "active_name": name,
+                    "vat": str(cred.get("vat") or "").strip(),
+                }), 200
+            flash(msg, "success")
     return redirect(url_for("credentials"))
 
 
@@ -8288,6 +8983,508 @@ def get_customer_docs_file(vat):
 # ---------------- Notifications (broadcast) ----------------
 # simple in-memory list of messages; cleared as they are fetched by clients.
 global_notifications = []
+fetch_progress_lock = threading.Lock()
+fetch_progress_state = {}
+
+
+def _set_fetch_progress_state(fetch_key: str, status: str, percent: int, message: str, **extra) -> None:
+    """Store in-memory progress for a running fetch job."""
+    key = str(fetch_key or "").strip()
+    if not key:
+        return
+
+    pct = max(0, min(100, int(percent or 0)))
+    payload = {
+        "status": str(status or "not_started"),
+        "percent": pct,
+        "message": str(message or ""),
+        "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    payload.update(extra or {})
+
+    with fetch_progress_lock:
+        prev = fetch_progress_state.get(key, {})
+        if "started_at" in prev and "started_at" not in payload:
+            payload["started_at"] = prev.get("started_at")
+        fetch_progress_state[key] = payload
+
+
+def _get_fetch_progress_state(fetch_key: str) -> Dict[str, Any]:
+    key = str(fetch_key or "").strip()
+    if not key:
+        return {"status": "not_started", "percent": 0, "message": ""}
+    with fetch_progress_lock:
+        current = fetch_progress_state.get(key)
+        if not current:
+            return {"status": "not_started", "percent": 0, "message": ""}
+        return dict(current)
+
+
+bulk_fetch_progress_lock = threading.Lock()
+bulk_fetch_progress_state: Dict[str, Dict[str, Any]] = {}
+
+
+def _set_bulk_fetch_progress(job_id: str, status: str, percent: int, message: str, **extra) -> None:
+    key = str(job_id or "").strip()
+    if not key:
+        return
+    pct = max(0, min(100, int(percent or 0)))
+    payload: Dict[str, Any] = {
+        "job_id": key,
+        "status": str(status or "not_started"),
+        "percent": pct,
+        "message": str(message or ""),
+        "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    payload.update(extra or {})
+    with bulk_fetch_progress_lock:
+        prev = bulk_fetch_progress_state.get(key, {})
+        if "started_at" in prev and "started_at" not in payload:
+            payload["started_at"] = prev.get("started_at")
+        bulk_fetch_progress_state[key] = payload
+
+
+def _get_bulk_fetch_progress(job_id: str) -> Dict[str, Any]:
+    key = str(job_id or "").strip()
+    if not key:
+        return {"status": "not_started", "percent": 0, "message": ""}
+    with bulk_fetch_progress_lock:
+        cur = bulk_fetch_progress_state.get(key)
+        if not cur:
+            return {"status": "not_started", "percent": 0, "message": ""}
+        return dict(cur)
+
+
+def _is_bulk_fetch_stop_requested(job_id: str) -> bool:
+    key = str(job_id or "").strip()
+    if not key:
+        return False
+    with bulk_fetch_progress_lock:
+        cur = bulk_fetch_progress_state.get(key) or {}
+        return bool(cur.get('stop_requested', False))
+
+
+def _request_bulk_fetch_stop(job_id: str) -> bool:
+    key = str(job_id or "").strip()
+    if not key:
+        return False
+    with bulk_fetch_progress_lock:
+        cur = dict(bulk_fetch_progress_state.get(key) or {})
+        if not cur:
+            return False
+        cur['stop_requested'] = True
+        if str(cur.get('status') or '') == 'running':
+            cur['status'] = 'stopping'
+            cur['message'] = 'Ζητήθηκε διακοπή. Θα ολοκληρωθεί ο τρέχων πελάτης και δεν θα ξεκινήσει επόμενος.'
+        cur['updated_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        bulk_fetch_progress_state[key] = cur
+        return True
+
+
+def _is_active_group_admin_user() -> bool:
+    try:
+        from flask_login import current_user
+        from auth import get_active_group
+
+        if not getattr(current_user, 'is_authenticated', False):
+            return False
+
+        # Global admins can access admin bulk actions even if the currently
+        # active group role is not resolved yet during a partial reload.
+        if bool(getattr(current_user, 'is_admin', False)):
+            return True
+
+        grp = get_active_group()
+        if not grp:
+            return False
+        return current_user.role_for_group(grp) == 'admin'
+    except Exception:
+        return False
+
+
+@app.route('/api/fetch_bulk/start', methods=['POST'])
+@login_required
+def api_fetch_bulk_start():
+    if not _is_active_group_admin_user():
+        return jsonify({'ok': False, 'error': 'Απαιτούνται δικαιώματα admin της ενεργής ομάδας.'}), 403
+
+    payload = request.get_json(silent=True) or {}
+    date_from_raw = str(payload.get('date_from') or '').strip()
+    date_to_raw = str(payload.get('date_to') or '').strip()
+    date_from_iso = normalize_input_date_to_iso(date_from_raw)
+    date_to_iso = normalize_input_date_to_iso(date_to_raw)
+    if not date_from_iso or not date_to_iso:
+        return jsonify({'ok': False, 'error': 'Παρακαλώ συμπλήρωσε έγκυρες ημερομηνίες (dd/mm/YYYY).'}), 400
+
+    selected_names = payload.get('credential_names') or []
+    if not isinstance(selected_names, list):
+        selected_names = []
+    selected_names = [str(x or '').strip() for x in selected_names if str(x or '').strip()]
+    fetch_all = bool(payload.get('all_customers', False))
+
+    creds = load_credentials() or []
+    if fetch_all:
+        targets = [c for c in creds if isinstance(c, dict) and str(c.get('name') or '').strip()]
+    else:
+        wanted = set(selected_names)
+        targets = [c for c in creds if str(c.get('name') or '').strip() in wanted]
+
+    if not targets:
+        return jsonify({'ok': False, 'error': 'Δεν βρέθηκαν πελάτες για μαζική λήψη.'}), 400
+
+    d1 = datetime.datetime.fromisoformat(date_from_iso).strftime('%d/%m/%Y')
+    d2 = datetime.datetime.fromisoformat(date_to_iso).strftime('%d/%m/%Y')
+
+    user_part = 'anon'
+    group_part = 'nogroup'
+    try:
+        from flask_login import current_user
+        from auth import get_active_group
+        user_part = str(getattr(current_user, 'id', 'anon'))
+        grp = get_active_group()
+        group_part = str(getattr(grp, 'id', 'nogroup'))
+    except Exception:
+        pass
+    job_id = f"bulk:{group_part}:{user_part}:{int(time.time())}:{secrets.token_hex(4)}"
+
+    _set_bulk_fetch_progress(
+        job_id,
+        'running',
+        1,
+        f"Εκκίνηση μαζικής λήψης για {len(targets)} πελάτες.",
+        started_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        total_customers=len(targets),
+        current_index=0,
+        current_customer='',
+        current_customer_progress=0,
+        completed_customers=0,
+        failed_customers=0,
+        results=[],
+        stop_requested=False,
+    )
+
+    group_dir = get_group_base_dir()
+    aade_user_default = os.getenv("AADE_USER_ID", AADE_USER_ENV)
+    aade_key_default = os.getenv("AADE_SUBSCRIPTION_KEY", AADE_KEY_ENV)
+
+    log_actor_id = 'anonymous'
+    log_actor_email = None
+    log_actor_username = None
+    log_group_name = 'system'
+    log_group_obj = None
+    app_obj = None
+    try:
+        from flask_login import current_user
+        from auth import get_active_group
+        app_obj = current_app._get_current_object()
+        grp = get_active_group()
+        log_group_obj = grp
+        log_group_name = str(getattr(grp, 'name', None) or getattr(grp, 'data_folder', None) or 'system')
+        if getattr(current_user, 'is_authenticated', False):
+            log_actor_id = str(getattr(current_user, 'id', 'anonymous'))
+            log_actor_email = getattr(current_user, 'email', None)
+            log_actor_username = getattr(current_user, 'username', None)
+    except Exception:
+        pass
+
+    def _bulk_worker(_job_id: str, _targets: List[Dict[str, Any]], _d1: str, _d2: str, _group_dir: str, _log_group_name: str, _log_group_obj, _log_actor_id: str, _log_actor_email: str, _log_actor_username: str, _app_obj):
+        results: List[Dict[str, Any]] = []
+        failed = 0
+        done = 0
+        total = max(1, len(_targets))
+
+        try:
+            _set_thread_group_base_dir(_group_dir)
+        except Exception:
+            pass
+
+        stopped = False
+        for idx, cred in enumerate(_targets, start=1):
+            if _is_bulk_fetch_stop_requested(_job_id):
+                stopped = True
+                break
+            name = str(cred.get('name') or '').strip()
+            vat = str(cred.get('vat') or '').strip()
+            user = str(cred.get('user') or aade_user_default or '').strip()
+            key = str(cred.get('key') or aade_key_default or '').strip()
+
+            base_pct = int(((idx - 1) / total) * 100)
+            _set_bulk_fetch_progress(
+                _job_id,
+                'running',
+                max(1, base_pct),
+                f"Εκτελείται λήψη για τον πελάτη {name} ({idx}/{total}).",
+                total_customers=total,
+                current_index=idx,
+                current_customer=name,
+                current_customer_progress=1,
+                completed_customers=done,
+                failed_customers=failed,
+                results=results,
+                stop_requested=_is_bulk_fetch_stop_requested(_job_id),
+            )
+
+            try:
+                if not user or not key:
+                    raise RuntimeError('Λείπουν credentials AADE για τον πελάτη.')
+
+                all_rows, summary_list = request_docs(
+                    date_from=_d1,
+                    date_to=_d2,
+                    mark="000000000000000",
+                    aade_user=user,
+                    aade_key=key,
+                    debug=True,
+                    save_excel=False,
+                )
+
+                added_docs = 0
+                added_summaries = 0
+                seen_marks = set()
+                total_rows = len(all_rows)
+                total_summaries = len(summary_list)
+
+                for r_idx, d in enumerate(all_rows, start=1):
+                    if vat:
+                        d['AFM_counterpart'] = vat
+                    mk = str(d.get('mark') or '').strip()
+                    if mk:
+                        seen_marks.add(mk)
+                    if append_doc_to_customer_file(d, vat):
+                        added_docs += 1
+
+                    if r_idx == 1 or r_idx == total_rows or r_idx % max(1, total_rows // 10) == 0:
+                        customer_pct = min(70, int((r_idx / max(1, total_rows)) * 70))
+                        overall_pct = int((((idx - 1) + (customer_pct / 100.0)) / total) * 100)
+                        _set_bulk_fetch_progress(
+                            _job_id,
+                            'running',
+                            max(1, overall_pct),
+                            f"Πρόοδος πελάτη {name}: {customer_pct}% | Συνολική πρόοδος: {max(1, overall_pct)}%",
+                            total_customers=total,
+                            current_index=idx,
+                            current_customer=name,
+                            current_customer_progress=customer_pct,
+                            completed_customers=done,
+                            failed_customers=failed,
+                            results=results,
+                            stop_requested=_is_bulk_fetch_stop_requested(_job_id),
+                        )
+
+                for s_idx, s in enumerate(summary_list, start=1):
+                    if append_summary_to_customer_file(s, vat):
+                        added_summaries += 1
+                    if s_idx == 1 or s_idx == total_summaries or s_idx % max(1, total_summaries // 10) == 0:
+                        customer_pct = 70 + min(25, int((s_idx / max(1, total_summaries)) * 25))
+                        overall_pct = int((((idx - 1) + (customer_pct / 100.0)) / total) * 100)
+                        _set_bulk_fetch_progress(
+                            _job_id,
+                            'running',
+                            max(1, overall_pct),
+                            f"Πρόοδος πελάτη {name}: {customer_pct}% | Συνολική πρόοδος: {max(1, overall_pct)}%",
+                            total_customers=total,
+                            current_index=idx,
+                            current_customer=name,
+                            current_customer_progress=customer_pct,
+                            completed_customers=done,
+                            failed_customers=failed,
+                            results=results,
+                            stop_requested=_is_bulk_fetch_stop_requested(_job_id),
+                        )
+
+                if vat and seen_marks:
+                    try:
+                        legacy = _is_legacy_fetch_mode_enabled()
+                        if not legacy:
+                            prune_customer_invoices(vat, seen_marks, date_from=_d1, date_to=_d2)
+                            prune_customer_summaries(vat, seen_marks, date_from=_d1, date_to=_d2)
+                    except Exception:
+                        pass
+
+                set_last_fetch_date(_get_fetch_tracking_key(name, vat))
+
+                try:
+                    from utils import log_user_activity
+                    activity_details = {
+                        'date_from': str(_d1),
+                        'date_to': str(_d2),
+                        'vat': vat,
+                        'added_docs': added_docs,
+                        'added_summaries': added_summaries,
+                        'fetched_count': len(all_rows)
+                    }
+                    if _app_obj is not None:
+                        with _app_obj.app_context():
+                            try:
+                                log_user_activity(
+                                    _log_actor_id,
+                                    _log_group_name,
+                                    'bulk_fetch_data',
+                                    details=activity_details,
+                                    user_email=_log_actor_email,
+                                    user_username=_log_actor_username
+                                )
+                            except Exception:
+                                pass
+                            if _log_group_obj is not None:
+                                try:
+                                    from auth import _append_group_log
+                                    entry_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                                    _append_group_log(_log_group_obj, {
+                                        'user_id': str(_log_actor_id) if _log_actor_id is not None else 'anonymous',
+                                        'group': str(_log_group_name or getattr(_log_group_obj, 'name', None) or getattr(_log_group_obj, 'data_folder', None) or 'system'),
+                                        'action': 'bulk_fetch_data',
+                                        'details': {
+                                            'user_id': str(_log_actor_id) if _log_actor_id is not None else 'anonymous',
+                                            'user_email': _log_actor_email,
+                                            'user_username': _log_actor_username,
+                                            'group': str(_log_group_name or getattr(_log_group_obj, 'name', None) or getattr(_log_group_obj, 'data_folder', None) or 'system'),
+                                            'action': 'bulk_fetch_data',
+                                            'timestamp': entry_timestamp,
+                                            'ip_address': None,
+                                            'details': activity_details,
+                                            'description': 'Μαζική Ανάκτηση Δεδομένων MyDATA'
+                                        }
+                                    })
+                                except Exception:
+                                    pass
+                    else:
+                        try:
+                            log_user_activity(
+                                _log_actor_id,
+                                _log_group_name,
+                                'bulk_fetch_data',
+                                details=activity_details,
+                                user_email=_log_actor_email,
+                                user_username=_log_actor_username
+                            )
+                        except Exception:
+                            pass
+                except Exception:
+                    log.exception('Failed to write bulk fetch activity log for credential=%s', name)
+
+                done += 1
+                results.append({
+                    'credential': name,
+                    'vat': vat,
+                    'ok': True,
+                    'added_docs': added_docs,
+                    'added_summaries': added_summaries,
+                    'fetched_count': total_rows,
+                })
+            except Exception as ex:
+                failed += 1
+                log.exception('Bulk fetch failed for credential=%s', name)
+                results.append({
+                    'credential': name,
+                    'vat': vat,
+                    'ok': False,
+                    'error': str(ex),
+                })
+
+            end_pct = int((idx / total) * 100)
+            _set_bulk_fetch_progress(
+                _job_id,
+                'running',
+                max(1, min(99, end_pct)),
+                f"Ολοκληρώθηκε ο πελάτης {name}. Συνολική πρόοδος: {max(1, min(99, end_pct))}%",
+                total_customers=total,
+                current_index=idx,
+                current_customer=name,
+                current_customer_progress=100,
+                completed_customers=done,
+                failed_customers=failed,
+                results=results,
+                stop_requested=_is_bulk_fetch_stop_requested(_job_id),
+            )
+
+            if _is_bulk_fetch_stop_requested(_job_id):
+                stopped = True
+                break
+        if stopped:
+            final_msg = f"Η μαζική λήψη σταμάτησε μετά τον τρέχοντα πελάτη. Επιτυχίες: {done}, Αποτυχίες: {failed}."
+            _set_bulk_fetch_progress(
+                _job_id,
+                'stopped',
+                100,
+                final_msg,
+                total_customers=total,
+                current_index=done + failed,
+                current_customer='',
+                current_customer_progress=100,
+                completed_customers=done,
+                failed_customers=failed,
+                results=results,
+                stop_requested=True,
+                finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            )
+        else:
+            final_msg = f"Η μαζική λήψη ολοκληρώθηκε. Επιτυχίες: {done}, Αποτυχίες: {failed}."
+            _set_bulk_fetch_progress(
+                _job_id,
+                'completed',
+                100,
+                final_msg,
+                total_customers=total,
+                current_index=total,
+                current_customer='',
+                current_customer_progress=100,
+                completed_customers=done,
+                failed_customers=failed,
+                results=results,
+                stop_requested=False,
+                finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            )
+
+    try:
+        t = threading.Thread(
+            target=_bulk_worker,
+            args=(job_id, targets, d1, d2, group_dir, log_group_name, log_group_obj, log_actor_id, log_actor_email, log_actor_username, app_obj),
+            daemon=True
+        )
+        t.start()
+    except Exception:
+        log.exception('Failed to start bulk fetch worker')
+        _set_bulk_fetch_progress(job_id, 'error', 100, 'Αποτυχία εκκίνησης worker μαζικής λήψης.')
+        return jsonify({'ok': False, 'error': 'Αποτυχία εκκίνησης worker μαζικής λήψης.'}), 500
+
+    return jsonify({
+        'ok': True,
+        'message': f'Ξεκίνησε μαζική λήψη για {len(targets)} πελάτες.',
+        'job_id': job_id,
+        'total_customers': len(targets),
+    }), 200
+
+
+@app.route('/api/fetch_bulk/progress', methods=['GET'])
+@login_required
+def api_fetch_bulk_progress():
+    if not _is_active_group_admin_user():
+        return jsonify({'ok': False, 'error': 'Απαιτούνται δικαιώματα admin της ενεργής ομάδας.'}), 403
+    job_id = str(request.args.get('job_id') or '').strip()
+    if not job_id:
+        return jsonify({'ok': False, 'error': 'Missing job_id'}), 400
+    state = _get_bulk_fetch_progress(job_id)
+    state['ok'] = True
+    return jsonify(state), 200
+
+
+@app.route('/api/fetch_bulk/stop', methods=['POST'])
+@login_required
+def api_fetch_bulk_stop():
+    if not _is_active_group_admin_user():
+        return jsonify({'ok': False, 'error': 'Απαιτούνται δικαιώματα admin της ενεργής ομάδας.'}), 403
+    payload = request.get_json(silent=True) or {}
+    job_id = str(payload.get('job_id') or '').strip()
+    if not job_id:
+        return jsonify({'ok': False, 'error': 'Missing job_id'}), 400
+    if not _request_bulk_fetch_stop(job_id):
+        return jsonify({'ok': False, 'error': 'Η εργασία δεν βρέθηκε ή δεν είναι ενεργή.'}), 404
+    return jsonify({
+        'ok': True,
+        'message': 'Η διακοπή ζητήθηκε. Θα ολοκληρωθεί ο τρέχων πελάτης και δεν θα ξεκινήσει επόμενος.',
+        'job_id': job_id,
+    }), 200
 
 @app.route('/api/global_notifications', methods=['GET'])
 def api_global_notifications():
@@ -8300,6 +9497,18 @@ def api_global_notifications():
         return jsonify({"msgs": []}), 500
 
 
+@app.route('/api/fetch_progress', methods=['GET'])
+def api_fetch_progress():
+    """Return current fetch progress for credential/vat key."""
+    try:
+        credential = (request.args.get('credential') or '').strip()
+        vat = (request.args.get('vat') or '').strip()
+        fetch_key = _get_fetch_tracking_key(credential, vat)
+        return jsonify(_get_fetch_progress_state(fetch_key)), 200
+    except Exception as e:
+        return jsonify({"status": "error", "percent": 0, "message": str(e)}), 500
+
+
 # ---------------- Fetch page (updated with per-customer summary) ----------------
 
 @app.route("/fetch", methods=["GET", "POST"])
@@ -8310,6 +9519,22 @@ def fetch():
     creds = load_credentials()
     active_cred = get_active_credential_from_session()
     active_name = active_cred.get("name") if active_cred else None
+    initial_last_fetch_date = None
+
+    try:
+        initial_vat = str((active_cred or {}).get("vat") or "").strip()
+        initial_key = _get_fetch_tracking_key(active_name or "", initial_vat)
+        initial_last_raw = get_last_fetch_date(initial_key, only_meta=True) if initial_key else None
+        if not initial_last_raw and initial_key:
+            initial_last_raw = get_last_fetch_date(initial_key, only_meta=False)
+        initial_last_fetch_date = _format_last_fetch_date_for_display(initial_last_raw)
+    except Exception:
+        initial_last_fetch_date = None
+
+    wants_json = (
+        request.headers.get("X-Requested-With") == "XMLHttpRequest"
+        or "application/json" in (request.headers.get("Accept") or "")
+    )
 
     if request.method == "POST":
         date_from_raw = request.form.get("date_from", "").strip()
@@ -8319,9 +9544,12 @@ def fetch():
 
         if not date_from_iso or not date_to_iso:
             error = "Παρακαλώ συμπλήρωσε έγκυρες ημερομηνίες (dd/mm/YYYY)."
+            if wants_json:
+                return jsonify({"ok": False, "error": error}), 400
             return safe_render("fetch.html", credentials=creds, message=message,
                                error=error, preview=preview, active_page="fetch",
-                               active_credential=active_name)
+                               active_credential=active_name,
+                               last_fetch_date_display=initial_last_fetch_date)
 
         d1 = datetime.datetime.fromisoformat(date_from_iso).strftime("%d/%m/%Y")
         d2 = datetime.datetime.fromisoformat(date_to_iso).strftime("%d/%m/%Y")
@@ -8341,23 +9569,56 @@ def fetch():
 
         if not aade_user or not aade_key:
             error = "Δεν υπάρχουν αποθηκευμένα credentials για την κλήση."
+            if wants_json:
+                return jsonify({"ok": False, "error": error}), 400
             return safe_render("fetch.html", credentials=creds, message=message,
                                error=error, preview=preview, active_page="fetch",
-                               active_credential=active_name)
+                               active_credential=active_name,
+                               last_fetch_date_display=initial_last_fetch_date)
+
+        # capture logging context before entering the background thread
+        log_group = None
+        log_group_name = None
+        log_actor_id = 'anonymous'
+        log_actor_email = None
+        log_actor_username = None
+        try:
+            from auth import get_active_group
+            log_group = get_active_group()
+            if log_group:
+                log_group_name = getattr(log_group, 'name', None) or getattr(log_group, 'data_folder', None)
+        except Exception:
+            log_group = None
+            log_group_name = None
+        try:
+            if getattr(current_user, 'is_authenticated', False):
+                log_actor_id = getattr(current_user, 'id', 'anonymous')
+                log_actor_email = getattr(current_user, 'email', None)
+                log_actor_username = getattr(current_user, 'username', None)
+        except Exception:
+            pass
 
         # perform the actual fetch+save in background so the request can
         # return immediately and avoid timeouts.
-        def _do_fetch(aade_user, aade_key, vat, d1, d2, selected, group_dir):
+        def _do_fetch(aade_user, aade_key, vat, d1, d2, selected, group_dir, fetch_key, _log_group_name=None, _log_group_obj=None, _log_actor_id='anonymous', _log_actor_email=None, _log_actor_username=None):
             # store the captured group directory in thread-local storage so that
             # any subsequent calls to ``group_path``/``get_group_base_dir``
             # inside this worker use the correct folder even though the Flask
             # request context has gone away.
+            added_docs = 0
+            added_summaries = 0
+            all_rows = []
+            summary_list = []
+            seen_marks = set()
+            completed_ok = False
+
             try:
                 _set_thread_group_base_dir(group_dir)
             except Exception:
                 pass
 
             try:
+                _set_fetch_progress_state(fetch_key, "running", 5, "Ξεκίνησε η διαδικασία λήψης.", started_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
                 all_rows, summary_list = request_docs(
                     date_from=d1,
                     date_to=d2,
@@ -8367,10 +9628,12 @@ def fetch():
                     debug=True,
                     save_excel=False
                 )
-                added_docs = 0
-                added_summaries = 0
-                seen_marks = set()
-                for d in all_rows:
+                total_rows = len(all_rows)
+                total_summaries = len(summary_list)
+                _set_fetch_progress_state(fetch_key, "running", 20, f"Έγινε λήψη {total_rows} παραστατικών. Επεξεργασία...")
+
+                docs_step = max(1, total_rows // 25) if total_rows else 1
+                for idx, d in enumerate(all_rows, start=1):
                     if vat:
                         d["AFM_counterpart"] = vat
                     if d.get("mark"):
@@ -8378,64 +9641,138 @@ def fetch():
                     if append_doc_to_customer_file(d, vat):
                         added_docs += 1
 
-                for s in summary_list:
+                    if idx == 1 or idx == total_rows or idx % docs_step == 0:
+                        docs_progress = 20 + int((idx / max(total_rows, 1)) * 55)
+                        _set_fetch_progress_state(fetch_key, "running", docs_progress, f"Επεξεργασία παραστατικών {idx}/{total_rows}.")
+
+                sums_step = max(1, total_summaries // 20) if total_summaries else 1
+                for s_idx, s in enumerate(summary_list, start=1):
                     if append_summary_to_customer_file(s, vat):
                         added_summaries += 1
+
+                    if s_idx == 1 or s_idx == total_summaries or s_idx % sums_step == 0:
+                        sum_progress = 78 + int((s_idx / max(total_summaries, 1)) * 14)
+                        _set_fetch_progress_state(fetch_key, "running", sum_progress, f"Επεξεργασία summary {s_idx}/{total_summaries}.")
 
                 if vat and seen_marks:
                     try:
                         legacy = _is_legacy_fetch_mode_enabled()
                         if not legacy:
+                            _set_fetch_progress_state(fetch_key, "running", 94, "Καθαρισμός παλιών εγγραφών...")
                             prune_customer_invoices(vat, seen_marks, date_from=d1, date_to=d2)
                             prune_customer_summaries(vat, seen_marks, date_from=d1, date_to=d2)
                     except Exception:
                         pass
 
-                fetch_key = _get_fetch_tracking_key(selected, vat)
                 if fetch_key:
                     set_last_fetch_date(fetch_key)
 
                 try:
-                    from auth import get_active_group
                     from utils import log_user_activity
-                    grp = get_active_group()
-                    if grp:
-                        uid = getattr(current_user, 'id', 'anonymous') if getattr(current_user, 'is_authenticated', False) else 'anonymous'
-                        u_email = getattr(current_user, 'email', None) if getattr(current_user, 'is_authenticated', False) else None
-                        u_name = getattr(current_user, 'username', None) if getattr(current_user, 'is_authenticated', False) else None
-                        details = {
-                            'date_from': str(d1),
-                            'date_to': str(d2),
-                            'vat': vat,
-                            'added_docs': added_docs,
-                            'added_summaries': added_summaries,
-                            'fetched_count': len(all_rows)
-                        }
+                    details = {
+                        'date_from': str(d1),
+                        'date_to': str(d2),
+                        'vat': vat,
+                        'added_docs': added_docs,
+                        'added_summaries': added_summaries,
+                        'fetched_count': len(all_rows)
+                    }
+                    if _log_group_name:
                         try:
-                            log_user_activity(uid, grp.name if getattr(grp, 'name', None) else grp.data_folder, 'fetch_data', details=details, user_email=u_email, user_username=u_name)
+                            log_user_activity(
+                                _log_actor_id,
+                                _log_group_name,
+                                'fetch_data',
+                                details=details,
+                                user_email=_log_actor_email,
+                                user_username=_log_actor_username,
+                            )
                         except Exception:
-                            try:
-                                from auth import _append_group_log
-                                _append_group_log(grp, f"Bulk fetch performed: {d1} to {d2}, VAT {vat}, {added_docs} docs + {added_summaries} summaries by {u_name or 'anonymous'}")
-                            except Exception:
-                                pass
+                            pass
+                    if _log_group_obj:
+                        try:
+                            from auth import _append_group_log
+                            resolved_group_name = str(_log_group_name or getattr(_log_group_obj, 'name', None) or getattr(_log_group_obj, 'data_folder', None) or 'system')
+                            entry_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                            _append_group_log(_log_group_obj, {
+                                'user_id': str(_log_actor_id) if _log_actor_id is not None else 'anonymous',
+                                'group': resolved_group_name,
+                                'action': 'fetch_data',
+                                'details': {
+                                    'user_id': str(_log_actor_id) if _log_actor_id is not None else 'anonymous',
+                                    'user_email': _log_actor_email,
+                                    'user_username': _log_actor_username,
+                                    'group': resolved_group_name,
+                                    'action': 'fetch_data',
+                                    'timestamp': entry_timestamp,
+                                    'ip_address': None,
+                                    'details': details,
+                                    'description': 'Ανάκτηση δεδομένων MyDATA'
+                                }
+                            })
+                        except Exception:
+                            pass
                 except Exception:
                     pass
+                completed_ok = True
+                _set_fetch_progress_state(
+                    fetch_key,
+                    "completed",
+                    100,
+                    f"Η λήψη ολοκληρώθηκε: {added_docs} έγγραφα, {added_summaries} συνοψίσεις.",
+                    added_docs=added_docs,
+                    added_summaries=added_summaries,
+                    fetched_count=len(all_rows),
+                )
             except Exception:
                 log.exception("Fetch error (background)")
+                _set_fetch_progress_state(fetch_key, "error", 100, "Σφάλμα κατά τη λήψη. Ελέγξτε τα logs.")
             # broadcast notification for any listening clients
             try:
-                global_notifications.append(f"Λήψη ολοκληρώθηκε για ΑΦΜ {vat}: {added_docs} έγγραφα, {added_summaries} συνοψίσεις.")
+                selected_name = str(selected or '').strip()
+                vat_text = str(vat or '').strip()
+                target_text = selected_name and vat_text and f"{selected_name} (ΑΦΜ {vat_text})" or (selected_name or (vat_text and f"ΑΦΜ {vat_text}") or "άγνωστος πελάτης")
+                if completed_ok:
+                    global_notifications.append(f"Λήψη ολοκληρώθηκε για {target_text}: {added_docs} έγγραφα, {added_summaries} συνοψίσεις.")
+                else:
+                    global_notifications.append(f"Λήψη απέτυχε για {target_text}. Δείτε τα logs.")
             except Exception:
                 pass
 
         # spawn thread and return early.  capture the current group directory
         # so the worker can continue to write to the same location.
+        fetch_key = _get_fetch_tracking_key(selected, vat)
+        current_progress = _get_fetch_progress_state(fetch_key)
+        if current_progress.get("status") == "running":
+            error = "Υπάρχει ήδη ενεργή λήψη για αυτόν τον πελάτη."
+            if wants_json:
+                return jsonify({"ok": False, "error": error, "status": "running"}), 409
+            return safe_render("fetch.html", credentials=creds, message=message,
+                               error=error, preview=preview, active_page="fetch",
+                               active_credential=active_name,
+                               last_fetch_date_display=initial_last_fetch_date)
+
+        _set_fetch_progress_state(fetch_key, "running", 1, "Η λήψη ξεκίνησε.", started_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
+
         group_dir = get_group_base_dir()
         try:
             t = threading.Thread(
                 target=_do_fetch,
-                args=(aade_user, aade_key, vat, d1, d2, selected, group_dir),
+                args=(
+                    aade_user,
+                    aade_key,
+                    vat,
+                    d1,
+                    d2,
+                    selected,
+                    group_dir,
+                    fetch_key,
+                    log_group_name,
+                    log_group,
+                    log_actor_id,
+                    log_actor_email,
+                    log_actor_username,
+                ),
                 daemon=True,
             )
             t.start()
@@ -8445,9 +9782,27 @@ def fetch():
         message = "Fetch started – results will be saved shortly."
         preview = []
 
+        if wants_json:
+            fetch_key = _get_fetch_tracking_key(selected, vat)
+            current_last_fetch_raw = get_last_fetch_date(fetch_key, only_meta=True) if fetch_key else None
+            if not current_last_fetch_raw and fetch_key:
+                current_last_fetch_raw = get_last_fetch_date(fetch_key, only_meta=False)
+            current_last_fetch_date = _format_last_fetch_date_for_display(current_last_fetch_raw)
+            return jsonify({
+                "ok": True,
+                "started": True,
+                "message": message,
+                "credential": selected,
+                "vat": vat,
+                "fetch_key": fetch_key,
+                "last_fetch_date": current_last_fetch_date,
+                "last_fetch_raw": current_last_fetch_raw,
+            })
+
     return safe_render("fetch.html", credentials=creds, message=message,
                        error=error, preview=preview, active_page="fetch",
-                       active_credential=active_name)
+                       active_credential=active_name,
+                       last_fetch_date_display=initial_last_fetch_date)
 
 
 @app.route("/credentials/get_settings", methods=["GET"])
@@ -8942,14 +10297,37 @@ def search():
         except Exception:
             detect_and_scrape_receipt = None
 
-        input_is_url = re.match(r'^https?://', mark)
-        
-        # Normalization: αν λείπει https://, πρόσθεσε το
-        if not input_is_url and re.match(r'^[a-z0-9]', mark, re.I):
+        # Αν ο scanner έστειλε payload τύπου "MARK https://..." ή "... https:/...",
+        # πάρε πρώτα το URL token για να ακολουθήσει η ροή fetch αντί cache-by-MARK.
+        embedded_url = re.search(r'https?://[^\s]+', mark, re.I)
+        if embedded_url:
+            mark = embedded_url.group(0).strip()
+
+        # Ειδική ανάκτηση για malformed payloads που περιέχουν mydatapi URL χωρίς
+        # καθαρό scheme token στην αρχή (π.χ. "MARK ... mydatapi.aade.gr/.../QRInfo?q=...").
+        if not re.match(r'^https?://', mark, re.I):
+            md = re.search(r'(mydatapi\.aade\.gr/[^\s"\'<>]*TimologioQR/QRInfo\?q=[^\s"\'<>]+)', mark, re.I)
+            if md:
+                mark = 'https://' + md.group(1)
+
+        # Καθάρισε malformed διπλό scheme από scanner payloads (π.χ. https://https:/...).
+        mark = re.sub(r'^(https?://)+(https?:/)', r'\2', mark, flags=re.I)
+        # Ελάχιστη διόρθωση protocol μόνο για routing (https:/x -> https://x).
+        mark = re.sub(r'^(https?):/([^/])', r'\1://\2', mark, flags=re.I)
+
+        # Απέφυγε λάθος διπλό prepend όταν έχουμε ήδη "https:/...".
+        input_is_url = bool(re.match(r'^https?://', mark, re.I) or re.match(r'^https?:/', mark, re.I))
+
+        # Normalization: αν λείπει τελείως protocol, πρόσθεσε το μόνο σε καθαρά domain-like inputs.
+        if (not input_is_url) and (' ' not in mark) and re.match(r'^[a-z0-9]', mark, re.I):
             # Ψάχνουμε αν μοιάζει με domain (περιέχει . ή /)
             if '.' in mark or '/' in mark:
                 mark = 'https://' + mark
                 input_is_url = True
+
+        # Για URLs τύπου https:/... άφησε τη διόρθωση στο scraper.py (_normalize_url).
+        if re.match(r'^https?:/', mark, re.I):
+            input_is_url = True
         
         if input_is_url:
             domain = urlparse(mark).netloc.lower()
@@ -9085,8 +10463,10 @@ def search():
                 if not is_ajax_search:
                     flash(classified_message, "warning")
                 classified_flag = True
+                # Keep reclassification confirmation flow enabled for already-classified entries.
+                allow_edit_existing = True
 
-            # check duplicate in excel
+            # check duplicate in excel OR already-classified entry in epsilon cache
             try:
                 excel_path = excel_path_for(vat=vat)
                 if os.path.exists(excel_path):
@@ -9096,6 +10476,61 @@ def search():
                         marks_in_excel = df_check["MARK"].astype(str).str.strip().tolist()
                         if mark in marks_in_excel:
                             allow_edit_existing = True
+
+                if (not allow_edit_existing) and vat and mark:
+                    try:
+                        eps_cache = load_epsilon_cache_for_vat(vat) or []
+                    except Exception:
+                        eps_cache = []
+
+                    def _epsilon_entry_has_saved_classification(entry):
+                        try:
+                            if not isinstance(entry, dict):
+                                return False
+                            top_level = (
+                                entry.get("classification")
+                                or entry.get("category")
+                                or entry.get("characteristic")
+                                or entry.get("χαρακτηρισμός")
+                                or entry.get("χαρακτηρισμος")
+                            )
+                            if str(top_level or "").strip():
+                                return True
+                            for ln in (entry.get("lines") or []):
+                                if not isinstance(ln, dict):
+                                    continue
+                                cat_val = (
+                                    ln.get("category")
+                                    or ln.get("classification")
+                                    or ln.get("characteristic")
+                                    or ln.get("χαρακτηρισμός")
+                                    or ln.get("χαρακτηρισμος")
+                                )
+                                if str(cat_val or "").strip():
+                                    return True
+                        except Exception:
+                            return False
+                        return False
+
+                    for eps_item in eps_cache:
+                        try:
+                            eps_mark = str(
+                                _first(
+                                    eps_item.get("mark"),
+                                    eps_item.get("MARK"),
+                                    eps_item.get("invoice_id"),
+                                    eps_item.get("Αριθμός Μητρώου"),
+                                    eps_item.get("id"),
+                                )
+                                or ""
+                            ).strip()
+                        except Exception:
+                            eps_mark = ""
+                        if eps_mark != mark:
+                            continue
+                        if _epsilon_entry_has_saved_classification(eps_item):
+                            allow_edit_existing = True
+                            break
             except Exception:
                 log.exception("Could not read Excel to check duplicate MARK")
 
@@ -9127,7 +10562,7 @@ def search():
                     else:
                         flash(not_found_msg, "error")
             else:
-                if not classified_flag:
+                if True:
                     try:
                         # fiscal year check
                         sel_year = None
@@ -9773,6 +11208,58 @@ def profiles_page():
     )
 
 
+@app.get("/afm_rules")
+def afm_rules_page():
+    vat = (request.args.get("vat") or "").strip()
+    creds = read_credentials_list()
+    client = None
+    if vat:
+        client = _find_client(creds, vat=vat)
+    if not client:
+        try:
+            active = get_active_credential_from_session() or {}
+        except Exception:
+            active = {}
+        active_vat = str((active or {}).get("vat") or "").strip()
+        if active_vat:
+            client = _find_client(creds, vat=active_vat)
+        if not client and isinstance(active, dict) and active:
+            client = active
+    client = client or {}
+
+    categories = _list_invoice_categories(client, include_receipts=True)
+    labels = _category_labels_for_client(client)
+    constraints = _category_vat_constraints(client)
+    rules = _get_afm_rules(creds, str(client.get("vat") or vat or "").strip())
+
+    g_category_data = None
+    try:
+        from g_category_helpers import (
+            is_g_category_active,
+            get_available_categories_for_g,
+            enrich_categories_with_mtype,
+        )
+
+        if client and is_g_category_active(client):
+            settings = load_settings()
+            if settings:
+                categories = get_available_categories_for_g(settings, categories)
+                g_category_data = enrich_categories_with_mtype(categories, settings)
+    except Exception:
+        log.exception("afm_rules_page: failed to prepare g-category payload")
+
+    return render_template(
+        "afm_rules.html",
+        vat=client.get("vat", "") or vat,
+        rules=rules,
+        expense_tags=categories,
+        category_labels=labels,
+        vat_constraints=constraints,
+        g_category_data=g_category_data,
+        active_page="afm_rules",
+    )
+
+
 @app.route("/custom_categories", methods=["GET"])
 def custom_categories_page():
     vat = (request.args.get("vat") or "").strip()
@@ -10260,6 +11747,234 @@ def api_char_profiles_delete():
             write_credentials_list(creds)
     return jsonify(ok=True)
 
+
+@app.get("/api/afm_rules")
+def api_afm_rules_get():
+    vat = request.args.get("vat", "").strip()
+    creds = read_credentials_list()
+    client = _find_client(creds, vat=vat) if vat else None
+    if not client:
+        try:
+            active = get_active_credential_from_session() or {}
+        except Exception:
+            active = {}
+        active_vat = str((active or {}).get("vat") or "").strip()
+        active_name = str((active or {}).get("name") or "").strip()
+        if active_vat:
+            client = _find_client(creds, vat=active_vat)
+        if not client and active_name:
+            client = _find_client(creds, name=active_name)
+        if not client and (vat or active_name):
+            group_client, group_creds, _ = _find_client_in_group_credentials_files(vat, active_name)
+            if group_client:
+                client = group_client
+                if group_creds is not None:
+                    creds = group_creds
+        if not client and isinstance(active, dict) and active:
+            client = active
+    client = client or {}
+    active_vat = str(client.get("vat") or vat or "").strip()
+
+    # Fallback for session-only client objects: resolve the concrete credentials source
+    # to ensure rules come from the same storage as the active customer.
+    if active_vat and not _find_client(creds, vat=active_vat):
+        group_client, group_creds, _ = _find_client_in_group_credentials_files(active_vat, str(client.get("name") or "").strip())
+        if group_client and group_creds is not None:
+            client = group_client
+            creds = group_creds
+
+    return jsonify(
+        ok=True,
+        rules=_get_afm_rules(creds, active_vat),
+        expense_tags=_list_invoice_categories(client, include_receipts=False),
+        category_labels=_category_labels_for_client(client),
+        vat_constraints=_category_vat_constraints(client),
+        vat=active_vat,
+    )
+
+
+@app.post("/api/afm_rules/save")
+def api_afm_rules_save():
+    data = request.get_json(force=True, silent=True) or {}
+    vat = str(data.get("vat") or "").strip()
+    supplier_afm = _normalize_afm(data.get("supplier_afm") or data.get("afm"))
+    supplier_name = str(data.get("supplier_name") or data.get("name") or "").strip()
+    mapping = data.get("mapping") if isinstance(data.get("mapping"), dict) else {}
+    invoice_mtype = str(data.get("invoice_mtype") or "").strip()
+    if not vat:
+        try:
+            active = get_active_credential_from_session() or {}
+        except Exception:
+            active = {}
+        vat = str((active or {}).get("vat") or "").strip()
+
+    if not vat:
+        return jsonify(ok=False, error="Δεν βρέθηκε ενεργός πελάτης."), 400
+    if not supplier_afm:
+        return jsonify(ok=False, error="Συμπλήρωσε έγκυρο ΑΦΜ προμηθευτή."), 400
+
+    for key in AFM_RULE_MAPPING_KEYS:
+        mapping[key] = str(mapping.get(key) or "").strip()
+    if not all(mapping.get(key) for key in AFM_RULE_MAPPING_KEYS):
+        return jsonify(ok=False, error="Συμπλήρωσε όλες τις αντιστοιχίσεις ΦΠΑ."), 400
+
+    with CREDENTIALS_RW_LOCK:
+        creds = read_credentials_list()
+        save_path = None
+        client = _find_client(creds, vat=vat) if vat else None
+        if not client:
+            try:
+                active = get_active_credential_from_session() or {}
+            except Exception:
+                active = {}
+            active_name = str((active or {}).get("name") or "").strip()
+            if active_name:
+                client = _find_client(creds, name=active_name)
+            if not client and (vat or active_name):
+                group_client, group_creds, group_path = _find_client_in_group_credentials_files(vat, active_name)
+                if group_client is not None and group_creds is not None and group_path is not None:
+                    client = group_client
+                    creds = group_creds
+                    save_path = group_path
+        if not client:
+            return jsonify(ok=False, error="Δεν βρέθηκε πελάτης."), 404
+
+        constraints = _category_vat_constraints(client)
+        labels = _category_labels_for_client(client)
+        vat_by_key = {
+            "kat_fpa_a": "0%",
+            "kat_fpa_b": "6%",
+            "kat_fpa_g": "13%",
+            "kat_fpa_d": "17%",
+            "kat_fpa_e": "24%",
+        }
+        for key, vat_label in vat_by_key.items():
+            value = str(mapping.get(key) or "").strip()
+            allowed = constraints.get(value)
+            if value and allowed is not None and vat_label not in allowed:
+                display = labels.get(value, value)
+                return jsonify(ok=False, error=f"Η κατηγορία '{display}' δεν υποστηρίζει ΦΠΑ {vat_label}."), 400
+
+        rules = _get_afm_rules(creds, vat)
+        hit = None
+        for item in rules:
+            if str(item.get("supplier_afm") or "").strip() == supplier_afm:
+                hit = item
+                break
+        timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        if hit:
+            hit["supplier_name"] = supplier_name
+            hit["mapping"] = mapping
+            hit["invoice_mtype"] = invoice_mtype
+            hit["enabled"] = True
+            hit["updated_at"] = timestamp
+        else:
+            rules.append({
+                "id": supplier_afm,
+                "supplier_afm": supplier_afm,
+                "supplier_name": supplier_name,
+                "mapping": mapping,
+                "invoice_mtype": invoice_mtype,
+                "enabled": True,
+                "updated_at": timestamp,
+            })
+        _set_afm_rules(creds, vat, rules)
+        if save_path is not None:
+            try:
+                with save_path.open('w', encoding='utf-8') as f:
+                    json.dump(creds, f, ensure_ascii=False, indent=2)
+            except Exception:
+                write_credentials_list(creds)
+        else:
+            write_credentials_list(creds)
+
+    return jsonify(ok=True, rule={
+        "supplier_afm": supplier_afm,
+        "supplier_name": supplier_name,
+        "mapping": mapping,
+        "invoice_mtype": invoice_mtype,
+        "enabled": True,
+    })
+
+
+@app.post("/api/afm_rules/delete")
+def api_afm_rules_delete():
+    data = request.get_json(force=True, silent=True) or {}
+    vat = str(data.get("vat") or "").strip()
+    supplier_afm = _normalize_afm(data.get("supplier_afm") or data.get("afm"))
+    if not vat or not supplier_afm:
+        return jsonify(ok=False, error="Ανεπαρκή στοιχεία διαγραφής."), 400
+
+    with CREDENTIALS_RW_LOCK:
+        creds = read_credentials_list()
+        save_path = None
+        client = _find_client(creds, vat=vat) if vat else None
+        if not client:
+            try:
+                active = get_active_credential_from_session() or {}
+            except Exception:
+                active = {}
+            active_name = str((active or {}).get("name") or "").strip()
+            if active_name:
+                client = _find_client(creds, name=active_name)
+            if not client and (vat or active_name):
+                group_client, group_creds, group_path = _find_client_in_group_credentials_files(vat, active_name)
+                if group_client is not None and group_creds is not None and group_path is not None:
+                    client = group_client
+                    creds = group_creds
+                    save_path = group_path
+        if not client:
+            return jsonify(ok=False, error="Δεν βρέθηκε πελάτης."), 404
+
+        rules = [r for r in _get_afm_rules(creds, vat) if str(r.get("supplier_afm") or "").strip() != supplier_afm]
+        _set_afm_rules(creds, vat, rules)
+        if save_path is not None:
+            try:
+                with save_path.open('w', encoding='utf-8') as f:
+                    json.dump(creds, f, ensure_ascii=False, indent=2)
+            except Exception:
+                write_credentials_list(creds)
+        else:
+            write_credentials_list(creds)
+    return jsonify(ok=True)
+
+
+@app.post("/api/afm_rules/validate")
+def api_afm_rules_validate():
+    data = request.get_json(force=True, silent=True) or {}
+    summary = data.get("summary") if isinstance(data.get("summary"), dict) else data
+    if not isinstance(summary, dict):
+        return jsonify(ok=True, mismatch=False, applies=False)
+
+    active = get_active_credential_from_session() or {}
+    vat = str(data.get("vat") or summary.get("active_vat") or active.get("vat") or "").strip()
+    client = get_cred_by_vat(vat) or active or {}
+    doc_type_norm = str(summary.get("docType") or summary.get("doc_type") or "").strip().lower()
+    type_norm = str(summary.get("type") or "").strip().lower()
+    type_name_norm = str(summary.get("type_name") or "").strip().lower()
+    if doc_type_norm.startswith("invoice"):
+        is_receipt = False
+    elif doc_type_norm.startswith("receipt"):
+        is_receipt = True
+    elif type_norm in {"8.4", "8.5", "11.5"}:
+        is_receipt = True
+    elif any(k in (type_name_norm + " " + type_norm) for k in ("receipt", "αποδειξ", "λιαν", "pos")):
+        is_receipt = True
+    else:
+        is_receipt = bool(data.get("is_receipt") or summary.get("is_receipt"))
+    if not _afm_rules_apply_for_client(client, is_receipt=is_receipt):
+        return jsonify(ok=True, mismatch=False, applies=False, validation={"applies": False, "mismatch": False})
+    validation = _validate_summary_against_afm_rules(client, summary, active_vat=vat, is_receipt=is_receipt)
+    if validation.get("mismatch"):
+        return jsonify(
+            ok=True,
+            mismatch=True,
+            applies=True,
+            warning=_build_afm_rule_warning_text(client, validation, is_receipt=is_receipt),
+            validation=validation,
+        )
+    return jsonify(ok=True, mismatch=False, applies=bool(validation.get("applies")), validation=validation)
+
 @app.get("/profiles", endpoint="char_profiles_ui")
 def char_profiles_ui():
     return profiles_page()
@@ -10428,6 +12143,17 @@ def api_scrape_receipt():
         mode = str(data.get("mode") or "mixed").strip().lower()
         if mode not in ("analysis", "mixed"):
             mode = "mixed"
+
+        def _normalize_scrape_url(raw_url: str) -> str:
+            if not raw_url:
+                return ""
+            normalized = str(raw_url).strip()
+            normalized = re.sub(r"\s+", "", normalized)
+            normalized = re.sub(r"^(https?):/([^/])", r"\1://\2", normalized)
+            return normalized
+
+        url = _normalize_scrape_url(url)
+
         if not url:
             return jsonify({"ok": False, "error": "Missing 'url' in request"}), 400
 
@@ -10495,6 +12221,18 @@ def api_scrape_receipt():
                     "category": ""
                 })
 
+        has_core_data = any(
+            str(x or "").strip()
+            for x in (mark, issue_date, total_amount, issuer_vat, issuer_name, progressive_aa)
+        )
+        if (not has_core_data) and (not receipt_analysis):
+            return jsonify({
+                "ok": False,
+                "error": "Δεν βρέθηκαν δεδομένα για το URL. Έλεγξε ότι είναι πλήρες και σωστό.",
+                "mode": mode,
+                "raw": scraped,
+            }), 422
+
         # If scraper MARK is missing/invalid, assign unique pseudo-MARK for receipts.
         if not re.fullmatch(r"\d{15}", mark or ""):
             generated_mark = ""
@@ -10557,7 +12295,10 @@ def save_epsilon():
     """
     active_cred = get_active_credential_from_session()
     if not active_cred:
-        flash("Δεν υπάρχει ενεργός πελάτης για αποθήκευση.", "error")
+        if not session.get('active_group'):
+            flash("Δεν έχει επιλεγεί ενεργή ομάδα. Επίλεξε πρώτα ομάδα.", "error")
+        else:
+            flash("Δεν υπάρχει ενεργός πελάτης για αποθήκευση.", "error")
         return redirect(url_for("search"))
 
     vat = active_cred.get("vat")
@@ -10698,6 +12439,13 @@ def save_summary():
                 payload["message"] = message
             if error:
                 payload["error"] = error
+            if "saved_mark" not in extra:
+                try:
+                    saved_mark = str((summary or {}).get("mark") or (summary or {}).get("MARK") or "").strip()
+                    if saved_mark:
+                        payload["saved_mark"] = saved_mark
+                except Exception:
+                    pass
             if extra:
                 payload.update(extra)
             return jsonify(payload), status
@@ -11096,7 +12844,12 @@ def save_summary():
     if not vat:
         log.error("save_summary: missing vat - active=%s summary_afm=%s", bool(active), summary.get("AFM"))
         if not is_ajax_save:
-            flash("Δεν έχει επιλεγεί ενεργός πελάτης (ΑΦΜ)", "error")
+            if not session.get('active_group'):
+                flash("Δεν έχει επιλεγεί ενεργή ομάδα. Επίλεξε πρώτα ομάδα.", "error")
+            else:
+                flash("Δεν έχει επιλεγεί ενεργός πελάτης (ΑΦΜ)", "error")
+        if not session.get('active_group'):
+            return _save_summary_response(ok=False, error="Δεν έχει επιλεγεί ενεργή ομάδα. Επίλεξε πρώτα ομάδα.", status=400)
         return _save_summary_response(ok=False, error="Δεν έχει επιλεγεί ενεργός πελάτης (ΑΦΜ)", status=400)
     
     # If active credential is not set (or missing book_category), try to load from vat
@@ -11309,6 +13062,59 @@ def save_summary():
             conf["receipt_mtype"] = selected_receipt_mtype
     except Exception:
         log.exception("save_summary: failed to persist receipt repeat prefs for VAT=%s", vat)
+
+    # --- AFM classification rule validation ---
+    is_receipt_for_rules = bool(summary.get("is_receipt"))
+    try:
+        # AFM rules are invoice-only. Determine receipt mode for rule gate from
+        # explicit document semantics first (not from loose category fallbacks).
+        doc_type_norm = str(summary.get("docType") or summary.get("doc_type") or "").strip().lower()
+        type_norm = str(summary.get("type") or "").strip().lower()
+        type_name_norm = str(summary.get("type_name") or "").strip().lower()
+        if doc_type_norm.startswith("invoice"):
+            is_receipt_for_rules = False
+        elif doc_type_norm.startswith("receipt"):
+            is_receipt_for_rules = True
+        elif type_norm in {"8.4", "8.5", "11.5"}:
+            is_receipt_for_rules = True
+        elif any(k in (type_name_norm + " " + type_norm) for k in ("receipt", "αποδειξ", "λιαν", "pos")):
+            is_receipt_for_rules = True
+        else:
+            is_receipt_for_rules = bool(summary.get("is_receipt"))
+
+        force_afm_rule = bool(
+            summary.get("_afm_rule_force")
+            or summary.get("force_afm_rule")
+            or request.args.get("force_afm_rule") == "1"
+            or request.form.get("force_afm_rule") in ("1", "true", "True")
+        )
+        active_client = active or get_cred_by_vat(vat) or {}
+        if _afm_rules_apply_for_client(active_client, is_receipt=is_receipt_for_rules):
+            afm_rule_validation = _validate_summary_against_afm_rules(
+                active_client,
+                summary,
+                active_vat=str(vat or ""),
+                is_receipt=is_receipt_for_rules,
+            )
+            if afm_rule_validation.get("mismatch") and not force_afm_rule:
+                warning_text = _build_afm_rule_warning_text(active_client, afm_rule_validation, is_receipt=is_receipt_for_rules)
+                return _save_summary_response(
+                    ok=False,
+                    error=warning_text,
+                    status=409,
+                    warning=warning_text,
+                    afm_rule_conflict=True,
+                    afm_rule_validation=afm_rule_validation,
+                )
+    except Exception:
+        log.exception("save_summary: AFM rule validation failed")
+        if not bool(is_receipt_for_rules):
+            return _save_summary_response(
+                ok=False,
+                error="Αποτυχία ελέγχου κανόνα ΑΦΜ πριν την αποθήκευση.",
+                status=500,
+                afm_rule_conflict=True,
+            )
 
     # --- GUARD: μπλοκάρουμε άδεια/άκυρα summaries ---
     try:
@@ -13218,6 +15024,55 @@ def _human_readable_size(num: int) -> str:
     return f"{value:.2f} TB"
 
 
+def _open_backup_zip(source, password: Optional[bytes] = None):
+    """Open a zip (plain or AES-encrypted) and return a context manager.
+    Tries plain zipfile first (old unencrypted backups); on failure tries
+    pyzipper with the server-derived AES key (new encrypted backups)."""
+    if password is None:
+        try:
+            password = _derive_backup_password().encode('utf-8')
+        except Exception:
+            password = b'scanmydata_bkup'
+
+    # 1) Try plain stdlib ZipFile — works for unencrypted backups
+    try:
+        zf = zipfile.ZipFile(source)
+        # Probe: peek at the first member; AES-encrypted members raise RuntimeError
+        for name in zf.namelist():
+            try:
+                with zf.open(name) as f:
+                    f.read(4)
+                break
+            except RuntimeError as probe_err:
+                if 'password' in str(probe_err).lower() or 'encrypt' in str(probe_err).lower():
+                    zf.close()
+                    raise
+                break
+            except Exception:
+                break
+        zf.close()
+        try:
+            source.seek(0)
+        except Exception:
+            pass
+        return zipfile.ZipFile(source)
+    except (RuntimeError, Exception):
+        pass
+
+    # 2) Fallback: AES-encrypted via pyzipper
+    try:
+        import pyzipper
+        try:
+            source.seek(0)
+        except Exception:
+            pass
+        zf = pyzipper.AESZipFile(source)
+        zf.setpassword(password)
+        return zf
+    except Exception as e:
+        raise zipfile.BadZipFile(f"Δεν ήταν δυνατό το άνοιγμα του ZIP (plain ή AES): {e}")
+
+
 def _analyze_backup_zip(file_like) -> Dict[str, Any]:
     summary: Dict[str, Any] = {
         "file_count": 0,
@@ -13238,7 +15093,7 @@ def _analyze_backup_zip(file_like) -> Dict[str, Any]:
     except Exception:
         pass
 
-    with zipfile.ZipFile(file_like) as zf:
+    with _open_backup_zip(file_like) as zf:
         infos = [info for info in zf.infolist() if not info.is_dir()]
         summary["file_count"] = len(infos)
         summary["total_size"] = sum(info.file_size for info in infos)
@@ -13331,7 +15186,7 @@ def _apply_backup_zip(zip_path: str) -> None:
     base = os.path.normpath(get_group_base_dir())
     has_credentials = False
 
-    with zipfile.ZipFile(zip_path) as zf:
+    with _open_backup_zip(zip_path) as zf:
         selected_vats: set[str] = set()
         mode = "group"
         try:
@@ -13427,6 +15282,22 @@ def _apply_backup_zip(zip_path: str) -> None:
         raise ValueError("Το backup δεν περιέχει το αρχείο credentials.json.")
 
 
+def _derive_backup_password() -> str:
+    """Derive a deterministic AES backup password from MASTER_ENCRYPTION_KEY.
+    Returns a 16-character hex string (64-bit); stable across calls."""
+    import hashlib
+    master = os.getenv("MASTER_ENCRYPTION_KEY", "")
+    if master:
+        digest = hashlib.sha256(master.encode("utf-8")).hexdigest()
+        return digest[:16]
+    # Fallback: fixed default (low security — warns in log)
+    current_app.logger.warning(
+        "MASTER_ENCRYPTION_KEY not set; backup encrypted with default password. "
+        "Set MASTER_ENCRYPTION_KEY for production."
+    )
+    return "scanmydata_bkup"
+
+
 @app.get("/api/data_backup/download")
 def data_backup_download():
     # only group admin may download backups
@@ -13442,17 +15313,22 @@ def data_backup_download():
         return jsonify({'ok': False, 'error': 'permission check failed'}), 500
 
     try:
+        import pyzipper
+
         # Get backup mode and customer list from query params
         mode = request.args.get('mode', 'group').strip().lower()
         customers_str = request.args.get('customers', '').strip()
         selected_customers = set(v.strip() for v in customers_str.split(',') if v.strip()) if customers_str else set()
-        
+
+        backup_password = _derive_backup_password().encode('utf-8')
+
         mem = io.BytesIO()
-        with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as zf:
+        with pyzipper.AESZipFile(mem, "w", compression=pyzipper.ZIP_DEFLATED,
+                                  encryption=pyzipper.WZ_AES) as zf:
+            zf.setpassword(backup_password)
             base = get_group_base_dir()
-            
+
             if mode == 'customer' and selected_customers:
-                # Write lightweight manifest so restore can apply customer-scoped merge safely.
                 manifest = {
                     "mode": "customer",
                     "selected_vats": sorted(list(selected_customers)),
@@ -13460,24 +15336,19 @@ def data_backup_download():
                 }
                 zf.writestr("backup_manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
 
-                # Build customer-scoped credentials.json (only selected customers).
                 creds_path = os.path.join(base, "credentials.json")
                 if os.path.exists(creds_path):
                     try:
                         creds_data = _safe_json_read(creds_path, default=[])
                         creds_list = creds_data if isinstance(creds_data, list) else []
-                        filtered = []
-                        for c in creds_list:
-                            if not isinstance(c, dict):
-                                continue
-                            vat = str(c.get("vat") or "").strip()
-                            if vat in selected_customers:
-                                filtered.append(c)
+                        filtered = [
+                            c for c in creds_list
+                            if isinstance(c, dict) and str(c.get("vat") or "").strip() in selected_customers
+                        ]
                         zf.writestr("credentials.json", json.dumps(filtered, ensure_ascii=False, indent=2).encode("utf-8"))
                     except Exception:
                         current_app.logger.warning("Failed to build filtered credentials.json for customer backup", exc_info=True)
 
-                # Only backup files related to selected customers
                 for root, _, files in os.walk(base):
                     for fname in files:
                         if fname in {'credentials.json', 'credentials_settings.json', 'activity.log', 'fiscal_meta.json', 'backup_manifest.json'}:
@@ -13493,22 +15364,19 @@ def data_backup_download():
                     "created_at": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
                 }
                 zf.writestr("backup_manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
-                # Backup entire group directory (default: mode='group')
                 for root, _, files in os.walk(base):
                     for fname in files:
                         path = os.path.join(root, fname)
                         arc = os.path.relpath(path, base)
                         zf.write(path, arc)
-        
+
         mem.seek(0)
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_label = f"backup_{mode}" if mode == 'customer' else "backup"
         file_name = f"data_{backup_label}_{ts}.zip"
-        
-        # Calculate file size
+
         file_size_mb = len(mem.getvalue()) / (1024 * 1024)
-        
-        # Log backup download with enhanced details
+
         try:
             from utils import log_user_activity
             log_user_activity(
@@ -13519,15 +15387,16 @@ def data_backup_download():
                     'file_name': file_name,
                     'file_size_mb': round(file_size_mb, 2),
                     'mode': mode,
+                    'encrypted': True,
                     'customers': list(selected_customers) if mode == 'customer' else None,
-                    'customers_count': len(selected_customers) if mode == 'customer' else None
+                    'customers_count': len(selected_customers) if mode == 'customer' else None,
                 },
                 user_email=getattr(current_user, 'email', None),
                 user_username=getattr(current_user, 'username', None)
             )
         except Exception as e:
             current_app.logger.error(f"Failed to log backup download: {e}")
-        
+
         return send_file(
             mem,
             mimetype="application/zip",
@@ -13738,11 +15607,17 @@ def list_fragment():
     try:
         active = get_active_credential_from_session() or {}
         active_vat = str(active.get("vat") or "").strip()
+        highlight_mark = str(request.args.get("highlight_mark") or "").strip()
         table_html, exists, _ = _render_table_html_for_vat(active_vat, with_checkbox_value=True)
         if not exists:
             table_html = '<div class="p-3 text-gray-500">Δεν βρέθηκαν εγγραφές στο epsilon_invoices.json.</div>'
 
-        return jsonify({"ok": True, "table_html": table_html})
+        return jsonify({
+            "ok": True,
+            "table_html": table_html,
+            "file_exists": bool(exists),
+            "highlight_mark": highlight_mark,
+        })
     except Exception as exc:
         current_app.logger.exception('list_fragment failed')
         return jsonify({'ok': False, 'error': str(exc)}), 500
@@ -13877,34 +15752,11 @@ def epsilon_preview():
         fiscal_year=fiscal_year,
     )
 
-    # Έλεγχος ασυμφωνίας: εγγραφές στο epsilon json που δεν υπάρχουν στο invoices.xlsx
+    # NOTE:
+    # Η προεπισκόπηση epsilon βασίζεται στο epsilon_invoices.json.
+    # Δεν εμφανίζουμε πλέον warning ασυμφωνίας με invoices.xlsx στη σελίδα preview.
     missing_excel_marks: List[str] = []
     missing_excel_rows: List[Dict[str, Any]] = []
-    try:
-        excel_path = excel_path_for(vat=vat)
-        if os.path.exists(excel_path):
-            df_excel = pd.read_excel(excel_path, engine="openpyxl", dtype=str).fillna("")
-            excel_marks = set(df_excel.get("MARK", pd.Series(dtype=str)).astype(str).str.strip().tolist())
-            preview_marks = [str(r.get("MARK") or "").strip() for r in (rows or []) if str(r.get("MARK") or "").strip()]
-            missing_excel_marks = sorted({m for m in preview_marks if m not in excel_marks})
-            if missing_excel_marks:
-                rows_by_mark: Dict[str, List[Dict[str, Any]]] = {}
-                for r in (rows or []):
-                    mk = str(r.get("MARK") or "").strip()
-                    if not mk:
-                        continue
-                    rows_by_mark.setdefault(mk, []).append(r)
-                for mk in missing_excel_marks:
-                    for rec in rows_by_mark.get(mk, [{}]):
-                        missing_excel_rows.append({
-                            "mark": mk,
-                            "aa": str(rec.get("AA") or "").strip(),
-                            "afm": str(rec.get("AFM_ISSUER") or "").strip(),
-                            "issuer_name": str(rec.get("ISSUER_NAME") or "").strip(),
-                            "date": str(rec.get("DATE") or "").strip(),
-                        })
-    except Exception:
-        current_app.logger.exception("Failed to compare epsilon preview against excel MARK column")
 
     # πέρασέ τα στο template
     return render_template("epsilon_preview.html",
@@ -14169,6 +16021,193 @@ def _extract_aa_from_msg(msg: str) -> str:
 def _looks_like_receipt(rec: dict) -> bool:
     t = f"{rec.get('DOCTYPE','')} {rec.get('type','')} {rec.get('category','')}".lower()
     return any(k in t for k in ("receipt", "αποδειξ", "λιαν"))
+
+
+DELETE_UNDO_MAX = 5
+DELETE_UNDO_TTL_SECONDS = 60 * 60
+DELETE_UNDO_STACKS: Dict[str, List[Dict[str, Any]]] = {}
+
+
+def _delete_undo_scope_key() -> str:
+    try:
+        active = get_active_credential_from_session() or {}
+    except Exception:
+        active = {}
+
+    vat = str(active.get("vat") or "default").strip() or "default"
+    name = str(active.get("name") or "default").strip() or "default"
+
+    try:
+        from auth import get_active_group
+        grp = get_active_group()
+        group_name = str(getattr(grp, "name", "") or "default").strip() or "default"
+    except Exception:
+        group_name = "default"
+
+    try:
+        uid = str(getattr(current_user, "id", "") or getattr(current_user, "pw_hash", "") or "anon").strip() or "anon"
+    except Exception:
+        uid = "anon"
+    return f"{uid}:{group_name}:{vat}:{name}"
+
+
+def _cleanup_delete_undo_stack(scope_key: str):
+    now = int(time.time())
+    stack = DELETE_UNDO_STACKS.get(scope_key) or []
+    stack = [e for e in stack if int(e.get("created_ts") or 0) >= (now - DELETE_UNDO_TTL_SECONDS)]
+    if stack:
+        DELETE_UNDO_STACKS[scope_key] = stack[:DELETE_UNDO_MAX]
+    else:
+        DELETE_UNDO_STACKS.pop(scope_key, None)
+
+
+def _push_delete_undo_entry(entry: Dict[str, Any]):
+    scope_key = _delete_undo_scope_key()
+    _cleanup_delete_undo_stack(scope_key)
+    stack = DELETE_UNDO_STACKS.get(scope_key) or []
+    stack.insert(0, entry)
+    DELETE_UNDO_STACKS[scope_key] = stack[:DELETE_UNDO_MAX]
+
+
+def _extract_mark_from_any(item: Any) -> str:
+    if not isinstance(item, dict):
+        return ""
+    for k in ("mark", "MARK", "invoice_id", "Αριθμός Μητρώου", "id"):
+        if k in item and item.get(k) not in (None, ""):
+            return str(item.get(k)).strip()
+    return ""
+
+
+def _find_delete_undo_entry(scope_key: str, token: str):
+    _cleanup_delete_undo_stack(scope_key)
+    stack = DELETE_UNDO_STACKS.get(scope_key) or []
+    for idx, e in enumerate(stack):
+        if str(e.get("token") or "") == str(token or ""):
+            return stack, idx, e
+    return stack, -1, None
+
+
+@app.route("/delete/undo", methods=["POST"])
+def delete_undo():
+    is_ajax_request = (
+        (request.headers.get("X-Requested-With", "").lower() == "xmlhttprequest")
+        or (request.args.get("ajax") == "1")
+        or (request.form.get("ajax") == "1")
+    )
+    token = str(request.form.get("token") or request.args.get("token") or "").strip()
+    if not token:
+        payload = request.get_json(silent=True) or {}
+        token = str(payload.get("token") or "").strip()
+
+    if not token:
+        msg = "Δεν βρέθηκε ενέργεια για αναίρεση."
+        if is_ajax_request:
+            return jsonify({"ok": False, "error": msg}), 400
+        flash(msg, "error")
+        return redirect(url_for("search"))
+
+    scope_key = _delete_undo_scope_key()
+    stack, idx, entry = _find_delete_undo_entry(scope_key, token)
+    if idx < 0 or not entry:
+        msg = "Η ενέργεια αναίρεσης έληξε ή δεν υπάρχει."
+        if is_ajax_request:
+            return jsonify({"ok": False, "error": msg}), 404
+        flash(msg, "error")
+        return redirect(url_for("search"))
+
+    restored_excel = 0
+    restored_epsilon = 0
+
+    try:
+        excel_rows = entry.get("excel_rows") if isinstance(entry.get("excel_rows"), list) else []
+        excel_columns = entry.get("excel_columns") if isinstance(entry.get("excel_columns"), list) else []
+        excel_path = str(entry.get("excel_path") or "").strip()
+        if excel_rows and excel_path:
+            import pandas as pd
+            restore_df = pd.DataFrame(excel_rows)
+            if excel_columns:
+                for c in excel_columns:
+                    if c not in restore_df.columns:
+                        restore_df[c] = ""
+                restore_df = restore_df[excel_columns]
+            if os.path.exists(excel_path):
+                cur_df = pd.read_excel(excel_path, engine="openpyxl", dtype=str).fillna("")
+                cur_df.columns = [str(c).strip() for c in cur_df.columns.astype(str)]
+                if "MARK" in cur_df.columns and "MARK" in restore_df.columns:
+                    existing_marks = set(cur_df["MARK"].astype(str).str.strip().tolist())
+                    restore_df = restore_df[~restore_df["MARK"].astype(str).str.strip().isin(existing_marks)]
+                if not restore_df.empty:
+                    merged = pd.concat([cur_df, restore_df], ignore_index=True)
+                    merged.to_excel(excel_path, index=False, engine="openpyxl")
+                    restored_excel = int(restore_df.shape[0])
+            else:
+                out_df = restore_df.copy()
+                out_df.to_excel(excel_path, index=False, engine="openpyxl")
+                restored_excel = int(out_df.shape[0])
+    except Exception:
+        log.exception("delete_undo: failed restoring Excel for token=%s", token)
+
+    try:
+        snapshots = entry.get("epsilon_snapshots") if isinstance(entry.get("epsilon_snapshots"), list) else []
+        for snap in snapshots:
+            if not isinstance(snap, dict):
+                continue
+            vat_code = str(snap.get("vat") or "").strip()
+            rows = snap.get("rows") if isinstance(snap.get("rows"), list) else []
+            if not rows:
+                continue
+            try:
+                eps_path = epsilon_file_path_for(vat_code) if vat_code else ""
+            except Exception:
+                eps_path = ""
+            if not eps_path:
+                continue
+            try:
+                cache = json_read(eps_path) or []
+            except Exception:
+                cache = []
+            existing_marks = set(_extract_mark_from_any(it) for it in cache if isinstance(it, dict))
+            to_add = [r for r in rows if _extract_mark_from_any(r) and _extract_mark_from_any(r) not in existing_marks]
+            if not to_add:
+                continue
+            new_cache = cache + to_add
+            try:
+                if globals().get("_safe_save_epsilon_cache"):
+                    _safe_save_epsilon_cache(vat_code, new_cache)
+                else:
+                    json_write(eps_path, new_cache)
+                restored_epsilon += len(to_add)
+            except Exception:
+                log.exception("delete_undo: failed restoring epsilon cache for vat=%s", vat_code)
+    except Exception:
+        log.exception("delete_undo: failed restoring epsilon snapshots token=%s", token)
+
+    try:
+        stack.pop(idx)
+        if stack:
+            DELETE_UNDO_STACKS[scope_key] = stack[:DELETE_UNDO_MAX]
+        else:
+            DELETE_UNDO_STACKS.pop(scope_key, None)
+    except Exception:
+        pass
+
+    customer_name = str(entry.get("customer_name") or "").strip()
+    customer_vat = str(entry.get("customer_vat") or "").strip()
+    if customer_name and customer_vat:
+        customer_part = f" για τον πελάτη {customer_name} ({customer_vat})"
+    elif customer_name:
+        customer_part = f" για τον πελάτη {customer_name}"
+    elif customer_vat:
+        customer_part = f" για τον πελάτη με ΑΦΜ {customer_vat}"
+    else:
+        customer_part = ""
+
+    msg = f"Έγινε αναίρεση διαγραφής{customer_part}. Επαναφέρθηκαν από Excel: {restored_excel}, από Epsilon cache: {restored_epsilon}."
+    if is_ajax_request:
+        return jsonify({"ok": True, "message": msg, "restored_excel": restored_excel, "restored_epsilon": restored_epsilon}), 200
+    flash(msg, "success")
+    return redirect(url_for("search"))
+
 # ---------------- Delete invoices ----------------
 @app.route("/delete", methods=["POST"])
 def delete_invoices():
@@ -14226,6 +16265,8 @@ def delete_invoices():
         excel_path = excel_path_for(cred_name=active.get("name"))
 
     deleted_from_excel = 0
+    deleted_excel_rows: List[Dict[str, Any]] = []
+    deleted_excel_columns: List[str] = []
     try:
         if os.path.exists(excel_path):
             import pandas as pd
@@ -14239,6 +16280,8 @@ def delete_invoices():
                 mask = marks_series.isin(marks_to_delete)
                 num_matches = int(mask.sum())
                 if num_matches > 0:
+                    deleted_excel_rows = df[mask].copy().to_dict(orient="records")
+                    deleted_excel_columns = list(df.columns)
                     df_remaining = df[~mask].copy()
                     try:
                         # If no rows remain, write an empty dataframe (preserving columns)
@@ -14262,6 +16305,7 @@ def delete_invoices():
 
     # delete matching entries from per-VAT epsilon cache ONLY
     deleted_from_epsilon = 0
+    deleted_epsilon_snapshots: List[Dict[str, Any]] = []
     try:
         vat = active.get("vat") if active else None
         if vat:
@@ -14283,15 +16327,12 @@ def delete_invoices():
 
                 before_len = len(eps_cache)
 
-                def item_mark_val(it):
-                    for k in ("mark", "MARK", "invoice_id", "Αριθμός Μητρώου", "id"):
-                        if isinstance(it, dict) and k in it and it.get(k) not in (None, ""):
-                            return str(it.get(k)).strip()
-                    return ""
-
-                new_cache = [e for e in eps_cache if item_mark_val(e) not in marks_to_delete]
+                removed_here = [e for e in eps_cache if _extract_mark_from_any(e) in marks_to_delete]
+                new_cache = [e for e in eps_cache if _extract_mark_from_any(e) not in marks_to_delete]
                 after_len = len(new_cache)
                 deleted_from_epsilon = before_len - after_len
+                if removed_here:
+                    deleted_epsilon_snapshots.append({"vat": str(vat).strip(), "rows": removed_here})
 
                 if deleted_from_epsilon > 0:
                     try:
@@ -14337,13 +16378,8 @@ def delete_invoices():
                             eps_cache = []
                     before_len = len(eps_cache)
 
-                    def _mark_from_item(it):
-                        for k in ("mark", "MARK", "invoice_id", "Αριθμός Μητρώου", "id"):
-                            if isinstance(it, dict) and k in it and it.get(k) not in (None, ""):
-                                return str(it.get(k)).strip()
-                        return ""
-
-                    new_cache = [e for e in eps_cache if _mark_from_item(e) not in marks_to_delete]
+                    removed_here = [e for e in eps_cache if _extract_mark_from_any(e) in marks_to_delete]
+                    new_cache = [e for e in eps_cache if _extract_mark_from_any(e) not in marks_to_delete]
                     if len(new_cache) != before_len:
                         # write back
                         try:
@@ -14362,12 +16398,35 @@ def delete_invoices():
                             log.exception("delete_invoices: fallback write failed for %s", eps_path)
                         # update counter
                         deleted_from_epsilon += (before_len - len(new_cache))
+                        if removed_here:
+                            vat_code = fname.split("_epsilon_invoices.json")[0]
+                            deleted_epsilon_snapshots.append({"vat": str(vat_code).strip(), "rows": removed_here})
     except Exception:
         log.exception("delete_invoices: fallback cross-VAT epsilon deletion failed")
 
     # Final summary
     total_requested = len(marks_to_delete)
     summary_msg = f"Διαγράφηκαν {total_requested} επιλεγμένα mark(s). Αφαιρέθηκαν από Excel: {deleted_from_excel}, από Epsilon cache: {deleted_from_epsilon}"
+
+    undo_token = ""
+    undo_entry = None
+    try:
+        if deleted_from_excel > 0 or deleted_from_epsilon > 0:
+            undo_token = secrets.token_urlsafe(10)
+            undo_entry = {
+                "token": undo_token,
+                "created_ts": int(time.time()),
+                "marks": list(marks_to_delete),
+                "excel_path": excel_path,
+                "excel_rows": deleted_excel_rows,
+                "excel_columns": deleted_excel_columns,
+                "epsilon_snapshots": deleted_epsilon_snapshots,
+                "customer_vat": active.get("vat") if active else None,
+                "customer_name": active.get("name") if active else None,
+            }
+            _push_delete_undo_entry(undo_entry)
+    except Exception:
+        log.exception("delete_invoices: failed to create undo entry")
     flash(summary_msg, "success")
     log.info("delete_invoices: finished request. requested=%d excel=%d epsilon=%d", total_requested, deleted_from_excel, deleted_from_epsilon)
 
@@ -14403,6 +16462,13 @@ def delete_invoices():
             "deleted_from_excel": deleted_from_excel,
             "deleted_from_epsilon": deleted_from_epsilon,
             "marks": marks_to_delete,
+            "undo": {
+                "token": undo_token,
+                "count": total_requested,
+                "created_ts": (undo_entry or {}).get("created_ts"),
+                "customer_vat": (undo_entry or {}).get("customer_vat"),
+                "customer_name": (undo_entry or {}).get("customer_name"),
+            } if undo_token else None,
         }), 200
 
     return redirect(url_for("search"))
@@ -14414,6 +16480,11 @@ def delete_invoices():
 # ---------------- Global error handler ----------------
 @app.errorhandler(Exception)
 def handle_unexpected_error(e):
+    from werkzeug.exceptions import HTTPException
+    # Re-raise HTTP exceptions (404, 405, etc.) so Flask handles them properly.
+    # Without this, every 404 would be converted to a 500 HTML page.
+    if isinstance(e, HTTPException):
+        return e
     tb = traceback.format_exc()
     log.error("Unhandled exception: %s\n%s", str(e), tb)
     debug = os.getenv("FLASK_DEBUG", "0") == "1"
@@ -14723,7 +16794,8 @@ def admin_settings():
 @_require_admin
 def admin_settings_save():
     form = request.form or {}
-    settings = load_settings()
+    # Global admin settings — stored in data/system/admin_settings.json
+    settings = load_admin_settings()
     settings['site_title'] = form.get('site_title')
     
     # Save email provider setting
@@ -14735,8 +16807,22 @@ def admin_settings_save():
     railway_proxy_url = form.get('railway_proxy_url', '').strip()
     if railway_proxy_url:
         settings['railway_proxy_url'] = railway_proxy_url
+
+    # Firebase backup sync policy
+    sync_mode = str(form.get('firebase_backup_sync_mode') or 'login_logout').strip().lower()
+    if sync_mode not in {'login_logout', 'scheduled'}:
+        sync_mode = 'login_logout'
+    settings['firebase_backup_sync_mode'] = sync_mode
+
+    try:
+        schedule_minutes = int(form.get('firebase_backup_schedule_minutes') or 30)
+    except Exception:
+        schedule_minutes = 30
+    if schedule_minutes < 5:
+        schedule_minutes = 5
+    settings['firebase_backup_schedule_minutes'] = schedule_minutes
     
-    save_settings(settings)
+    save_admin_settings(settings)
     flash('Settings saved', 'success')
     return redirect(url_for('admin_settings'))
 
@@ -14853,6 +16939,7 @@ def api_admin_firebase_usage():
 
 
 @app.route('/api/admin/firebase-sync-settings', methods=['GET', 'POST'])
+@app.route('/admin/api/firebase-sync-settings', methods=['GET', 'POST'])
 @login_required
 def api_admin_firebase_sync_settings():
     """Get or update Firebase sync settings."""
@@ -14860,49 +16947,119 @@ def api_admin_firebase_sync_settings():
         return jsonify({'success': False, 'error': 'Admin access required'}), 403
 
     if request.method == 'GET':
-        # Return current settings
-        enabled = os.getenv('FIREBASE_SYNC_ENABLED', '0') == '1'
-        interval = int(os.getenv('FIREBASE_SYNC_INTERVAL', '60'))
-        smart_sync = os.getenv('FIREBASE_SMART_SYNC', '1') == '1'
-        return jsonify({
-            'success': True,
-            'data': {
-                'enabled': enabled,
-                'interval': interval,
-                'smart_sync': smart_sync
-            }
-        })
+        try:
+            sync_cfg = utils.get_firebase_backup_sync_settings() or {}
+        except Exception:
+            logger.exception('Failed to read firebase sync settings; using defaults')
+            sync_cfg = {}
+        try:
+            mode = str(sync_cfg.get('mode') or 'login_logout')
+            if mode not in {'login_logout', 'scheduled'}:
+                mode = 'login_logout'
+            interval = int(sync_cfg.get('schedule_seconds') or 60)
+            interval = max(10, min(3600, interval))
+            smart_sync = bool(sync_cfg.get('smart_sync', True))
+            enabled = (mode == 'scheduled')
+            return jsonify({
+                'success': True,
+                'data': {
+                    'mode': mode,
+                    'enabled': enabled,
+                    'interval': interval,
+                    'schedule_unit': str(sync_cfg.get('schedule_unit') or 'seconds'),
+                    'schedule_value': int(sync_cfg.get('schedule_value') or interval),
+                    'smart_sync': smart_sync,
+                    'schedule_minutes': int(sync_cfg.get('schedule_minutes') or max(5, int((interval + 59) // 60))),
+                    'settings_source': str(sync_cfg.get('source') or '.env')
+                }
+            })
+        except Exception:
+            logger.exception('Failed to build firebase sync settings response; using hard defaults')
+            return jsonify({
+                'success': True,
+                'data': {
+                    'mode': 'login_logout',
+                    'enabled': False,
+                    'interval': 60,
+                    'schedule_unit': 'seconds',
+                    'schedule_value': 60,
+                    'smart_sync': True,
+                    'schedule_minutes': 5,
+                    'settings_source': 'default'
+                }
+            })
 
     # POST: update settings
     try:
-        payload = request.get_json()
-        enabled = bool(payload.get('enabled'))
-        interval = max(10, min(3600, int(payload.get('interval', 60))))
+        payload = request.get_json(silent=True) or {}
+        mode = str(payload.get('mode') or '').strip().lower()
+        if mode not in {'login_logout', 'scheduled'}:
+            mode = 'scheduled' if bool(payload.get('enabled')) else 'login_logout'
+        enabled = (mode == 'scheduled')
+        schedule_unit = str(payload.get('schedule_unit') or 'seconds').strip().lower()
+        if schedule_unit not in {'seconds', 'minutes', 'hours', 'days'}:
+            schedule_unit = 'seconds'
+        try:
+            schedule_value = int(payload.get('schedule_value', payload.get('interval', 60)))
+        except Exception:
+            schedule_value = 60
+        if schedule_value < 1:
+            schedule_value = 1
+        multiplier = {'seconds': 1, 'minutes': 60, 'hours': 3600, 'days': 86400}[schedule_unit]
+        interval = schedule_value * multiplier
+        interval = max(10, min(86400, interval))
+        if schedule_unit == 'days':
+            schedule_value = max(1, min(30, schedule_value))
+            interval = schedule_value * 86400
+        elif schedule_unit == 'hours':
+            schedule_value = max(1, min(24, schedule_value))
+            interval = schedule_value * 3600
+        elif schedule_unit == 'minutes':
+            schedule_value = max(1, min(1440, schedule_value))
+            interval = schedule_value * 60
+        else:
+            schedule_value = max(10, min(3600, schedule_value))
+            interval = schedule_value
         smart_sync = bool(payload.get('smart_sync', True))
+
+        settings = load_admin_settings() or {}
+        settings['firebase_backup_sync_mode'] = mode
+        settings['firebase_backup_schedule_seconds'] = interval
+        settings['firebase_backup_schedule_minutes'] = max(5, int((interval + 59) // 60))
+        settings['firebase_backup_schedule_unit'] = schedule_unit
+        settings['firebase_backup_schedule_value'] = schedule_value
+        settings['firebase_smart_sync_enabled'] = smart_sync
+        save_admin_settings(settings)
         
         # Update environment (in-memory and .env file)
+        os.environ['FIREBASE_SYNC_MODE'] = mode
         os.environ['FIREBASE_SYNC_ENABLED'] = '1' if enabled else '0'
         os.environ['FIREBASE_SYNC_INTERVAL'] = str(interval)
+        os.environ['FIREBASE_SYNC_UNIT'] = schedule_unit
+        os.environ['FIREBASE_SYNC_VALUE'] = str(schedule_value)
         os.environ['FIREBASE_SMART_SYNC'] = '1' if smart_sync else '0'
         
-        # Update .env file
-        env_file = os.path.join(os.getcwd(), '.env')
+        # Update .env file in the app root, not the current working directory.
+        env_file = os.path.join(BASE_DIR, '.env')
         env_content = []
         if os.path.exists(env_file):
-            with open(env_file, 'r') as f:
+            with open(env_file, 'r', encoding='utf-8') as f:
                 for line in f:
-                    if not any(line.startswith(k) for k in ['FIREBASE_SYNC_ENABLED=', 'FIREBASE_SYNC_INTERVAL=', 'FIREBASE_SMART_SYNC=']):
+                    if not any(line.startswith(k) for k in ['FIREBASE_SYNC_MODE=', 'FIREBASE_SYNC_ENABLED=', 'FIREBASE_SYNC_INTERVAL=', 'FIREBASE_SYNC_UNIT=', 'FIREBASE_SYNC_VALUE=', 'FIREBASE_SMART_SYNC=']):
                         env_content.append(line.rstrip('\n'))
-        
+
         # Add/update settings
+        env_content.append(f'FIREBASE_SYNC_MODE={mode}')
         env_content.append(f'FIREBASE_SYNC_ENABLED={"1" if enabled else "0"}')
         env_content.append(f'FIREBASE_SYNC_INTERVAL={interval}')
+        env_content.append(f'FIREBASE_SYNC_UNIT={schedule_unit}')
+        env_content.append(f'FIREBASE_SYNC_VALUE={schedule_value}')
         env_content.append(f'FIREBASE_SMART_SYNC={"1" if smart_sync else "0"}')
-        
-        with open(env_file, 'w') as f:
+
+        with open(env_file, 'w', encoding='utf-8') as f:
             f.write('\n'.join(env_content) + '\n')
         
-        logger.info(f'Firebase sync settings updated: enabled={enabled}, interval={interval}s, smart_sync={smart_sync}')
+        logger.info(f'Firebase sync settings updated: mode={mode}, interval={interval}s, unit={schedule_unit}, value={schedule_value}, smart_sync={smart_sync}')
         # record activity for admin panel
         try:
             from utils import log_user_activity
@@ -14910,14 +17067,22 @@ def api_admin_firebase_sync_settings():
                 user_id=current_user.id,
                 group_name='system',
                 action='firebase_sync_settings_updated',
-                details={'enabled': enabled, 'interval': interval, 'smart_sync': smart_sync},
+                details={'mode': mode, 'enabled': enabled, 'interval': interval, 'schedule_unit': schedule_unit, 'schedule_value': schedule_value, 'smart_sync': smart_sync},
                 user_email=getattr(current_user, 'email', None),
                 user_username=getattr(current_user, 'username', None)
             )
         except Exception:
             pass
         
-        return jsonify({'success': True, 'message': 'Settings saved'})
+        return jsonify({'success': True, 'message': 'Settings saved', 'data': {
+            'mode': mode,
+            'enabled': enabled,
+            'interval': interval,
+            'schedule_unit': schedule_unit,
+            'schedule_value': schedule_value,
+            'smart_sync': smart_sync,
+            'settings_source': 'process-env'
+        }})
     except Exception as e:
         logger.error(f'Error saving firebase sync settings: {e}')
         return jsonify({'success': False, 'error': str(e)}), 400
@@ -15101,6 +17266,128 @@ def admin_send_email():
         logger.exception('Failed to send bulk email')
         flash(f'Error sending emails: {str(e)}', 'danger')
         return redirect(url_for('admin_send_email'))
+
+
+_firebase_backup_scheduler_started = False
+_firebase_backup_scheduler_lock = threading.Lock()
+_firebase_backup_last_run: Dict[str, float] = {}
+
+
+def _read_group_sync_settings_by_folder(group_folder: str) -> Dict[str, Any]:
+    try:
+        p = os.path.join(BASE_DIR, 'data', group_folder, 'credentials_settings.json')
+        if os.path.exists(p):
+            with open(p, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except Exception:
+        log.exception('Failed reading group sync settings for folder=%s', group_folder)
+    return {}
+
+
+def _firebase_backup_scheduler_loop():
+    while True:
+        try:
+            with app.app_context():
+                sync_cfg = utils.get_firebase_backup_sync_settings() or {}
+                mode = str(sync_cfg.get('mode') or 'login_logout').strip().lower()
+                interval_secs = int(sync_cfg.get('schedule_seconds') or 60)
+                if interval_secs < 10:
+                    interval_secs = 10
+                if mode != 'scheduled':
+                    time.sleep(30)
+                    continue
+
+                groups = Group.query.all() or []
+                now_ts = time.time()
+                for grp in groups:
+                    try:
+                        group_name = str(getattr(grp, 'name', '') or '').strip()
+                        group_folder = str(getattr(grp, 'data_folder', '') or '').strip()
+                        if not group_name or not group_folder:
+                            continue
+
+                        prev = float(_firebase_backup_last_run.get(group_name) or 0)
+                        if prev and (now_ts - prev) < interval_secs:
+                            continue
+
+                        log.info('Scheduled Firebase backup sync start for group=%s (interval=%ss)', group_name, interval_secs)
+                        # Keep local payload ready, then reconcile based on which side is newer.
+                        try:
+                            firebase_config.ensure_group_data_local(group_folder, create_empty_dirs=True)
+                        except Exception:
+                            log.exception('Scheduled bootstrap check failed for group=%s', group_name)
+
+                        sync_result = True
+                        try:
+                            freshness = firebase_config.compare_group_payload_freshness(
+                                group_name,
+                                local_group_folder=group_folder,
+                                local_data_root=os.path.join(os.getcwd(), 'data')
+                            )
+                            action = str(freshness.get('action') or 'unknown')
+                            reason = str(freshness.get('reason') or '')
+
+                            if action == 'pull':
+                                log.info('Scheduled Firebase reconcile chose PULL for group=%s reason=%s', group_name, reason)
+                                sync_result = bool(firebase_config.firebase_pull_group_to_local(
+                                    group_name,
+                                    local_data_root=os.path.join(os.getcwd(), 'data'),
+                                    force=True,
+                                    local_group_folder=group_folder
+                                ))
+                            elif action == 'push':
+                                log.info('Scheduled Firebase reconcile chose PUSH for group=%s reason=%s', group_name, reason)
+                                sync_result = bool(firebase_config.firebase_push_group_files(
+                                    group_name,
+                                    local_data_root=os.path.join(os.getcwd(), 'data'),
+                                    dry_run=False,
+                                    verbose=False,
+                                    force=True,
+                                    local_group_folder=group_folder
+                                ))
+                            else:
+                                log.info('Scheduled Firebase reconcile chose incremental PUSH for group=%s reason=%s', group_name, reason)
+                                sync_result = bool(firebase_config.firebase_push_group_files(
+                                    group_name,
+                                    local_data_root=os.path.join(os.getcwd(), 'data'),
+                                    dry_run=False,
+                                    verbose=False,
+                                    force=False,
+                                    local_group_folder=group_folder
+                                ))
+                        except Exception:
+                            log.exception('Scheduled freshness reconcile failed for group=%s', group_name)
+                            sync_result = False
+
+                        _firebase_backup_last_run[group_name] = time.time()
+                        log.info('Scheduled Firebase backup sync done for group=%s sync_ok=%s', group_name, sync_result)
+                    except Exception:
+                        log.exception('Scheduled Firebase backup sync failed for group=%s', getattr(grp, 'name', None))
+        except Exception:
+            log.exception('Firebase backup scheduler loop error')
+        time.sleep(30)
+
+
+def _start_firebase_backup_scheduler_once():
+    global _firebase_backup_scheduler_started
+    with _firebase_backup_scheduler_lock:
+        if _firebase_backup_scheduler_started:
+            return
+        t = threading.Thread(target=_firebase_backup_scheduler_loop, daemon=True, name='firebase-backup-scheduler')
+        t.start()
+        _firebase_backup_scheduler_started = True
+        log.info('Firebase backup scheduler thread started')
+
+
+try:
+    _is_reloader_main = (os.environ.get('WERKZEUG_RUN_MAIN') == 'true')
+    _debug_mode = bool(app.debug or os.getenv('FLASK_DEBUG', '0') == '1')
+    if (not _debug_mode) or _is_reloader_main:
+        _start_firebase_backup_scheduler_once()
+except Exception:
+    log.exception('Failed to start firebase backup scheduler thread')
 
 
 if __name__ == "__main__":

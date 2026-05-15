@@ -3,14 +3,143 @@ from werkzeug.utils import secure_filename
 import os
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 import firebase_config
-from models import db, User, Group
+from models import db, User, Group, UserGroup
 import datetime
+import threading
+import time
 from firebase_auth_handlers import FirebaseAuthHandler
 import email_utils
 import secrets
 import utils
 
 auth_bp = Blueprint('auth', __name__)
+
+_GROUP_WARMUP_LOCK = threading.Lock()
+_GROUP_WARMUP_LAST_TS = {}
+_GROUP_WARMUP_COOLDOWN_SECONDS = 30.0
+_TIMEOUT_PUSH_LOCK = threading.Lock()
+_TIMEOUT_PUSH_RUNNING_GROUPS = set()
+
+
+def _schedule_group_folder_warmup(data_folder: str, reason: str = '') -> bool:
+    """Warm group folder state in background without blocking request latency."""
+    folder = (data_folder or '').strip()
+    if not folder:
+        return False
+
+    now = time.monotonic()
+    with _GROUP_WARMUP_LOCK:
+        last_ts = float(_GROUP_WARMUP_LAST_TS.get(folder, 0.0) or 0.0)
+        if (now - last_ts) < _GROUP_WARMUP_COOLDOWN_SECONDS:
+            return False
+        _GROUP_WARMUP_LAST_TS[folder] = now
+
+    app_logger = current_app.logger._get_current_object()
+
+    def _worker(target_folder: str, target_reason: str):
+        try:
+            import firebase_config
+            ok = firebase_config.ensure_group_data_local(target_folder)
+            try:
+                app_logger.info(
+                    "Group warmup finished folder=%s ok=%s reason=%s",
+                    target_folder,
+                    ok,
+                    target_reason,
+                )
+            except Exception:
+                pass
+        except Exception as exc:
+            try:
+                app_logger.warning(
+                    "Group warmup failed folder=%s reason=%s error=%s",
+                    target_folder,
+                    target_reason,
+                    exc,
+                )
+            except Exception:
+                pass
+
+    th = threading.Thread(target=_worker, args=(folder, reason or ''), daemon=True)
+    th.start()
+    return True
+
+
+def _other_group_users_are_active(group_name: str, exclude_user_id: int, active_window_seconds: int = 45) -> bool:
+    """Return True when another user in the same group appears actively moving now."""
+    try:
+        if not group_name:
+            return False
+        now = datetime.datetime.utcnow()
+        rows = (
+            db.session.query(User.last_active_at)
+            .join(UserGroup, UserGroup.user_id == User.id)
+            .join(Group, Group.id == UserGroup.group_id)
+            .filter(Group.name == group_name)
+            .filter(User.id != int(exclude_user_id or 0))
+            .filter(User.current_session_id.isnot(None))
+            .all()
+        )
+        for (last_active_at,) in rows:
+            if not last_active_at:
+                continue
+            try:
+                if (now - last_active_at).total_seconds() <= int(active_window_seconds):
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        try:
+            current_app.logger.exception('Failed checking active users for timeout push gate')
+        except Exception:
+            pass
+    return False
+
+
+def _schedule_timeout_push_for_group(group_name: str, exclude_user_id: int) -> bool:
+    """Background push on inactivity timeout; waits until no other active group user is moving."""
+    group = (group_name or '').strip()
+    if not group:
+        return False
+
+    with _TIMEOUT_PUSH_LOCK:
+        if group in _TIMEOUT_PUSH_RUNNING_GROUPS:
+            return False
+        _TIMEOUT_PUSH_RUNNING_GROUPS.add(group)
+
+    app_obj = current_app._get_current_object()
+
+    def _worker(target_group: str, target_user_id: int):
+        try:
+            with app_obj.app_context():
+                # Wait up to 20 minutes for other active group users to stop moving.
+                deadline = time.time() + (20 * 60)
+                while time.time() < deadline:
+                    if not _other_group_users_are_active(target_group, target_user_id, active_window_seconds=45):
+                        try:
+                            ok = firebase_config.firebase_push_group_files(target_group, dry_run=False, verbose=False)
+                            app_obj.logger.info(
+                                'Timeout background push completed group=%s ok=%s user_id=%s',
+                                target_group,
+                                bool(ok),
+                                target_user_id,
+                            )
+                        except Exception:
+                            app_obj.logger.exception('Timeout background push failed for group=%s', target_group)
+                        return
+                    time.sleep(20)
+
+                app_obj.logger.info(
+                    'Timeout background push skipped after wait window (group still active): %s',
+                    target_group,
+                )
+        finally:
+            with _TIMEOUT_PUSH_LOCK:
+                _TIMEOUT_PUSH_RUNNING_GROUPS.discard(target_group)
+
+    th = threading.Thread(target=_worker, args=(group, int(exclude_user_id or 0)), daemon=True)
+    th.start()
+    return True
 
 login_manager = LoginManager()
 login_manager.login_view = 'auth.login'
@@ -261,11 +390,13 @@ def login():
             if len(user_groups) == 1:
                 session['active_group'] = user_groups[0].name
                 flash('Συνδεθήκατε επιτυχώς', 'success')
-                # Start a pull sync with progress modal
-                try:
-                    return redirect(url_for('firebase_auth.sync_start_pull', group=session.get('active_group')))
-                except Exception:
-                    return redirect(url_for('home'))
+                # Optional pull sync on login (admin-toggleable policy)
+                if utils.firebase_sync_login_logout_enabled():
+                    try:
+                        return redirect(url_for('firebase_auth.sync_start_pull', group=session.get('active_group')))
+                    except Exception:
+                        return redirect(url_for('home'))
+                return redirect(url_for('home'))
             else:
                 if user_groups:
                     flash('Επίλεξε ενεργή ομάδα για να συνεχίσεις.', 'info')
@@ -274,25 +405,37 @@ def login():
                 return redirect(url_for('auth.list_groups'))
 
         flash('Συνδεθήκατε επιτυχώς', 'success')
-        # If there's an active group, start pull sync page to show progress
+        # If there's an active group, optionally start pull sync page
         if session.get('active_group'):
-            try:
-                return redirect(url_for('firebase_auth.sync_start_pull', group=session.get('active_group')))
-            except Exception:
-                pass
+            if utils.firebase_sync_login_logout_enabled():
+                try:
+                    return redirect(url_for('firebase_auth.sync_start_pull', group=session.get('active_group')))
+                except Exception:
+                    pass
         return redirect(request.args.get('next') or url_for('home'))
 
-    # GET -> render login form
-    return render_template('auth/login.html')
+    # GET -> if already authenticated, redirect away from login page
+    try:
+        from flask_login import current_user as _cu
+        if getattr(_cu, 'is_authenticated', False):
+            return redirect(url_for('home'))
+    except Exception:
+        pass
+
+    session_expired = request.args.get('session_expired') in ('true', '1', 'True')
+    session_conflict = request.args.get('session_conflict') in ('true', '1', 'True')
+    return render_template('auth/login.html',
+                           session_expired=session_expired,
+                           session_conflict=session_conflict)
 
 
 @auth_bp.route('/logout')
 @login_required
 def logout():
-    # Instead of blocking logout by syncing here, redirect to a push-sync page
+    # Optional push sync on logout (admin-toggleable policy)
     try:
         active_group_name = session.get('active_group')
-        if active_group_name:
+        if active_group_name and utils.firebase_sync_login_logout_enabled():
             return redirect(url_for('firebase_auth.sync_start_push', group=active_group_name))
     except Exception:
         current_app.logger.exception('Failed to initiate sync-on-logout')
@@ -1068,31 +1211,46 @@ def select_group():
         flash('Δεν έχετε πρόσβαση στην ομάδα.', 'error')
         return redirect(url_for('auth.list_groups')), 403
 
-    # Set active group
+    # Set active group and force explicit customer selection for this group.
     session['active_group'] = grp.name
+    session.pop('active_credential', None)
+    session.pop('_remote_qr_owner', None)
     current_app.logger.info(f'Ο χρήστης {current_user.username} επέλεξε την ομάδα {group_name}')
-    
-    # Automatically download group data from Firebase (lazy-pull)
-    # This ensures files are available locally when user selects the group
+
+    # Cold-start guard: when credentials file is missing, hydrate group data now
+    # (best-effort) to reduce empty credentials on first redirect.
     try:
-        import firebase_config
-        if getattr(grp, 'data_folder', None):
-            current_app.logger.info(f'Κατέβασε αρχεία για την ομάδα {group_name} από το Firebase...')
-            success = firebase_config.ensure_group_data_local(grp.data_folder)
-            if success:
-                current_app.logger.info(f'Τα αρχεία της ομάδας {group_name} κατεβάστηκαν επιτυχώς')
-            else:
-                current_app.logger.warning(f'Αποτυχία κατέβασμα αρχείων για την ομάδα {group_name}')
+        data_folder = getattr(grp, 'data_folder', None)
+        if data_folder:
+            folder_path = os.path.join(current_app.root_path, 'data', data_folder)
+            creds_path = os.path.join(folder_path, 'credentials.json')
+            if not os.path.exists(creds_path):
+                current_app.logger.info('Group %s has no local credentials.json yet; running immediate ensure_group_data_local.', data_folder)
+                firebase_config.ensure_group_data_local(data_folder)
     except Exception as e:
-        # Log but don't fail - download is non-critical
-        current_app.logger.warning(f"Download failed when selecting group {group_name}: {e}")
+        current_app.logger.warning('Immediate group hydration failed for %s: %s', group_name, e)
+    
+    # Warmup the local group folder asynchronously to keep selection fast.
+    try:
+        data_folder = getattr(grp, 'data_folder', None)
+        if data_folder:
+            scheduled = _schedule_group_folder_warmup(data_folder, reason='select_group')
+            if scheduled:
+                current_app.logger.info('Scheduled async group warmup for %s (%s)', group_name, data_folder)
+    except Exception as e:
+        current_app.logger.warning(f"Async group warmup scheduling failed for {group_name}: {e}")
     
     # Return JSON for AJAX requests, redirect for form submissions
     if request.is_json:
-        return jsonify({'ok': True, 'message': f'Επιλέχθηκε η ομάδα: {grp.name}', 'data_folder': getattr(grp, 'data_folder', None)}), 200
+        return jsonify({
+            'ok': True,
+            'message': f'Επιλέχθηκε η ομάδα: {grp.name}. Επίλεξε πελάτη για να συνεχίσεις.',
+            'data_folder': getattr(grp, 'data_folder', None),
+            'redirect_url': url_for('credentials')
+        }), 200
     else:
-        flash(f'Επιλέχθηκε η ομάδα: {grp.name}', 'info')
-        return redirect(url_for('auth.list_groups'))
+        flash(f'Επιλέχθηκε η ομάδα: {grp.name}. Επίλεξε πελάτη για να συνεχίσεις.', 'info')
+        return redirect(url_for('credentials'))
 
 
 # --- JSON API endpoints for frontend-driven login/logout/status ---
@@ -1156,6 +1314,19 @@ def api_logout():
         pass
 
     reason = reason or 'manual'
+
+    # In inactivity timeout, trigger sync-on-logout policy in background.
+    # If another user in the same group is currently active, defer until they finish moving.
+    try:
+        if reason == 'inactivity' and getattr(current_user, 'is_authenticated', False):
+            active_group_name = str(session.get('active_group') or '').strip()
+            if active_group_name and utils.firebase_sync_login_logout_enabled():
+                _schedule_timeout_push_for_group(active_group_name, getattr(current_user, 'id', 0))
+    except Exception:
+        try:
+            current_app.logger.exception('Failed scheduling timeout background push')
+        except Exception:
+            pass
 
     # Log logout activity if user is authenticated
     try:

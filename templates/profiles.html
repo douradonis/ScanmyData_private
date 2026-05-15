@@ -329,12 +329,31 @@ if (typeof window !== 'undefined') {
 
   function escapeHtml(unsafe){ return String(unsafe).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#039;'); }
   function showBanner(message, kind='success', ttl=6000) {
-    const container=document.getElementById('flashBanners'); if(!container) return;
-    let cls='flash-success'; if(kind==='error'||kind==='danger') cls='flash-error'; else if(kind==='info') cls='flash-info';
-    const el=document.createElement('div'); el.className='flash-banner '+cls; el.innerHTML=`<div class="flash-text">${escapeHtml(String(message))}</div>`;
-    const btn=document.createElement('button'); btn.className='flash-close'; btn.type='button'; btn.innerHTML='&times;'; btn.addEventListener('click',()=>{el.remove();});
-    el.appendChild(btn); container.insertBefore(el, container.firstChild);
-    if(ttl>0) setTimeout(()=>{try{el.remove();}catch(e){}},ttl);
+    try {
+      const mappedKind = (kind === 'danger') ? 'error' : String(kind || 'info');
+      if (typeof window.showFlash === 'function') {
+        window.showFlash(String(message || ''), mappedKind, Number(ttl) || 0);
+        return;
+      }
+    } catch(_) {}
+
+    const container = document.getElementById('flashBanners');
+    if (!container) return;
+    let cls = 'flash-success';
+    if (kind === 'error' || kind === 'danger') cls = 'flash-error';
+    else if (kind === 'warning') cls = 'flash-warning';
+    else if (kind === 'info') cls = 'flash-info';
+    const el = document.createElement('div');
+    el.className = 'flash-banner ' + cls;
+    el.innerHTML = `<div class="flash-text">${escapeHtml(String(message))}</div>`;
+    const btn = document.createElement('button');
+    btn.className = 'flash-close';
+    btn.type = 'button';
+    btn.innerHTML = '&times;';
+    btn.addEventListener('click', () => { el.remove(); });
+    el.appendChild(btn);
+    container.insertBefore(el, container.firstChild);
+    if (ttl > 0) setTimeout(() => { try { el.remove(); } catch(e) {} }, ttl);
   }
   function opt(x){
     const o=document.createElement('option');

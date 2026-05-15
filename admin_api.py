@@ -1418,9 +1418,9 @@ def api_email_config():
     if request.method == 'GET':
         try:
             import email_utils
-            from app import load_settings
+            from app import load_admin_settings
             
-            settings = load_settings()
+            settings = load_admin_settings()
             current_provider = email_utils.get_email_provider()
             
             # Check configuration status for different providers
@@ -1554,7 +1554,7 @@ def api_resend_inbound_webhook():
     try:
         import email_utils
 
-        signing_secret = (email_utils.RESEND_WEBHOOK_SIGNING_SECRET or os.getenv('RESEND_WEBHOOK_SIGNING_SECRET') or '').strip()
+        signing_secret = (getattr(email_utils, 'RESEND_WEBHOOK_SIGNING_SECRET', None) or os.getenv('RESEND_WEBHOOK_SIGNING_SECRET') or '').strip()
         if not signing_secret:
             return jsonify({'success': False, 'error': 'RESEND_WEBHOOK_SIGNING_SECRET is not configured'}), 503
 

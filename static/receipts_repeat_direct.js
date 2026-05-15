@@ -1,5 +1,6 @@
 /* receipts_repeat_direct.js — Bypass summary modal for receipts when repeat is ON */
 (function(){
+  if (window.__RC_USE_CANONICAL_RECEIPT_AUTOCONFIRM === true) return;
   if (window.__rc_direct_bypass__) return;
   window.__rc_direct_bypass__ = true;
 
@@ -114,9 +115,6 @@
       if (typeof isReceiptModeAnalysisStrict === 'function' && isReceiptModeAnalysisStrict()) return true;
     } catch(_) {}
     try {
-      if (typeof isReceipts === 'function' && typeof isRepeat === 'function' && isReceipts() && isRepeat()) return true;
-    } catch(_) {}
-    try {
       var mode = receiptMode();
       if (mode === 'analysis') return true;
     } catch(_) {}
@@ -214,6 +212,14 @@
       }
     }catch(_){ }
     return false;
+  }
+
+  // Β κατηγορία: δεν έχει G_CATEGORY_DATA.mtype_options (το MTYPE είναι μόνο για Γ κατηγορία)
+  function isGCategoryCustomer(){
+    try {
+      var g = window.G_CATEGORY_DATA;
+      return !!(g && g.mtype_options && g.mtype_options.length > 0);
+    } catch(_) { return false; }
   }
 
   function detectActiveVat(){
@@ -462,20 +468,57 @@
     if (dedupeKey) ssDel(dedupeKey);
     try{
       var successMsg = 'Αποθηκεύτηκε η απόδειξη (repeat).';
-      if (window.showFlash) window.showFlash(successMsg, 'success', 4200);
       if (window.persistReceiptFlash) window.persistReceiptFlash(successMsg, 'success');
-    }catch(_){ }
-    try{
+
+      try { window.__RC_CLEAR_MARK_AFTER_SAVE = true; } catch(_){}
+      try {
+        if (typeof window.clearSearchInputs === 'function') window.clearSearchInputs();
+      } catch(_){}
+      try {
+        if (typeof window.clearReceiptSearchCacheOnClose === 'function') window.clearReceiptSearchCacheOnClose();
+      } catch(_){}
+
       var urlInput = $id('scrapeUrlInput');
-      if (urlInput) urlInput.value = '';
+      if (urlInput) {
+        urlInput.value = '';
+        try { urlInput.dispatchEvent(new Event('input', { bubbles: true })); } catch(_){}
+      }
       var markInput = $id('markInput');
-      if (markInput) markInput.value = '';
+      if (markInput) {
+        markInput.value = '';
+        try { markInput.dispatchEvent(new Event('input', { bubbles: true })); } catch(_){}
+      }
+
       var modal = $id('summaryModal');
       if (modal) modal.style.display = 'none';
+
+      var reloaded = false;
       if (typeof window.partiallyReloadInvoiceTable === 'function') {
-        Promise.resolve(window.partiallyReloadInvoiceTable()).catch(function(){});
+        try { reloaded = !!(await window.partiallyReloadInvoiceTable()); } catch(_) { reloaded = false; }
+      }
+      if (!reloaded) {
+        try {
+          var tableRes = await fetch('/list/fragment', { method: 'GET', credentials: 'same-origin' });
+          if (tableRes.ok) {
+            var data = await tableRes.json().catch(function(){ return null; });
+            var container = document.getElementById('summary-container');
+            if (data && data.ok && data.table_html && container) {
+              container.innerHTML = data.table_html;
+              if (typeof window.FBP_INIT_TABULATOR === 'function') window.FBP_INIT_TABULATOR();
+              else if (typeof window.FBP_INIT_TABLE === 'function') window.FBP_INIT_TABLE();
+              reloaded = true;
+            }
+          }
+        } catch(_){}
+      }
+
+      if (window.showFlash) {
+        if (reloaded) window.showFlash(successMsg, 'success', 4200);
+        else window.showFlash('Η αποθήκευση ολοκληρώθηκε, αλλά δεν έγινε ανανέωση πίνακα. Πάτησε αναζήτηση ή ανανέωση λίστας.', 'warning', 4500);
       }
     }catch(_){ }
+    // Απελευθέρωσε τη φρουρά Β κατηγορίας
+    try { window.__RC_B_CAT_AUTOSAVE_IN_PROGRESS = false; } catch(_) {}
   }
   var trying=false;
   async function tryDirect(){
@@ -546,12 +589,23 @@
       console.warn('receipt analysis apply failed', errApply);
     }
 
+    // Για Β κατηγορία: ενημέρωσε το summaryJsonInput με τον χαρακτηρισμό από το αποθηκευμένο προφίλ
+    // ώστε το summary modal να τον εμφανίζει σωστά.
+    if (!isGCategoryCustomer()) {
+      var _bCatInp = $id('summaryJsonInput');
+      if (_bCatInp) {
+        _bCatInp.value = JSON.stringify(s);
+        try { if (window.RC_forcePopulateSummaryModal) window.RC_forcePopulateSummaryModal(); } catch(_) {}
+      }
+    }
+
     analysisActive = isAnalysisMode() || isReceiptAnalysisContext(s);
     if(!summaryHasCompleteCategories(s)){
       abortAttempt();
       return;
     }
-    if(analysisActive){
+    // Ο έλεγχος MTYPE ισχύει ΜΟΝΟ για Γ κατηγορία — η Β κατηγορία δεν χρησιμοποιεί MTYPE
+    if(analysisActive && isGCategoryCustomer()){
       var activeMtype = String(s.mtype || s.receipt_mtype || '').trim();
       if(!activeMtype){
         abortAttempt();
@@ -563,11 +617,15 @@
       return;
     }
 
+    // Για Β κατηγορία: σήκωσε φρουρά ώστε το repeat_flow_guard.js να μην στείλει δεύτερη αίτηση
+    if (!isGCategoryCustomer()) window.__RC_B_CAT_AUTOSAVE_IN_PROGRESS = true;
+
     try {
       await submitViaConfirmApi(s);
       await afterSubmit(mark, k);
       return;
     } catch(err){
+      try { window.__RC_B_CAT_AUTOSAVE_IN_PROGRESS = false; } catch(_) {}
       var errMsg = String((err && err.message) || '').toLowerCase();
       if (errMsg.indexOf('reclassification_required') !== -1 || errMsg.indexOf('already') !== -1 || errMsg.indexOf('υπάρ') !== -1 || errMsg.indexOf('exist') !== -1) {
         trying = false;
@@ -580,6 +638,7 @@
         setTimeout(function(){
           trying=false;
           ssDel(k);
+          try { window.__RC_B_CAT_AUTOSAVE_IN_PROGRESS = false; } catch(_) {}
         }, 2500);
         return;
       }
@@ -590,6 +649,7 @@
       } catch(err2){
         trying=false;
         ssDel(k);
+        try { window.__RC_B_CAT_AUTOSAVE_IN_PROGRESS = false; } catch(_) {}
         try{
           var msg = (err2 && err2.message) ? err2.message : ((err && err.message) ? err.message : 'server');
           var errMsg = 'Σφάλμα αποθήκευσης: ' + msg;

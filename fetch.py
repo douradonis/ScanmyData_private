@@ -82,13 +82,53 @@ def format_decimal_comma(value) -> str:
     except Exception:
         return str(value).strip()
 
+
+def _extract_pagination_cursors(root):
+    """Return pagination cursors from an AADE XML response.
+
+    Prefer the documented RequestDocs cursor pair (nextPartitionKey/nextRowKey),
+    but also support legacy/non-documented nextPartitionToken responses that some
+    environments appear to return.
+    """
+    cursors = {
+        "nextPartitionKey": "",
+        "nextRowKey": "",
+        "nextPartitionToken": "",
+    }
+    for elem in root.iter():
+        tag = elem.tag
+        lname = tag.split("}", 1)[-1] if "}" in tag else tag
+        text = _safe_strip(elem.text)
+        if not text:
+            continue
+        if lname in cursors and not cursors[lname]:
+            cursors[lname] = text
+    return cursors
+
+
+def _doc_signature(row: dict) -> tuple:
+    return (
+        _safe_strip(row.get("mark")),
+        _safe_strip(row.get("issueDate")),
+        _safe_strip(row.get("series")),
+        _safe_strip(row.get("aa")),
+        _safe_strip(row.get("type")),
+        _safe_strip(row.get("vatCategory")),
+        str(row.get("totalNetValue")),
+        str(row.get("totalVatAmount")),
+        str(row.get("totalValue")),
+    )
+
 def _fetch_request_docs(mark: str, date_from: str, date_to: str, aade_user: str, aade_key: str, debug: bool = False) -> Tuple[List[dict], set]:
     """Fetch RequestDocs and return rows with transmitted marks."""
     URL_REQUEST_DOCS = "https://mydatapi.aade.gr/myDATA/RequestDocs"
     headers = {"aade-user-id": aade_user, "Ocp-Apim-Subscription-Key": aade_key}
     all_rows = []
-    params_docs = {"mark": mark, "dateFrom": date_from, "dateTo": date_to}
+    seen_signatures = set()
+    current_mark = _safe_strip(mark) or "0"
+    params_docs = {"mark": current_mark, "dateFrom": date_from, "dateTo": date_to}
     ns = {'ns': 'http://www.aade.gr/myDATA/invoice/v1.0'}
+    resume_guard_marks = set()
 
     while True:
         resp = requests.get(URL_REQUEST_DOCS, params=params_docs, headers=headers)
@@ -97,6 +137,8 @@ def _fetch_request_docs(mark: str, date_from: str, date_to: str, aade_user: str,
             raise RuntimeError(f"RequestDocs HTTP {resp.status_code}: {(resp.text or '')[:1000]}")
 
         root = ET.fromstring(resp.content)
+        page_rows = []
+        page_max_mark = current_mark
         for invoice in root.findall(".//ns:invoice", ns):
             mark_val = _safe_strip(invoice.findtext("ns:mark", default="", namespaces=ns))
             header = invoice.find("ns:invoiceHeader", ns)
@@ -162,14 +204,60 @@ def _fetch_request_docs(mark: str, date_from: str, date_to: str, aade_user: str,
                     "Name_issuer": Name_issuer,
                     "paymentMethodType": payment_method_type
                 }
-                all_rows.append(row)
+                sig = _doc_signature(row)
+                if sig not in seen_signatures:
+                    seen_signatures.add(sig)
+                    all_rows.append(row)
+                    page_rows.append(row)
+                if mark_val and (not page_max_mark or str(mark_val).isdigit() and int(mark_val) > int(page_max_mark or 0)):
+                    page_max_mark = mark_val
 
-        next_token_elem = root.find(".//ns:nextPartitionToken", ns)
-        if next_token_elem is not None and next_token_elem.text:
-            params_docs["nextPartitionToken"] = next_token_elem.text
+        cursors = _extract_pagination_cursors(root)
+        next_partition_key = cursors.get("nextPartitionKey") or ""
+        next_row_key = cursors.get("nextRowKey") or ""
+        next_partition_token = cursors.get("nextPartitionToken") or ""
+
+        if next_partition_key or next_row_key:
+            params_docs.pop("nextPartitionToken", None)
+            if next_partition_key:
+                params_docs["nextPartitionKey"] = next_partition_key
+            else:
+                params_docs.pop("nextPartitionKey", None)
+            if next_row_key:
+                params_docs["nextRowKey"] = next_row_key
+            else:
+                params_docs.pop("nextRowKey", None)
+            if debug:
+                print("[RequestDocs] nextPartitionKey:", params_docs.get("nextPartitionKey", ""))
+                print("[RequestDocs] nextRowKey:", params_docs.get("nextRowKey", ""))
+            continue
+
+        if next_partition_token:
+            params_docs.pop("nextPartitionKey", None)
+            params_docs.pop("nextRowKey", None)
+            params_docs["nextPartitionToken"] = next_partition_token
             if debug: print("[RequestDocs] NextPartitionToken:", params_docs["nextPartitionToken"])
-        else:
-            break
+            continue
+
+        # AADE fallback: sometimes pagination cursors are omitted even though more
+        # rows exist. Re-run the same date window using the highest MARK we saw as
+        # the new lower-bound cursor.
+        page_count = len(page_rows)
+        can_resume_from_mark = (
+            page_count > 0
+            and page_max_mark
+            and page_max_mark != current_mark
+            and page_max_mark not in resume_guard_marks
+        )
+        if can_resume_from_mark:
+            resume_guard_marks.add(page_max_mark)
+            current_mark = page_max_mark
+            params_docs = {"mark": current_mark, "dateFrom": date_from, "dateTo": date_to}
+            if debug:
+                print("[RequestDocs] Fallback resume from MARK:", current_mark, "page rows:", page_count)
+            continue
+
+        break
 
     return all_rows
 
